@@ -43,11 +43,15 @@ echo ""
 # ─── Uninstall ─────────────────────────────────────────
 
 if [ "$UNINSTALL" = "1" ]; then
-  # Restore original claude if backup exists
-  if [ -e "$BIN_DIR/claude.orig" ]; then
-    mv "$BIN_DIR/claude.orig" "$BIN_DIR/claude"
-    info "Original claude restored"
-  fi
+  # Restore original claude — check both actual path and default path
+  CLAUDE_BIN=$(which claude 2>/dev/null)
+  for DIR in "${CLAUDE_BIN:+$(dirname "$CLAUDE_BIN")}" "$BIN_DIR"; do
+    [ -z "$DIR" ] && continue
+    if [ -e "$DIR/claude.orig" ]; then
+      mv "$DIR/claude.orig" "$DIR/claude"
+      info "Original claude restored ($DIR/claude)"
+    fi
+  done
   rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/patch.js"
   info "ClawGod uninstalled"
   echo ""
@@ -445,46 +449,60 @@ fi
 LAUNCHER_CONTENT="#!/bin/bash
 exec node \"$CLAWGOD_DIR/cli.js\" \"\$@\""
 
+# Detect where claude is actually installed (supports native, npm, pnpm, yarn)
+CLAUDE_BIN=$(which claude 2>/dev/null)
+if [ -z "$CLAUDE_BIN" ]; then
+  # No claude in PATH — use default location
+  CLAUDE_BIN="$BIN_DIR/claude"
+  dim "No existing claude found, installing to $BIN_DIR"
+fi
+CLAUDE_DIR=$(dirname "$CLAUDE_BIN")
+
 # Back up original claude (only once)
-CLAUDE_BIN="$BIN_DIR/claude"
 if [ ! -e "$CLAUDE_BIN.orig" ]; then
-  # Find the actual native binary (symlink target or Mach-O in versions dir)
-  NATIVE_BIN=""
   if [ -L "$CLAUDE_BIN" ]; then
+    # Symlink (native install) — preserve target
     NATIVE_BIN="$(readlink "$CLAUDE_BIN")"
-  elif file "$CLAUDE_BIN" 2>/dev/null | grep -q "Mach-O\|ELF"; then
-    NATIVE_BIN="$CLAUDE_BIN"
+    ln -sf "$NATIVE_BIN" "$CLAUDE_BIN.orig"
+    info "Original claude backed up → claude.orig (→ $NATIVE_BIN)"
+  elif [ -f "$CLAUDE_BIN" ] && file "$CLAUDE_BIN" 2>/dev/null | grep -q "Mach-O\|ELF\|script"; then
+    # Binary or script (pnpm/npm global install)
+    cp "$CLAUDE_BIN" "$CLAUDE_BIN.orig"
+    info "Original claude backed up → claude.orig"
   else
-    # Already replaced by us or doesn't exist — find latest native binary
+    # Try versions dir as fallback
     VERSIONS_DIR="$HOME/.local/share/claude/versions"
     if [ -d "$VERSIONS_DIR" ]; then
       NATIVE_BIN="$(ls -t "$VERSIONS_DIR"/* 2>/dev/null | while read f; do
         file "$f" 2>/dev/null | grep -q "Mach-O\|ELF" && echo "$f" && break
-      done)"
+      done)" || true
+      if [ -n "$NATIVE_BIN" ]; then
+        ln -sf "$NATIVE_BIN" "$CLAUDE_BIN.orig"
+        info "Original claude backed up → claude.orig (→ $NATIVE_BIN)"
+      fi
     fi
-  fi
-
-  if [ -n "$NATIVE_BIN" ] && [ -e "$NATIVE_BIN" ]; then
-    ln -sf "$NATIVE_BIN" "$CLAUDE_BIN.orig"
-    info "Original claude backed up → claude.orig (→ $NATIVE_BIN)"
-  else
-    dim "No native claude binary found to back up"
   fi
 fi
 
-# Install as 'claude'
-for CMD in claude; do
-  echo "$LAUNCHER_CONTENT" > "$BIN_DIR/$CMD"
-  chmod +x "$BIN_DIR/$CMD"
-done
-info "Command 'claude' → patched"
+# Write launcher to the SAME directory where claude was found
+mkdir -p "$CLAUDE_DIR"
+echo "$LAUNCHER_CONTENT" > "$CLAUDE_BIN"
+chmod +x "$CLAUDE_BIN"
+info "Command 'claude' → patched ($CLAUDE_BIN)"
+
+# Also install to ~/.local/bin if claude was elsewhere (ensures PATH consistency)
+if [ "$CLAUDE_DIR" != "$BIN_DIR" ]; then
+  mkdir -p "$BIN_DIR"
+  echo "$LAUNCHER_CONTENT" > "$BIN_DIR/claude"
+  chmod +x "$BIN_DIR/claude"
+  dim "Also installed to $BIN_DIR/claude"
+fi
 
 # ─── Check PATH ───────────────────────────────────────
 
-if ! echo "$PATH" | grep -q "$BIN_DIR"; then
+if ! echo "$PATH" | grep -q "$CLAUDE_DIR" && ! echo "$PATH" | grep -q "$BIN_DIR"; then
   echo ""
-  warn "$BIN_DIR is not in PATH. Add it:"
-  dim "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+  warn "Neither $CLAUDE_DIR nor $BIN_DIR is in PATH"
 fi
 
 # ─── Flush shell cache ────────────────────────────────
