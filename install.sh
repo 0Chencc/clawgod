@@ -50,6 +50,13 @@ if [ "$UNINSTALL" = "1" ]; then
       # Has backup — restore it
       mv "$DIR/claude.orig" "$DIR/claude"
       info "Original claude restored ($DIR/claude)"
+    # FIX: also restore the versioned binary if we backed it up
+    RESTORED_LINK="$(readlink "$DIR/claude" 2>/dev/null || true)"
+    if [ -n "$RESTORED_LINK" ] && [ -f "${RESTORED_LINK}.clawgod-bak" ]; then
+      cp "${RESTORED_LINK}.clawgod-bak" "$RESTORED_LINK"
+      rm -f "${RESTORED_LINK}.clawgod-bak"
+      info "Versioned binary restored ($RESTORED_LINK)"
+    fi
     elif [ -f "$DIR/claude" ] && head -1 "$DIR/claude" 2>/dev/null | grep -q "clawgod"; then
       # Our launcher, no backup — remove it (otherwise it points to deleted cli.js)
       rm -f "$DIR/claude"
@@ -493,6 +500,18 @@ fi
 
 # Write launcher to the SAME directory where claude was found
 mkdir -p "$CLAUDE_DIR"
+  # FIX: if  is a symlink, resolve and back up the target binary,
+  # then remove the symlink so we write a new file instead of following it
+  if [ -L "$CLAUDE_BIN" ]; then
+    REAL_BIN="$(realpath "$CLAUDE_BIN")"
+    # Back up the real versioned binary before we touch anything
+    if [ -f "$REAL_BIN" ] && ! file "$REAL_BIN" 2>/dev/null | grep -q "shell script"; then
+      cp "$REAL_BIN" "${REAL_BIN}.clawgod-bak"
+      info "Versioned binary backed up → ${REAL_BIN}.clawgod-bak"
+    fi
+    # Remove the symlink so the next write creates a regular file
+    rm -f "$CLAUDE_BIN"
+  fi
 echo "$LAUNCHER_CONTENT" > "$CLAUDE_BIN"
 chmod +x "$CLAUDE_BIN"
 info "Command 'claude' → patched ($CLAUDE_BIN)"
