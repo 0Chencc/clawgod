@@ -126,14 +126,63 @@ catch {
 New-Item -ItemType Directory -Force -Path $ClawDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir  | Out-Null
 
+# Helper: Write UTF-8 without BOM (PowerShell 5.1 Set-Content adds BOM by default)
+function Write-TextFile($Path, $Content) {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
 $NativeBin = $null
+
+# 1. Try npm package installation
+# npm package structure:
+#   - Main package: @anthropic-ai/claude-code (has bin/claude.exe placeholder, replaced by postinstall)
+#   - Platform packages: @anthropic-ai/claude-code-win32-{x64,arm64} (binary in root as claude.exe)
+# After postinstall, the native binary is at: @anthropic-ai/claude-code/bin/claude.exe
+if (-not $NativeBin) {
+    $npmRoot = $null
+    try { $npmRoot = npm root -g 2>$null } catch {}
+    # Check global installation (postinstall already ran)
+    if ($npmRoot -and (Test-Path (Join-Path $npmRoot "@anthropic-ai\claude-code\bin\claude.exe"))) {
+        $candidate = Join-Path $npmRoot "@anthropic-ai\claude-code\bin\claude.exe"
+        if ((Get-Item $candidate).Length -gt 10MB) {
+            $NativeBin = $candidate
+        }
+    }
+    # Check local node_modules if in a project
+    if (-not $NativeBin -and (Test-Path "package.json") -and (Test-Path "node_modules\@anthropic-ai\claude-code\bin\claude.exe")) {
+        $candidate = "node_modules\@anthropic-ai\claude-code\bin\claude.exe"
+        if ((Get-Item $candidate).Length -gt 10MB) {
+            $NativeBin = $candidate
+        }
+    }
+    # Fallback: check platform-specific package directly (if postinstall didn't run)
+    if (-not $NativeBin -and $npmRoot) {
+        $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "arm64" }
+        $platformPkg = Join-Path $npmRoot "@anthropic-ai\claude-code-win32-$arch"
+        if (-not (Test-Path $platformPkg)) {
+            # Try local node_modules
+            if (Test-Path "package.json") {
+                $platformPkg = "node_modules\@anthropic-ai\claude-code-win32-$arch"
+            }
+        }
+        if ((Test-Path $platformPkg) -and (Test-Path (Join-Path $platformPkg "claude.exe"))) {
+            $candidate = Join-Path $platformPkg "claude.exe"
+            if ((Get-Item $candidate).Length -gt 10MB) {
+                $NativeBin = $candidate
+            }
+        }
+    }
+}
+
+# 2. Check official installer locations
 $searchPaths = @(
     (Join-Path $env:USERPROFILE ".local\share\claude\versions"),
     (Join-Path $env:LOCALAPPDATA "Programs\claude-code")
 )
 
 foreach ($dir in $searchPaths) {
-    if (Test-Path $dir -PathType Container) {
+    if (-not $NativeBin -and (Test-Path $dir -PathType Container)) {
         $candidates = Get-ChildItem $dir -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -like "*.exe" -or $_.Extension -eq "" } |
             Where-Object { $_.Length -gt 10MB } |
@@ -145,7 +194,7 @@ foreach ($dir in $searchPaths) {
     }
 }
 
-# Also check backed-up claude.orig.exe
+# 3. Also check backed-up claude.orig.exe
 if (-not $NativeBin) {
     $origExe = Join-Path $BinDir "claude.orig.exe"
     if ((Test-Path $origExe) -and (Get-Item $origExe).Length -gt 10MB) {
@@ -163,7 +212,7 @@ if (-not $NativeBin) {
 
 # Always write the extractor (used for cli.js and/or .node modules)
 $extractorPath = Join-Path $ClawDir "extract-natives.mjs"
-@'
+$extractorContent = @'
 #!/usr/bin/env node
 /**
  * ClawGod native module extractor
@@ -567,7 +616,9 @@ function main() {
 }
 
 main();
-'@ | Set-Content $extractorPath -Encoding UTF8
+'@
+# Use UTF-8 without BOM for the extractor script
+Write-TextFile $extractorPath $extractorContent
 
 # ─── Extract cli.js + native modules from Bun binary ──────────
 
@@ -593,7 +644,7 @@ Write-Dim "Extracting native modules from $(Split-Path $NativeBin -Leaf) ..."
 
 Write-Dim "Rewriting bunfs paths and IIFE invocation ..."
 $postProc = Join-Path $ClawDir "post-process.mjs"
-@'
+$postProcContent = @'
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -620,7 +671,8 @@ code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirn
 writeFileSync(dst, code);
 unlinkSync(src);
 console.log(`cli.original.cjs: ${code.length} bytes`);
-'@ | Set-Content $postProc -Encoding UTF8
+'@
+Write-TextFile $postProc $postProcContent
 & node $postProc 2>&1 | ForEach-Object { Write-Host "  $_" }
 if (-not (Test-Path (Join-Path $ClawDir "cli.original.cjs"))) {
     Write-Err "Post-process failed"
@@ -633,7 +685,7 @@ Write-OK "cli.original.cjs ready ($(Split-Path $NativeBin -Leaf))"
 
 # ─── Write re-patch helper (used by wrapper on version drift) ─────────
 
-@'
+$repatchContent = @'
 #!/usr/bin/env bun
 import { spawnSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
@@ -673,12 +725,13 @@ run('patcher', [patcher]);
 
 writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
 console.log(`[clawgod] re-patched to ${basename(nativeBin)}`);
-'@ | Set-Content (Join-Path $ClawDir "repatch.mjs") -Encoding UTF8
+'@
+Write-TextFile (Join-Path $ClawDir "repatch.mjs") $repatchContent
 Write-OK "Re-patch helper installed (repatch.mjs)"
 
 # ─── Write wrapper (cli.cjs, runs under Bun) ──────────────────
 
-@'
+$cliContent = @'
 #!/usr/bin/env bun
 const { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, statSync } = require('fs');
 const { join, basename } = require('path');
@@ -777,7 +830,8 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 }
 
 require('./cli.original.cjs');
-'@ | Set-Content (Join-Path $ClawDir "cli.cjs") -Encoding UTF8
+'@
+Write-TextFile (Join-Path $ClawDir "cli.cjs") $cliContent
 Write-OK "Wrapper created (cli.cjs)"
 
 # ─── Write universal patcher ──────────────────────────
@@ -842,6 +896,15 @@ const patches = [
   },
   {
     name: 'Ultraplan enable',
+    // v2.1.119+: isEnabled:()=>da() where da() is a minified function
+    pattern: /(argumentHint:"<prompt>",isEnabled:\(\)=>)da\(\)/g,
+    replacer: (m, prefix) => `${prefix}!0`,
+    sentinel: 'argumentHint:"<prompt>",isEnabled:()=>da()',
+    optional: true,
+  },
+  {
+    // Legacy (<=v2.1.118): isEnabled:()=>!1
+    name: 'Ultraplan enable (legacy)',
     pattern: /(name:"ultraplan",description:`[^`]+`,argumentHint:"<prompt>",isEnabled:\(\)=>)!1/g,
     replacer: (m, prefix) => `${prefix}!0`,
     optional: true,
@@ -1021,7 +1084,7 @@ if (!dryRun && !verify && applied > 0) {
 console.log(`${'='.repeat(55)}\n`);
 '@
 
-Set-Content (Join-Path $ClawDir "patch.mjs") $patcherCode -Encoding UTF8
+Write-TextFile (Join-Path $ClawDir "patch.mjs") $patcherCode
 Write-OK "Patcher created (patch.mjs)"
 
 # ─── Apply patches ────────────────────────────────────
@@ -1033,7 +1096,7 @@ node (Join-Path $ClawDir "patch.mjs")
 
 $featuresFile = Join-Path $ClawDir "features.json"
 if (-not (Test-Path $featuresFile)) {
-    @'
+    $featuresContent = @'
 {
   "tengu_harbor": true,
   "tengu_session_memory": true,
@@ -1044,7 +1107,8 @@ if (-not (Test-Path $featuresFile)) {
   "tengu_desktop_upsell": false,
   "tengu_prompt_cache_1h_config": {"allowlist": ["*"]}
 }
-'@ | Set-Content $featuresFile -Encoding UTF8
+'@
+    Write-TextFile $featuresFile $featuresContent
     Write-OK "Default features.json created"
 }
 

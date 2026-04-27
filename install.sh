@@ -131,8 +131,51 @@ info "ripgrep: $(rg --version | head -1)"
 mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
 
 NATIVE_BIN=""
+
+# 1. Try npm package installation (check platform-specific optional package first)
+# npm package structure:
+#   - Main package: @anthropic-ai/claude-code (has bin/claude.exe placeholder, replaced by postinstall)
+#   - Platform packages: @anthropic-ai/claude-code-{platform}-{arch} (binary in root, named 'claude' or 'claude.exe')
+# After postinstall, the native binary is at: @anthropic-ai/claude-code/bin/claude[.exe]
+if command -v npm &>/dev/null; then
+  NPM_ROOT=$(npm root -g 2>/dev/null) || NPM_ROOT=""
+  # Check global installation (postinstall already ran)
+  if [ -n "$NPM_ROOT" ] && [ -d "$NPM_ROOT/@anthropic-ai/claude-code" ]; then
+    candidate="$NPM_ROOT/@anthropic-ai/claude-code/bin/claude"
+    if [ -f "$candidate" ] && file "$candidate" 2>/dev/null | grep -qE "Mach-O|ELF"; then
+      NATIVE_BIN="$candidate"
+    fi
+  fi
+  # Check local node_modules if in a project
+  if [ -z "$NATIVE_BIN" ] && [ -f "package.json" ] && [ -d "node_modules/@anthropic-ai/claude-code" ]; then
+    candidate="node_modules/@anthropic-ai/claude-code/bin/claude"
+    if [ -f "$candidate" ] && file "$candidate" 2>/dev/null | grep -qE "Mach-O|ELF"; then
+      NATIVE_BIN="$candidate"
+    fi
+  fi
+  # Fallback: check platform-specific package directly (if postinstall didn't run)
+  if [ -z "$NATIVE_BIN" ]; then
+    platform=$(uname -s | tr '[:upper:]' '[:lower:]')
+    arch=$(uname -m)
+    # Map arch names (x86_64 -> x64, aarch64 -> arm64)
+    arch_normalized=$(echo "$arch" | sed 's/x86_64/x64/;s/aarch64/arm64/')
+    platform_pkg="$NPM_ROOT/@anthropic-ai/claude-code-$platform-$arch_normalized"
+    if [ -z "$platform_pkg" ] || [ ! -d "$platform_pkg" ]; then
+      # Try local node_modules
+      [ -f "package.json" ] && platform_pkg="node_modules/@anthropic-ai/claude-code-$platform-$arch_normalized"
+    fi
+    if [ -d "$platform_pkg" ]; then
+      candidate="$platform_pkg/claude"
+      if [ -f "$candidate" ] && file "$candidate" 2>/dev/null | grep -qE "Mach-O|ELF"; then
+        NATIVE_BIN="$candidate"
+      fi
+    fi
+  fi
+fi
+
+# 2. Try official installer location (~/.local/share/claude/versions)
 VERSIONS_DIR="$HOME/.local/share/claude/versions"
-if [ -d "$VERSIONS_DIR" ]; then
+if [ -z "$NATIVE_BIN" ] && [ -d "$VERSIONS_DIR" ]; then
   for f in $(ls -t "$VERSIONS_DIR"/* 2>/dev/null); do
     if file "$f" 2>/dev/null | grep -qE "Mach-O|ELF"; then
       NATIVE_BIN="$f"
@@ -141,7 +184,7 @@ if [ -d "$VERSIONS_DIR" ]; then
   done
 fi
 
-# Fallback: backed-up .orig from a prior clawgod install
+# 3. Fallback: backed-up .orig from a prior clawgod install
 if [ -z "$NATIVE_BIN" ] && [ -e "$BIN_DIR/claude.orig" ]; then
   if file "$BIN_DIR/claude.orig" 2>/dev/null | grep -qE "Mach-O|ELF"; then
     NATIVE_BIN="$BIN_DIR/claude.orig"
@@ -856,9 +899,18 @@ const patches = [
   },
   {
     name: 'Ultraplan enable',
+    // v2.1.119+: isEnabled:()=>da() where da() is a minified function
+    pattern: /(argumentHint:"<prompt>",isEnabled:\(\)=>)da\(\)/g,
+    replacer: (m, prefix) => `${prefix}!0`,
+    sentinel: 'argumentHint:"<prompt>",isEnabled:()=>da()',
+    optional: true,
+  },
+  {
+    // Legacy (≤v2.1.118): isEnabled:()=>!1
+    name: 'Ultraplan enable (legacy)',
     pattern: /(name:"ultraplan",description:`[^`]+`,argumentHint:"<prompt>",isEnabled:\(\)=>)!1/g,
     replacer: (m, prefix) => `${prefix}!0`,
-    optional: true,  // v2.1.89+ merged into /plan, no standalone command
+    optional: true,
   },
   {
     // ≤v2.1.110: function X(){return Y("tengu_review_bughunter_config",null)?.enabled===!0}
