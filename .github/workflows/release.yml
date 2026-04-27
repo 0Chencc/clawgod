@@ -67,11 +67,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${{ steps.versions.outputs.tag }}"
-          # Idempotent: if the release exists (e.g. tag was re-pushed), update it.
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" \
-              --title "ClawGod $tag" \
-              --notes-file release-notes.md
+            # Release already exists (e.g. created manually with curated notes).
+            # Refresh assets only — don't touch notes/title.
             gh release upload "$tag" install.sh install.ps1 --clobber
           else
             gh release create "$tag" install.sh install.ps1 \
