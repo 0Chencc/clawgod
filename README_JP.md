@@ -2,6 +2,10 @@
 
 [English](README.md) | [中文](README_ZH.md) | [日本語](README_JP.md)
 
+[![Latest](https://img.shields.io/github/v/release/0chencc/clawgod?style=flat&label=Latest)](https://github.com/0Chencc/clawgod/releases/latest)
+[![Released](https://img.shields.io/github/release-date/0chencc/clawgod?style=flat&label=Released)](https://github.com/0Chencc/clawgod/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/0chencc/clawgod/total?style=flat&label=Downloads)](https://github.com/0Chencc/clawgod/releases)
+
 > [Claude Code](https://docs.anthropic.com/en/docs/claude-code) ゴッドモード。
 
 **これはサードパーティ製の Claude Code クライアントではありません。** ClawGod は公式 Claude Code の上に適用されるランタイムパッチです。どのバージョンにも対応し、Claude Code が更新されると次回起動時に自動的に新バージョンから再抽出・再パッチを行います。
