@@ -122,20 +122,27 @@ if ! command -v rg &>/dev/null; then
 fi
 info "ripgrep: $(rg --version | head -1)"
 
-# ─── Locate native Bun binary (must be present — cli.js source) ───────
+# ─── Locate native Bun binary (cli.js source) ──────────────────────────
 # v2.1.113+ ships a Bun standalone executable as the only canonical form.
 # We extract cli.js text from this binary, patch it, then run via Bun
-# runtime. The binary itself comes from the user's prior Claude Code
-# installation (e.g. via the official `claude.ai/install.sh`).
+# runtime. Sources, in priority order:
+#  1. Existing official install:  ~/.local/share/claude/versions/<v>
+#  2. Prior clawgod backup:        $BIN_DIR/claude.orig (symlink or file)
+#  3. npm registry fallback:       @anthropic-ai/claude-code-<platform>
+# This means users can install ClawGod without having to run the official
+# Claude Code installer first — npm gives us the same binary either way.
 
 mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
 
 NATIVE_BIN=""
+NATIVE_BIN_LABEL=""
+NATIVE_BIN_TMPDIR=""
 VERSIONS_DIR="$HOME/.local/share/claude/versions"
 if [ -d "$VERSIONS_DIR" ]; then
   for f in $(ls -t "$VERSIONS_DIR"/* 2>/dev/null); do
     if file "$f" 2>/dev/null | grep -qE "Mach-O|ELF"; then
       NATIVE_BIN="$f"
+      NATIVE_BIN_LABEL="$(basename "$f")"
       break
     fi
   done
@@ -148,6 +155,62 @@ if [ -z "$NATIVE_BIN" ] && [ -e "$BIN_DIR/claude.orig" ]; then
   elif [ -L "$BIN_DIR/claude.orig" ]; then
     NATIVE_BIN="$(readlink "$BIN_DIR/claude.orig")"
   fi
+  [ -n "$NATIVE_BIN" ] && NATIVE_BIN_LABEL="$(basename "$NATIVE_BIN")"
+fi
+
+# Last-resort fallback: pull the Bun standalone binary from the npm registry.
+# Anthropic publishes per-platform packages (e.g. claude-code-darwin-arm64);
+# their tarball ships the binary directly under package/.
+if [ -z "$NATIVE_BIN" ]; then
+  if ! command -v npm &>/dev/null; then
+    warn "No native Claude Code binary found locally, and npm is not installed."
+    warn "  Either install the official binary first:"
+    warn "    curl -fsSL https://claude.ai/install.sh | bash"
+    warn "  or install npm so we can fetch it from the registry."
+    exit 1
+  fi
+  case "$(uname -s)" in
+    Darwin) os="darwin" ;;
+    Linux)  os="linux" ;;
+    *)      warn "Unsupported OS: $(uname -s)"; exit 1 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch="arm64" ;;
+    x86_64|amd64)  arch="x64" ;;
+    *)             warn "Unsupported arch: $(uname -m)"; exit 1 ;;
+  esac
+  if [ "$os" = "linux" ] && (ldd /bin/ls 2>/dev/null | grep -q musl); then
+    PLATFORM="${os}-${arch}-musl"
+  else
+    PLATFORM="${os}-${arch}"
+  fi
+  NPM_PKG="@anthropic-ai/claude-code-${PLATFORM}"
+  dim "No local Claude Code binary found, fetching $NPM_PKG from npm ..."
+  NATIVE_BIN_TMPDIR=$(mktemp -d)
+  if ( cd "$NATIVE_BIN_TMPDIR" && npm pack "$NPM_PKG@latest" --silent >/dev/null 2>&1 ); then
+    TARBALL=$(ls "$NATIVE_BIN_TMPDIR"/*.tgz 2>/dev/null | head -1)
+    if [ -n "$TARBALL" ]; then
+      ( cd "$NATIVE_BIN_TMPDIR" && tar xzf "$TARBALL" )
+      for cand in "$NATIVE_BIN_TMPDIR/package/claude" "$NATIVE_BIN_TMPDIR/package/claude.exe"; do
+        if [ -f "$cand" ]; then
+          sz=$(stat -f%z "$cand" 2>/dev/null || stat -c%s "$cand" 2>/dev/null || echo 0)
+          if [ "$sz" -gt 10000000 ]; then
+            NATIVE_BIN="$cand"
+            NATIVE_BIN_LABEL=$(node -e "console.log(require('$NATIVE_BIN_TMPDIR/package/package.json').version)" 2>/dev/null || echo "npm-latest")
+            break
+          fi
+        fi
+      done
+    fi
+  fi
+  if [ -z "$NATIVE_BIN" ]; then
+    rm -rf "$NATIVE_BIN_TMPDIR"
+    warn "Failed to download $NPM_PKG from npm."
+    warn "  Install the official Claude Code binary manually:"
+    warn "    curl -fsSL https://claude.ai/install.sh | bash"
+    exit 1
+  fi
+  info "Downloaded $NPM_PKG@$NATIVE_BIN_LABEL"
 fi
 
 if [ -z "$NATIVE_BIN" ]; then
@@ -574,14 +637,14 @@ VENDOR_DIR="$CLAWGOD_DIR/vendor"
 rm -rf "$VENDOR_DIR" 2>/dev/null
 mkdir -p "$VENDOR_DIR"
 
-dim "Extracting cli.js from $(basename "$NATIVE_BIN") ..."
+dim "Extracting cli.js from $(echo "$NATIVE_BIN_LABEL") ..."
 if ! node "$CLAWGOD_DIR/extract-natives.mjs" "$NATIVE_BIN" "$CLAWGOD_DIR" --cli-js 2>&1 | while IFS= read -r line; do echo "  $line"; done; then
   err "Failed to extract cli.js from native binary"
   exit 1
 fi
 [ -f "$CLAWGOD_DIR/cli.original.js" ] || { err "cli.js missing after extraction"; exit 1; }
 
-dim "Extracting native modules from $(basename "$NATIVE_BIN") ..."
+dim "Extracting native modules from $(echo "$NATIVE_BIN_LABEL") ..."
 node "$CLAWGOD_DIR/extract-natives.mjs" "$NATIVE_BIN" "$VENDOR_DIR" 2>&1 | while IFS= read -r line; do echo "  $line"; done || true
 
 # ─── Post-process cli.js for Bun runtime ──────────────────────
@@ -628,9 +691,15 @@ node "$CLAWGOD_DIR/post-process.mjs" 2>&1 | while IFS= read -r line; do echo "  
 [ -f "$CLAWGOD_DIR/cli.original.cjs" ] || { err "Post-process failed"; exit 1; }
 
 # Stamp the source version so the wrapper can detect drift on next launch
-echo "$(basename "$NATIVE_BIN")" > "$CLAWGOD_DIR/.source-version"
+echo "$NATIVE_BIN_LABEL" > "$CLAWGOD_DIR/.source-version"
 
-info "cli.original.cjs ready ($(basename "$NATIVE_BIN"))"
+# If we pulled the binary from npm into a tmpdir, clean it up now —
+# extraction is done, drift detection only consults ~/.local/share/claude/versions/.
+if [ -n "$NATIVE_BIN_TMPDIR" ]; then
+  rm -rf "$NATIVE_BIN_TMPDIR"
+fi
+
+info "cli.original.cjs ready ($NATIVE_BIN_LABEL)"
 
 # ─── Write re-patch helper (used by wrapper on version drift) ─────────
 
@@ -855,10 +924,15 @@ const patches = [
     replacer: (m, prefix) => `${prefix}{enabled:!0,pixelValidation`,
   },
   {
+    // v2.1.92+ shape: name:"ultraplan",get description(){...},argumentHint:"<prompt>",isEnabled:()=>fnRef()
+    // Older shape  : name:"ultraplan",description:`...`,argumentHint:"<prompt>",isEnabled:()=>!1
+    // The middle metadata block changed from a literal description to a getter,
+    // and the gate switched from a literal !1 to a GrowthBook-flag-check function call.
+    // Match both.
     name: 'Ultraplan enable',
-    pattern: /(name:"ultraplan",description:`[^`]+`,argumentHint:"<prompt>",isEnabled:\(\)=>)!1/g,
+    pattern: /(name:"ultraplan",[\s\S]{1,500}?argumentHint:"<prompt>",isEnabled:\(\)=>)(?:!1|[\w$]+\(\))/g,
     replacer: (m, prefix) => `${prefix}!0`,
-    optional: true,  // v2.1.89+ merged into /plan, no standalone command
+    sentinel: 'name:"ultraplan"',
   },
   {
     // ≤v2.1.110: function X(){return Y("tengu_review_bughunter_config",null)?.enabled===!0}

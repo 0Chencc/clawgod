@@ -841,10 +841,12 @@ const patches = [
     replacer: (m, prefix) => `${prefix}{enabled:!0,pixelValidation`,
   },
   {
+    // v2.1.92+: name:"ultraplan",get description(){...},argumentHint:"<prompt>",isEnabled:()=>fnRef()
+    // Older  : name:"ultraplan",description:`...`,argumentHint:"<prompt>",isEnabled:()=>!1
     name: 'Ultraplan enable',
-    pattern: /(name:"ultraplan",description:`[^`]+`,argumentHint:"<prompt>",isEnabled:\(\)=>)!1/g,
+    pattern: /(name:"ultraplan",[\s\S]{1,500}?argumentHint:"<prompt>",isEnabled:\(\)=>)(?:!1|[\w$]+\(\))/g,
     replacer: (m, prefix) => `${prefix}!0`,
-    optional: true,
+    sentinel: 'name:"ultraplan"',
   },
   {
     name: 'Ultrareview enable',
