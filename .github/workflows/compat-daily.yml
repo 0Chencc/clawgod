@@ -19,7 +19,7 @@ on:
       - .github/workflows/compat-daily.yml
 
 permissions:
-  contents: read
+  contents: write   # write needed to push the version-badge JSON to `badges` branch
   issues: write
 
 # Opt every JS-based action (e.g. actions/checkout, actions/cache,
@@ -135,6 +135,36 @@ jobs:
             exit 1
           fi
           [[ $rc -eq 0 ]] || { echo "::error::claude --version exited $rc"; exit 1; }
+
+      - name: Publish supported-Claude-version badge
+        # Write the version we just verified end-to-end to a JSON file on the
+        # `badges` branch (force-pushed; that branch holds nothing else and is
+        # never read as source). README links to it via shields.io endpoint.
+        # PRs from forks can't push, so skip them.
+        if: success() && github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(cat "$HOME/.clawgod/.source-version")
+          [[ -n "$version" ]] || { echo "::error::source-version missing"; exit 1; }
+          tmp=$(mktemp -d)
+          cd "$tmp"
+          cat > claude-version.json <<EOF
+          {
+            "schemaVersion": 1,
+            "label": "Claude tested",
+            "message": "$version",
+            "color": "brightgreen"
+          }
+          EOF
+          git init -q -b badges
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add claude-version.json
+          git commit -q -m "compat-daily: claude $version verified"
+          git push -fq "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:badges
+          echo "Published badge: claude $version"
 
       - name: Open / update issue on scheduled failure
         if: failure() && github.event_name == 'schedule'

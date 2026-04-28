@@ -6,6 +6,7 @@
 [![Released](https://img.shields.io/github/release-date/0chencc/clawgod?style=flat&label=Released)](https://github.com/0Chencc/clawgod/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/0chencc/clawgod/total?style=flat&label=Downloads)](https://github.com/0Chencc/clawgod/releases)
 [![Compat](https://img.shields.io/github/actions/workflow/status/0chencc/clawgod/compat-daily.yml?branch=main&style=flat&label=Compat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
+[![Claude tested](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/0Chencc/clawgod/badges/claude-version.json&style=flat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
 
 > [Claude Code](https://docs.anthropic.com/en/docs/claude-code) ゴッドモード。
 
@@ -118,7 +119,9 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 
 ## アップデート
 
-インストーラは冪等です——再実行するだけでパッチ済みコピーが更新されます：
+**そのまま `claude update` を実行するだけで OK です。** ClawGod はこのコマンドを自身のインストーラへ流すようパッチしており、npm から Anthropic の現行リリース（`@anthropic-ai/claude-code-<plat>@latest`）を取得し、cli.js を再抽出、パッチを再適用、launcher を書き直します。そのため上流の `claude update` コマンドは期待通りに動作します——1 コマンドで最新の Claude を取得し、パッチも適用された状態を保てます。
+
+直接インストーラを実行したい場合（効果は同じで、どちらも同じ上流リリースを取得してパッチを当て直します）：
 
 **macOS / Linux:**
 ```bash
@@ -130,7 +133,11 @@ curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.s
 irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
 ```
 
-通常は手動再実行は**不要**です——Claude Code が自動アップデートされた後、ClawGod の自動再パッチが次回 `claude` / `clawgod` 起動時に処理します。
+ClawGod を外して Anthropic 本来の `claude update`（独自に管理されたパスへ書き込み、私たちの launcher を上書きします）を使いたい場合は、先にアンインストールしてください：
+
+```bash
+bash ~/.clawgod/install.sh --uninstall
+```
 
 ## アンインストール
 

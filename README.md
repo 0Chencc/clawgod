@@ -6,6 +6,7 @@
 [![Released](https://img.shields.io/github/release-date/0chencc/clawgod?style=flat&label=Released)](https://github.com/0Chencc/clawgod/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/0chencc/clawgod/total?style=flat&label=Downloads)](https://github.com/0Chencc/clawgod/releases)
 [![Compat](https://img.shields.io/github/actions/workflow/status/0chencc/clawgod/compat-daily.yml?branch=main&style=flat&label=Compat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
+[![Claude tested](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/0Chencc/clawgod/badges/claude-version.json&style=flat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
 
 > God mode for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
@@ -118,7 +119,9 @@ A `.source-version` stamp in `~/.clawgod/` records which native version was patc
 
 ## Update
 
-The installer is idempotent — run it again to refresh the patched copy:
+**Just run `claude update` as usual.** ClawGod patches the command to route through its own installer, which pulls the current Anthropic release from npm (`@anthropic-ai/claude-code-<plat>@latest`), re-extracts cli.js, re-applies patches, and rewrites the launcher. So the upstream update command keeps working the way you expect — you get the latest Claude, with patches still applied, in one step.
+
+If you'd rather invoke the installer directly (same effect, both paths fetch the same upstream release and re-patch):
 
 **macOS / Linux:**
 ```bash
@@ -130,7 +133,11 @@ curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.s
 irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
 ```
 
-In most cases you don't need to do this — when Claude Code self-updates, ClawGod's auto-re-patch picks up the new version automatically on the next `claude` / `clawgod` invocation.
+If you'd rather drop ClawGod and use Anthropic's original `claude update` (which manages its own paths and would overwrite our launcher), uninstall first:
+
+```bash
+bash ~/.clawgod/install.sh --uninstall
+```
 
 ## Uninstall
 

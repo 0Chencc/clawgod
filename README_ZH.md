@@ -6,6 +6,7 @@
 [![Released](https://img.shields.io/github/release-date/0chencc/clawgod?style=flat&label=Released)](https://github.com/0Chencc/clawgod/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/0chencc/clawgod/total?style=flat&label=Downloads)](https://github.com/0Chencc/clawgod/releases)
 [![Compat](https://img.shields.io/github/actions/workflow/status/0chencc/clawgod/compat-daily.yml?branch=main&style=flat&label=Compat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
+[![Claude tested](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/0Chencc/clawgod/badges/claude-version.json&style=flat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
 
 > [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 上帝模式。
 
@@ -118,7 +119,9 @@ claude.orig         # 原版未修改版本（自动备份）
 
 ## 更新
 
-installer 是幂等的——再跑一次即可刷新 patched 副本：
+**直接照常跑 `claude update` 即可。** ClawGod 把这条命令 patch 成走自己的 installer——从 npm 拉 Anthropic 当前发布（`@anthropic-ai/claude-code-<plat>@latest`）、重新提取 cli.js、重新打补丁、重写 launcher。所以上游 `claude update` 命令对用户依然如常工作——一条命令拿到最新 Claude + 补丁仍然生效。
+
+如果你想直接调 installer（效果一样，两条路径都会拉同一个上游 release 并重新 patch）:
 
 **macOS / Linux:**
 ```bash
@@ -130,7 +133,11 @@ curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.s
 irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
 ```
 
-通常**不需要**手动重跑——Claude Code 自动更新后，ClawGod 的自动重打补丁会在下次 `claude` / `clawgod` 启动时自动处理。
+如果你想脱离 ClawGod、使用 Anthropic 原本的 `claude update`（它会写到自己管的目录、并把我们的 launcher 替换掉），请先卸载：
+
+```bash
+bash ~/.clawgod/install.sh --uninstall
+```
 
 ## 卸载
 
