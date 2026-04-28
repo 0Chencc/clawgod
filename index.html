@@ -1,385 +1,166 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ClawGod — God Mode for Claude Code</title>
-<meta name="description" content="Unlock internal features, remove restrictions from Claude Code. One command, no compilation.">
-<meta property="og:title" content="ClawGod — God Mode for Claude Code">
-<meta property="og:description" content="Unlock 24+ hidden commands, remove restrictions, green theme. One command install.">
-<meta property="og:image" content="https://clawgod.0chen.cc/bypass.png">
-<meta property="og:url" content="https://clawgod.0chen.cc">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-
-  :root {
-    --green: #22c55e;
-    --green-dim: #16a34a;
-    --green-glow: rgba(34, 197, 94, 0.15);
-    --bg: #0a0a0a;
-    --surface: #111;
-    --border: #222;
-    --text: #e5e5e5;
-    --dim: #888;
-    --code-bg: #161616;
-  }
-
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
-    background: var(--bg);
-    color: var(--text);
-    line-height: 1.6;
-    min-height: 100vh;
-  }
-
-  .container { max-width: 800px; margin: 0 auto; padding: 0 24px; }
-
-  /* Hero */
-  .hero {
-    text-align: center;
-    padding: 80px 0 48px;
-  }
-
-  .hero h1 {
-    font-size: 3.5rem;
-    font-weight: 800;
-    letter-spacing: -0.03em;
-    margin-bottom: 8px;
-  }
-
-  .hero h1 span { color: var(--green); }
-
-  .hero .tagline {
-    font-size: 1.25rem;
-    color: var(--dim);
-    margin-bottom: 32px;
-  }
-
-  .hero .tagline a {
-    color: var(--green);
-    text-decoration: none;
-    border-bottom: 1px solid var(--green-dim);
-  }
-
-  .hero .tagline a:hover { border-bottom-color: var(--green); }
-
-  /* Install Tabs */
-  .install-box {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    overflow: hidden;
-    max-width: 680px;
-    margin: 0 auto 24px;
-  }
-
-  .tab-bar {
-    display: flex;
-    border-bottom: 1px solid var(--border);
-    background: var(--code-bg);
-  }
-
-  .tab {
-    flex: 1;
-    padding: 10px 16px;
-    text-align: center;
-    font-size: 0.85rem;
-    color: var(--dim);
-    cursor: pointer;
-    border: none;
-    background: none;
-    transition: all 0.2s;
-  }
-
-  .tab:hover { color: var(--text); }
-  .tab.active { color: var(--green); border-bottom: 2px solid var(--green); }
-
-  .code-panel { display: none; padding: 20px; }
-  .code-panel.active { display: block; }
-
-  .code-panel pre {
-    background: var(--code-bg);
-    padding: 16px;
-    border-radius: 8px;
-    overflow-x: auto;
-    font-size: 0.9rem;
-    line-height: 1.5;
-    position: relative;
-  }
-
-  .code-panel code { color: var(--green); }
-
-  .copy-btn {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    background: var(--border);
-    border: none;
-    color: var(--dim);
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .copy-btn:hover { background: #333; color: var(--text); }
-  .copy-btn.copied { color: var(--green); }
-
-  /* Screenshot */
-  .screenshot {
-    max-width: 680px;
-    margin: 0 auto 64px;
-    text-align: center;
-  }
-
-  .screenshot img {
-    width: 100%;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    box-shadow: 0 0 40px var(--green-glow);
-  }
-
-  .screenshot p {
-    margin-top: 12px;
-    font-size: 0.85rem;
-    color: var(--dim);
-  }
-
-  /* Patches Section */
-  .section { padding: 48px 0; }
-
-  .section h2 {
-    font-size: 1.5rem;
-    font-weight: 700;
-    margin-bottom: 24px;
-    color: var(--green);
-  }
-
-  .patch-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }
-
-  @media (max-width: 600px) {
-    .patch-grid { grid-template-columns: 1fr; }
-    .hero h1 { font-size: 2.5rem; }
-  }
-
-  .patch-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    transition: border-color 0.2s;
-  }
-
-  .patch-card:hover { border-color: var(--green-dim); }
-
-  .patch-card .name {
-    font-weight: 600;
-    font-size: 0.95rem;
-    margin-bottom: 4px;
-  }
-
-  .patch-card .desc {
-    font-size: 0.8rem;
-    color: var(--dim);
-    line-height: 1.4;
-  }
-
-  .badge {
-    display: inline-block;
-    font-size: 0.65rem;
-    padding: 2px 6px;
-    border-radius: 3px;
-    margin-bottom: 6px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .badge-unlock { background: rgba(34,197,94,0.15); color: var(--green); }
-  .badge-remove { background: rgba(239,68,68,0.15); color: #ef4444; }
-  .badge-visual { background: rgba(59,130,246,0.15); color: #3b82f6; }
-
-  /* Footer */
-  .footer {
-    border-top: 1px solid var(--border);
-    padding: 32px 0;
-    text-align: center;
-    color: var(--dim);
-    font-size: 0.8rem;
-  }
-
-  .footer a { color: var(--green); text-decoration: none; }
-  .footer a:hover { text-decoration: underline; }
-
-  .gh-link {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 10px 20px;
-    border-radius: 8px;
-    text-decoration: none;
-    font-size: 0.9rem;
-    margin-top: 24px;
-    transition: border-color 0.2s;
-  }
-
-  .gh-link:hover { border-color: var(--green); }
-
-  .gh-link svg { width: 18px; height: 18px; fill: currentColor; }
-</style>
-</head>
-<body>
-
-<div class="container">
-
-  <!-- Hero -->
-  <div class="hero">
-    <h1>Claw<span>God</span></h1>
-    <p class="tagline">God mode for <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a></p>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClawGod — God Mode for Claude Code</title>
+  <meta name="description" content="Unlock internal features, remove restrictions from Claude Code. One command, no compilation." />
+  <meta property="og:title" content="ClawGod — God Mode for Claude Code" />
+  <meta property="og:description" content="Unlock 24+ hidden commands, remove restrictions, green theme. One command install." />
+  <meta property="og:image" content="https://clawgod.0chen.cc/bypass.png" />
+  <meta property="og:url" content="https://clawgod.0chen.cc" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script type="module" crossorigin>(function(){const t=document.createElement("link").relList;if(t&&t.supports&&t.supports("modulepreload"))return;for(const s of document.querySelectorAll('link[rel="modulepreload"]'))o(s);new MutationObserver(s=>{for(const n of s)if(n.type==="childList")for(const r of n.addedNodes)r.tagName==="LINK"&&r.rel==="modulepreload"&&o(r)}).observe(document,{childList:!0,subtree:!0});function a(s){const n={};return s.integrity&&(n.integrity=s.integrity),s.referrerPolicy&&(n.referrerPolicy=s.referrerPolicy),s.crossOrigin==="use-credentials"?n.credentials="include":s.crossOrigin==="anonymous"?n.credentials="omit":n.credentials="same-origin",n}function o(s){if(s.ep)return;s.ep=!0;const n=a(s);fetch(s.href,n)}})();const g=[{num:"01",title:"Feature unlocks",blurb:"Internal-only commands and gates flipped to enabled.",patches:[{kind:"unlock",name:"Internal user mode",desc:"24+ hidden commands, debug logging, API request dumps."},{kind:"unlock",name:"GrowthBook overrides",desc:"Override any feature flag from a config file."},{kind:"unlock",name:"Agent Teams",desc:"Multi-agent swarm collaboration without flags."},{kind:"unlock",name:"Computer Use",desc:"Screen control without the Max/Pro subscription gate."},{kind:"unlock",name:"Ultraplan",desc:"Web-side multi-agent planning via Claude Code Remote."},{kind:"unlock",name:"Ultrareview",desc:"Automated bug-hunter review via Claude Code Remote."},{kind:"unlock",name:"Voice Mode",desc:"Built-in voice dictation, no kill-switch."},{kind:"unlock",name:"Auto-mode third-party",desc:"Auto-mode unlocked for non-Anthropic API endpoints."}]},{num:"02",title:"Restriction removals",blurb:"System prompt instructions stripped at patch time.",patches:[{kind:"remove",name:"CYBER_RISK_INSTRUCTION",desc:"Security testing refusal — pentest, C2, exploits."},{kind:"remove",name:"URL guess restriction",desc:'"NEVER generate or guess URLs" instruction.'},{kind:"remove",name:"Cautious actions",desc:"Forced confirmation before destructive operations."},{kind:"remove",name:"Login notice",desc:'"Not logged in" startup banner.'},{kind:"remove",name:"Attachment filter",desc:"Internal attachment-type gating bypass."},{kind:"remove",name:"Message filter",desc:"Reveal content normally hidden from external users."}]},{num:"03",title:"Visual",blurb:"A single signal that you are running the patched build.",patches:[{kind:"visual",name:"Green theme",desc:"Brand color → green. Patched at a glance."},{kind:"visual",name:"ANSI palette",desc:"Logo, shimmer, prompts — all green-tinted."}]},{num:"04",title:"Routing",blurb:"Upgrade flow that survives Anthropic's bun-runtime swaps.",patches:[{kind:"route",name:"claude update redirect",desc:"`claude update` routes through clawgod's installer — pulls latest Anthropic release + re-patches in one step."}]}],c="0Chencc/clawgod",f=`https://raw.githubusercontent.com/${c}/badges/claude-version.json`,d=[{id:"unix",label:"macOS / Linux",prompt:"$ ",cmd:"curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash"},{id:"win",label:"Windows (PowerShell)",prompt:"> ",cmd:"irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex"}],l=e=>e.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"),v=new Set(["|","||","&&",";","&",">",">>","<"]),b=e=>{const t=[],a=e.split(/(\s+)/);let o=!1,s=!1;for(const n of a){if(!n)continue;if(/^\s+$/.test(n)){t.push({kind:"space",text:n});continue}let r;v.has(n)?r="op":/^https?:\/\//.test(n)?r="url":/^-/.test(n)?r="flag":!o||s?r="cmd":r="arg",t.push({kind:r,text:n}),o=!0,s=r==="op"}return t},w=e=>b(e).map(t=>t.kind==="space"?t.text:`<span class="tok tok-${t.kind}">${l(t.text)}</span>`).join(""),k=()=>`
+<section class="install">
+  <div class="install-tabs" role="tablist">
+    ${d.map((e,t)=>`
+      <button class="install-tab ${t===0?"active":""}" role="tab"
+              data-target="${e.id}" aria-selected="${t===0}">
+        ${e.label}
+      </button>`).join("")}
   </div>
-
-  <!-- Install -->
-  <div class="install-box">
-    <div class="tab-bar">
-      <button class="tab active" onclick="switchTab('macos')">macOS / Linux</button>
-      <button class="tab" onclick="switchTab('windows')">Windows</button>
+  ${d.map((e,t)=>`
+    <div class="install-panel ${t===0?"active":""}" id="panel-${e.id}" role="tabpanel">
+      <div class="code-block">
+        <button class="copy-btn" data-copy="${l(e.cmd)}">Copy</button>
+        <pre><span class="prompt">${e.prompt}</span>${w(e.cmd)}</pre>
+      </div>
+      <div class="install-note">
+        Idempotent — safe to re-run. ${e.id==="win"?'Bun via <a href="https://bun.sh/install" target="_blank" rel="noopener">bun.sh</a> recommended.':"Bun, Node ≥ 18, ripgrep required."}
+      </div>
+    </div>`).join("")}
+</section>
+`,y=(e,t)=>`
+<section class="section" ${t===0?'id="patches"':""}>
+  <header class="section-head">
+    <h2><span class="num">${e.num}</span>${e.title}</h2>
+    <p>${e.blurb}</p>
+  </header>
+  <div class="patches-grid">
+    ${e.patches.map(a=>`
+      <article class="patch-card">
+        <span class="badge ${a.kind}">${$(a.kind)}</span>
+        <div class="name">${a.name}</div>
+        <div class="desc">${a.desc}</div>
+      </article>`).join("")}
+  </div>
+</section>
+`,$=e=>({unlock:"Unlock",remove:"Remove",visual:"Visual",route:"Routing"})[e],x=()=>`
+<section class="section" id="how">
+  <header class="section-head">
+    <h2><span class="num">∞</span>How it works</h2>
+    <p>Two-stage runtime patch. No fork, no compile.</p>
+  </header>
+  <div class="how-grid">
+    <div class="how-card">
+      <h3>Extract</h3>
+      <p>The installer reads Anthropic's native binary, pulls out <code>cli.js</code> and embedded <code>.node</code> modules, and post-processes them for Bun-on-disk execution.</p>
     </div>
-    <div id="panel-macos" class="code-panel active">
-      <pre><button class="copy-btn" onclick="copyCode(this)">Copy</button><code>curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash</code></pre>
+    <div class="how-card">
+      <h3>Patch</h3>
+      <p>A regex-only patcher rewrites the extracted <code>cli.js</code> in place — flipping gates, stripping refusals, re-coloring the brand. Idempotent and version-portable.</p>
     </div>
-    <div id="panel-windows" class="code-panel">
-      <pre><button class="copy-btn" onclick="copyCode(this)">Copy</button><code>irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex</code></pre>
+    <div class="how-card">
+      <h3>Launch</h3>
+      <p>A thin wrapper at <code>~/.local/bin/claude</code> spawns Bun against the patched <code>cli.original.cjs</code>, with <code>provider.json</code> deciding env injection.</p>
+    </div>
+    <div class="how-card">
+      <h3>Stay current</h3>
+      <p><code>claude update</code> is patched to route through this installer — pulls the latest Anthropic release from npm and re-patches, in one step.</p>
     </div>
   </div>
-
-  <!-- Screenshot -->
-  <div class="screenshot">
-    <img src="bypass.png" alt="ClawGod patched Claude Code with green logo">
-    <p>Green logo = patched &nbsp;·&nbsp; Orange logo = original</p>
-  </div>
-
-  <!-- Patches -->
-  <div class="section">
-    <h2>Feature Unlocks</h2>
-    <div class="patch-grid">
-      <div class="patch-card">
-        <span class="badge badge-unlock">Unlock</span>
-        <div class="name">Internal User Mode</div>
-        <div class="desc">24+ hidden commands, debug logging, API request dumps</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-unlock">Unlock</span>
-        <div class="name">GrowthBook Overrides</div>
-        <div class="desc">Override any feature flag via config file</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-unlock">Unlock</span>
-        <div class="name">Agent Teams</div>
-        <div class="desc">Multi-agent swarm collaboration, no flags needed</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-unlock">Unlock</span>
-        <div class="name">Computer Use</div>
-        <div class="desc">Screen control without Max/Pro subscription</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-unlock">Unlock</span>
-        <div class="name">Ultraplan</div>
-        <div class="desc">Multi-agent planning via Claude Code Remote</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-unlock">Unlock</span>
-        <div class="name">Ultrareview</div>
-        <div class="desc">Automated bug hunting via Claude Code Remote</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <h2>Restriction Removals</h2>
-    <div class="patch-grid">
-      <div class="patch-card">
-        <span class="badge badge-remove">Remove</span>
-        <div class="name">CYBER_RISK_INSTRUCTION</div>
-        <div class="desc">Security testing refusal — pentesting, C2, exploits</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-remove">Remove</span>
-        <div class="name">URL Restriction</div>
-        <div class="desc">"NEVER generate or guess URLs" instruction</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-remove">Remove</span>
-        <div class="name">Cautious Actions</div>
-        <div class="desc">Forced confirmation before destructive operations</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-remove">Remove</span>
-        <div class="name">Login Notice</div>
-        <div class="desc">"Not logged in" startup reminder</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <h2>Visual</h2>
-    <div class="patch-grid">
-      <div class="patch-card">
-        <span class="badge badge-visual">Visual</span>
-        <div class="name">Green Theme</div>
-        <div class="desc">Brand color → green. Patched at a glance</div>
-      </div>
-      <div class="patch-card">
-        <span class="badge badge-visual">Visual</span>
-        <div class="name">Message Filters</div>
-        <div class="desc">Shows content hidden from non-Anthropic users</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- CTA -->
-  <div style="text-align:center; padding: 32px 0;">
-    <a href="https://github.com/0Chencc/clawgod" class="gh-link">
+</section>
+`,L=()=>`
+<section class="cta">
+  <div class="cta-row">
+    <a class="btn primary" href="https://github.com/${c}#install">Get started</a>
+    <a class="btn" href="https://github.com/${c}" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-      GitHub
+      Source on GitHub
     </a>
   </div>
-
-</div>
-
-<!-- Footer -->
-<div class="footer">
-  <div class="container">
-    <p>GPL-3.0 · Not affiliated with Anthropic · Use at your own risk</p>
-    <p style="margin-top: 8px;">Node.js >= 18 + npm · Claude Code account required</p>
+</section>
+`,h='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',u='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.294 6.776 14.357 1h-1.2L8.756 6.013 5.235 1H1.171l5.31 7.531L1.171 15h1.2l4.642-5.296L10.762 15h4.064L9.294 6.776Zm-1.643 1.872-.539-.755L2.804 1.91h1.844l3.452 4.847.539.755 4.49 6.301h-1.844L7.65 8.648Z"/></svg>',C='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>',S='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14H2.75Z"/><path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.969a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 6.78a.75.75 0 0 1 1.06-1.06l1.97 1.969Z"/></svg>',A=()=>`
+<footer class="footer">
+  <div class="container footer-grid">
+    <span class="footer-cell footer-license">
+      GPL-3.0 · Not affiliated with Anthropic · Use at your own risk.
+    </span>
+    <span class="footer-cell footer-author">
+      by
+      <a href="https://github.com/0chencc" target="_blank" rel="noopener">@0chencc</a>
+      <a class="icon-link" href="https://github.com/0chencc" target="_blank" rel="noopener" aria-label="GitHub: 0chencc">${h}</a>
+      <a class="icon-link" href="https://x.com/0chencc"      target="_blank" rel="noopener" aria-label="X: 0chencc">${u}</a>
+    </span>
+    <span class="footer-cell footer-links">
+      <a href="https://github.com/${c}/releases">Releases</a> ·
+      <a href="https://github.com/${c}/issues">Issues</a> ·
+      <a href="https://github.com/${c}/actions/workflows/compat-daily.yml">CI</a>
+    </span>
   </div>
-</div>
+</footer>
+`,I=`
+<header class="topbar">
+  <div class="topbar-inner">
+    <span class="brand">claw<span>god</span></span>
+    <nav class="topbar-links">
+      <a href="#patches">Patches</a>
+      <a href="#how">How it works</a>
+      <a href="https://github.com/${c}" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
 
-<script>
-function switchTab(id) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
-  event.target.classList.add('active');
-  document.getElementById('panel-' + id).classList.add('active');
-}
+<main class="container">
+  <section class="hero">
+    <div class="hero-meta" id="hero-meta">
+      <span class="dot idle"></span>
+      <span id="hero-meta-text">Loading verified version…</span>
+    </div>
+    <h1>claw<span class="accent">god</span></h1>
+    <p class="tagline">God mode for Claude Code.</p>
+    <p class="sub">
+      Unlock internal features. Remove restrictions. Re-color the brand.<br />
+      One command, no compile.
+    </p>
+    <div class="hero-links">
+      <a class="hero-link author-gh" href="https://github.com/0chencc"
+         target="_blank" rel="noopener">${h} <span>@0chencc</span></a>
+      <a class="hero-link author-x" href="https://x.com/0chencc"
+         target="_blank" rel="noopener">${u} <span>@0chencc</span></a>
+      <a class="hero-link stars" href="https://github.com/${c}/stargazers"
+         target="_blank" rel="noopener">${C}
+         <span class="stat-num loading" id="stat-stars">—</span>
+         <span>stars</span></a>
+      <a class="hero-link downloads" href="https://github.com/${c}/releases"
+         target="_blank" rel="noopener">${S}
+         <span class="stat-num loading" id="stat-downloads">—</span>
+         <span>downloads</span></a>
+    </div>
+  </section>
 
-function copyCode(btn) {
-  const code = btn.parentElement.querySelector('code').textContent;
-  navigator.clipboard.writeText(code).then(() => {
-    btn.textContent = 'Copied!';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
-  });
-}
-</script>
+  ${k()}
 
+  <div class="screenshot">
+    <img src="bypass.png" alt="ClawGod-patched Claude Code, green logo and theme" />
+    <p class="caption">
+      <span class="green-sq">█</span> patched &nbsp;·&nbsp;
+      <span class="orange-sq">█</span> original
+    </p>
+  </div>
+
+  ${g.map(y).join("")}
+  ${x()}
+  ${L()}
+</main>
+
+${A()}
+`,m=document.getElementById("app");if(!m)throw new Error("#app missing");m.innerHTML=I;document.querySelectorAll(".install-tab").forEach(e=>{e.addEventListener("click",()=>{const t=e.dataset.target;t&&(document.querySelectorAll(".install-tab").forEach(a=>{a.classList.toggle("active",a===e),a.setAttribute("aria-selected",String(a===e))}),document.querySelectorAll(".install-panel").forEach(a=>{a.classList.toggle("active",a.id===`panel-${t}`)}))})});async function E(e){if(window.isSecureContext&&navigator.clipboard?.writeText)try{return await navigator.clipboard.writeText(e),!0}catch{}const t=document.createElement("textarea");t.value=e,t.setAttribute("readonly",""),t.style.cssText="position:fixed;top:-9999px;left:-9999px;opacity:0;pointer-events:none;",document.body.appendChild(t),t.select(),t.setSelectionRange(0,e.length);let a=!1;try{a=document.execCommand("copy")}catch{a=!1}return document.body.removeChild(t),a}document.querySelectorAll(".copy-btn").forEach(e=>{e.addEventListener("click",async()=>{const t=e.dataset.copy;if(!t)return;const a=e.textContent??"Copy",o=await E(t);e.textContent=o?"Copied":"Copy failed",e.classList.toggle("copied",o),e.classList.toggle("failed",!o),setTimeout(()=>{e.textContent=a,e.classList.remove("copied","failed")},1800)})});const p=document.querySelector(".topbar");if(p){const e=()=>p.classList.toggle("scrolled",window.scrollY>8);window.addEventListener("scroll",e,{passive:!0}),e()}(async()=>{const e=document.getElementById("hero-meta"),t=e?.querySelector(".dot"),a=document.getElementById("hero-meta-text");if(!(!e||!t||!a))try{const o=await fetch(f,{cache:"no-store"});if(!o.ok)throw new Error(`HTTP ${o.status}`);const s=await o.json();if(!s.message)throw new Error("no version");t.classList.remove("idle"),a.innerHTML=`Verified on Claude Code <strong style="color: var(--text)">${l(s.message)}</strong>`,e.title="Refreshed daily by .github/workflows/compat-daily.yml"}catch{t.classList.add("idle"),a.textContent="Daily compat verified",e.title="See GitHub Actions for the latest verified version"}})();const R=e=>e>=1e6?(e/1e6).toFixed(1).replace(/\.0$/,"")+"M":e>=1e3?(e/1e3).toFixed(1).replace(/\.0$/,"")+"k":String(e),i=(e,t)=>{const a=document.getElementById(e);a&&(a.classList.remove("loading"),a.textContent=t==null?"—":R(t))};(async()=>{const e={Accept:"application/vnd.github+json"};await Promise.all([fetch(`https://api.github.com/repos/${c}`,{headers:e}).then(t=>t.ok?t.json():null).then(t=>i("stat-stars",t?.stargazers_count??null)).catch(()=>i("stat-stars",null)),fetch(`https://api.github.com/repos/${c}/releases?per_page=100`,{headers:e}).then(t=>t.ok?t.json():null).then(t=>{if(!t)return i("stat-downloads",null);let a=0;for(const o of t)for(const s of o.assets??[])a+=s.download_count;i("stat-downloads",a)}).catch(()=>i("stat-downloads",null))])})();</script>
+  <style rel="stylesheet" crossorigin>:root{--green: #22c55e;--green-bright: #4ade80;--green-deep: #16a34a;--green-glow: rgba(34, 197, 94, .18);--green-tint: rgba(34, 197, 94, .08);--red: #ef4444;--red-tint: rgba(239, 68, 68, .12);--blue: #60a5fa;--blue-tint: rgba(96, 165, 250, .12);--amber: #fbbf24;--amber-tint: rgba(251, 191, 36, .12);--code-url: #8fa5b8;--bg: #0a0a0a;--bg-deep: #050505;--surface: #111111;--surface-2: #161616;--border: #1f1f1f;--border-hi: #2a2a2a;--text: #e8e8e8;--text-2: #b4b4b4;--dim: #707070;--font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;--font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;--gutter: 24px;--gutter-sm: 18px;--width-narrow: 880px;--width-wide: 1120px;--width-step: 1280px;--radius: 10px;--radius-lg: 14px;--ease-out: cubic-bezier(.16, 1, .3, 1)}*{margin:0;padding:0;box-sizing:border-box}html{scroll-behavior:smooth}body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;background-image:radial-gradient(ellipse 800px 500px at 50% -10%,var(--green-tint),transparent 60%),radial-gradient(ellipse 600px 400px at 90% 20%,rgba(96,165,250,.04),transparent 60%);background-attachment:fixed}a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline;text-underline-offset:3px}code,pre{font-family:var(--font-mono)}:where(*){scrollbar-width:thin;scrollbar-color:var(--border-hi) transparent}:where(*)::-webkit-scrollbar{width:8px;height:8px}:where(*)::-webkit-scrollbar-track{background:transparent}:where(*)::-webkit-scrollbar-thumb{background:var(--border-hi);border-radius:4px}:where(*)::-webkit-scrollbar-thumb:hover{background:var(--green-deep)}.code-block:hover{scrollbar-color:var(--green-deep) transparent}.code-block:hover::-webkit-scrollbar-thumb{background:var(--green-deep)}.container{max-width:var(--width-narrow);margin:0 auto;padding:0 var(--gutter)}.topbar{position:sticky;top:0;z-index:10;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);background:#0a0a0ab3;border-bottom:1px solid transparent;transition:border-color .2s}.topbar.scrolled{border-bottom-color:var(--border)}.topbar-inner{max-width:var(--width-narrow);margin:0 auto;padding:14px var(--gutter);display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{font-family:var(--font-mono);font-weight:600;font-size:.95rem;letter-spacing:-.01em;color:var(--text)}.brand span{color:var(--green)}.topbar-links{display:flex;gap:18px;align-items:center;font-size:.85rem}.topbar-links a{color:var(--text-2)}.topbar-links a:hover{color:var(--text);text-decoration:none}.footer{border-top:1px solid var(--border);padding:32px 0;font-size:.78rem;color:var(--dim);font-family:var(--font-mono);margin-top:40px}.footer-grid{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px 24px}.footer a{color:var(--text-2)}.footer a:hover{color:var(--green);text-decoration:none}.footer-cell{display:inline-flex;align-items:center;gap:8px}.footer-author a:not(.icon-link){color:var(--text);font-weight:500;border-bottom:1px dashed var(--border-hi)}.footer-author a:not(.icon-link):hover{color:var(--green);border-bottom-color:var(--green);text-decoration:none}.icon-link{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid var(--border);color:var(--text-2);transition:border-color .15s,color .15s,background .15s}.icon-link svg{width:13px;height:13px;fill:currentColor}.icon-link:hover{color:var(--green);border-color:var(--green-deep);background:var(--green-tint);text-decoration:none}.hero{text-align:center;padding:88px 0 48px;position:relative}.hero-meta{display:inline-flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:.75rem;color:var(--text-2);background:var(--surface);border:1px solid var(--border);padding:6px 12px;border-radius:999px;margin-bottom:24px;transition:border-color .2s}.hero-meta:hover{border-color:var(--border-hi)}.hero-meta .dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite}.hero-meta .dot.idle{background:var(--dim);box-shadow:none;animation:none}.hero-meta .dot.bad{background:var(--red);box-shadow:0 0 8px var(--red)}@keyframes pulse{0%,to{opacity:1}50%{opacity:.4}}.hero h1{font-size:clamp(3rem,8vw,5rem);font-weight:800;letter-spacing:-.045em;line-height:1;margin-bottom:18px}.hero h1 .accent{background:linear-gradient(135deg,var(--green-bright),var(--green-deep));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}.hero .tagline{font-size:1.125rem;color:var(--text-2);margin:0 auto 12px;max-width:540px}.hero .sub{font-size:.875rem;color:var(--dim);margin-bottom:18px;font-family:var(--font-mono)}.hero .sub a{color:var(--text-2);border-bottom:1px dashed var(--border-hi)}.hero .sub a:hover{color:var(--green);border-bottom-color:var(--green);text-decoration:none}.hero-links{display:inline-flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:0 auto 36px;max-width:640px}.hero-link{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;background:var(--surface);border:1px solid var(--border);border-radius:999px;color:var(--text-2);font-family:var(--font-mono);font-size:.78rem;text-decoration:none;transition:border-color .15s,color .15s,background .15s}.hero-link:hover{color:var(--text);border-color:var(--border-hi);background:var(--surface-2);text-decoration:none}.hero-link svg{width:13px;height:13px;fill:currentColor;flex-shrink:0}.hero-link .stat-num{color:var(--text);font-weight:500;font-variant-numeric:tabular-nums}.hero-link .stat-num.loading{color:var(--dim);font-weight:400}.hero-link.author-gh:hover{color:var(--text)}.hero-link.stars:hover{color:var(--amber);border-color:#fbbf2459}.hero-link.stars:hover svg{fill:var(--amber)}.hero-link.downloads:hover{color:var(--green);border-color:var(--green-deep)}.install{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);max-width:720px;margin:0 auto 56px;overflow:hidden;box-shadow:0 1px #ffffff05 inset,0 30px 80px -30px #22c55e26}.install-tabs{display:flex;border-bottom:1px solid var(--border);background:var(--bg-deep);padding:0 6px}.install-tab{flex:1;padding:12px 14px;font-family:var(--font-mono);font-size:.8rem;color:var(--dim);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:color .15s,border-color .15s}.install-tab:hover{color:var(--text-2)}.install-tab.active{color:var(--green);border-bottom-color:var(--green)}.install-panel{display:none;padding:20px}.install-panel.active{display:block}.code-block{position:relative;background:var(--bg-deep);border:1px solid var(--border);border-radius:var(--radius);font-family:var(--font-mono);font-size:.875rem;line-height:1.55;--copy-btn-gap: 60px}.code-block pre{margin:0;padding:16px var(--copy-btn-gap) 16px 18px;overflow-x:auto;white-space:pre;color:var(--text)}.code-block .prompt{color:var(--dim);-webkit-user-select:none;user-select:none}.code-block .tok-cmd{color:var(--text);font-weight:500}.code-block .tok-arg{color:var(--text-2)}.code-block .tok-flag{color:var(--amber)}.code-block .tok-url{color:var(--code-url)}.code-block .tok-op{color:var(--green-bright);font-weight:600}.copy-btn{position:absolute;top:8px;right:8px;background:var(--surface-2);border:1px solid var(--border-hi);color:var(--text-2);padding:5px 11px;border-radius:6px;font-family:var(--font-mono);font-size:.72rem;cursor:pointer;transition:all .15s}.copy-btn:hover{color:var(--text);border-color:#3a3a3a}.copy-btn.copied{color:var(--green);border-color:var(--green-deep);background:var(--green-tint)}.copy-btn.failed{color:var(--red);border-color:#ef444466;background:var(--red-tint)}.install-note{margin-top:14px;font-size:.8rem;color:var(--dim);font-family:var(--font-mono)}.install-note a{color:var(--text-2)}.screenshot{max-width:720px;margin:0 auto 80px;text-align:center}.screenshot img{width:100%;border-radius:var(--radius-lg);border:1px solid var(--border);box-shadow:0 0 60px #22c55e1a}.screenshot .caption{margin-top:12px;font-size:.8rem;color:var(--dim);font-family:var(--font-mono)}.screenshot .caption .green-sq{color:var(--green)}.screenshot .caption .orange-sq{color:#ea7c4d}.section{padding:56px 0;border-top:1px solid var(--border)}.section:first-of-type{border-top:0}.section-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:28px;gap:16px;flex-wrap:wrap}.section-head h2{font-size:1.5rem;font-weight:700;letter-spacing:-.02em}.section-head h2 .num{font-family:var(--font-mono);font-size:.95rem;color:var(--green);margin-right:10px;font-weight:500}.section-head p{font-size:.875rem;color:var(--dim);max-width:420px;font-family:var(--font-mono)}.patches-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.patch-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;transition:border-color .2s var(--ease-out),transform .2s var(--ease-out),background .2s var(--ease-out)}.patch-card:hover{border-color:var(--border-hi);transform:translateY(-1px);background:var(--surface-2)}.patch-card .badge{display:inline-block;font-family:var(--font-mono);font-size:.65rem;padding:2px 8px;border-radius:4px;margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em}.patch-card .name{font-weight:600;font-size:.95rem;margin-bottom:4px;color:var(--text)}.patch-card .desc{font-size:.825rem;color:var(--text-2);line-height:1.5}.badge.unlock{background:var(--green-tint);color:var(--green)}.badge.remove{background:var(--red-tint);color:var(--red)}.badge.visual{background:var(--blue-tint);color:var(--blue)}.badge.route{background:var(--amber-tint);color:var(--amber)}.how-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.how-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px 20px}.how-card h3{font-family:var(--font-mono);font-size:.8rem;color:var(--green);letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px}.how-card p{font-size:.875rem;color:var(--text-2);line-height:1.6}.how-card code{background:var(--bg-deep);border:1px solid var(--border);padding:1px 6px;border-radius:4px;font-size:.78rem;color:var(--text)}.cta{text-align:center;padding:56px 0 24px}.cta-row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:8px}.btn{display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:11px 22px;border-radius:10px;font-family:var(--font-sans);font-size:.9rem;font-weight:500;text-decoration:none;transition:border-color .15s,background .15s,transform .15s}.btn:hover{border-color:var(--green);text-decoration:none;transform:translateY(-1px)}.btn.primary{background:var(--green);color:#000;border-color:var(--green)}.btn.primary:hover{background:var(--green-bright);border-color:var(--green-bright)}.btn svg{width:16px;height:16px;fill:currentColor}@media(min-width:1200px){.container,.topbar-inner{max-width:var(--width-wide)}.install,.screenshot{max-width:920px}.hero{padding:112px 0 56px}.section{padding:72px 0}}@media(min-width:1440px){.container,.topbar-inner{max-width:var(--width-step)}.install,.screenshot{max-width:1040px}.patches-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}}@media(max-width:720px){.how-grid{grid-template-columns:1fr}}@media(max-width:600px){.container,.topbar-inner{padding-left:var(--gutter-sm);padding-right:var(--gutter-sm)}.hero{padding:60px 0 36px}.topbar-inner{padding-top:12px;padding-bottom:12px}.topbar-links{display:none}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}</style>
+</head>
+<body>
+  <div id="app"></div>
 </body>
 </html>
