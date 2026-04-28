@@ -1,0 +1,54 @@
+name: Cache Cleanup Weekly
+
+# compat-daily.yml writes a fresh `~/.npm` cache entry on every successful
+# run (key includes ${{ github.run_id }}, which is unique per run) and reads
+# previous entries via restore-keys. GitHub's automatic 7-day cache expiry
+# only kicks in for entries that haven't been *accessed* — the restore-keys
+# match counts as access, so daily-tested entries never expire on their
+# own. Without housekeeping, cache entries accumulate until we hit the
+# 10 GB per-repo limit and GitHub starts evicting LRU, which sometimes
+# kicks the entries we actually wanted to keep.
+#
+# Run weekly: list every cache, delete it. Next compat-daily run repopulates
+# `~/.npm` from a fresh npm-registry fetch (one extra ~80 MB download per
+# week, trivial cost).
+
+on:
+  schedule:
+    - cron: '0 4 * * 0'   # Sunday 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write          # required for `gh cache delete`
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete all repo caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # gh cache list paginates; --limit 200 handles up to 200 entries
+          # in a single call (we'd never expect that many anyway).
+          ids=$(gh cache list --repo "$REPO" --limit 200 --json id --jq '.[].id')
+          if [[ -z "$ids" ]]; then
+            echo "No caches to delete."
+            exit 0
+          fi
+          count=$(printf '%s\n' "$ids" | grep -c . || true)
+          echo "Deleting $count cache entries…"
+          while IFS= read -r id; do
+            [[ -z "$id" ]] && continue
+            gh cache delete "$id" --repo "$REPO" \
+              && echo "  ✓ $id" \
+              || echo "  ✗ $id (already gone or transient error)"
+          done <<< "$ids"
+          echo "Done. Next compat-daily run will repopulate ~/.npm fresh."
