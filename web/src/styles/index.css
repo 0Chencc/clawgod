@@ -1,0 +1,9 @@
+/* Style entrypoint — main.ts only imports this file.
+ * Order matters: tokens → reset → page chrome → content → media queries. */
+
+@import './tokens.css';
+@import './base.css';
+@import './layout.css';
+@import './hero.css';
+@import './sections.css';
+@import './responsive.css';

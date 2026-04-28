@@ -1,0 +1,57 @@
+/* Reset + global element defaults. */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+
+  /* Layered radial gradients in the background, fixed so scrolling
+     doesn't sweep the highlights. */
+  background-image:
+    radial-gradient(ellipse 800px 500px at 50% -10%, var(--green-tint), transparent 60%),
+    radial-gradient(ellipse 600px 400px at 90% 20%, rgba(96, 165, 250, 0.04), transparent 60%);
+  background-attachment: fixed;
+}
+
+a {
+  color: var(--green);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+code, pre { font-family: var(--font-mono); }
+
+/* Custom scrollbar — applies to any overflow container, including
+ * the install code-blocks where long commands wrap onto a single line. */
+:where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-hi) transparent;
+}
+:where(*)::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+:where(*)::-webkit-scrollbar-track { background: transparent; }
+:where(*)::-webkit-scrollbar-thumb {
+  background: var(--border-hi);
+  border-radius: 4px;
+}
+:where(*)::-webkit-scrollbar-thumb:hover { background: var(--green-deep); }
+
+/* When the user actively interacts with a code block, color the
+ * scrollbar green to make the affordance feel like a brand element. */
+.code-block:hover {
+  scrollbar-color: var(--green-deep) transparent;
+}
+.code-block:hover::-webkit-scrollbar-thumb { background: var(--green-deep); }

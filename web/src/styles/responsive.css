@@ -1,0 +1,69 @@
+/* All breakpoints in one place.
+ *
+ *   ≥ 1200px   widen container, install widget grows with it
+ *   ≥ 1440px   patches grid forced to 4 columns (auto-fill default
+ *              would still go 3 because of the 260px minmax; we
+ *              shrink the floor to 240px on huge screens to lock in 4)
+ *   ≤ 600px    mobile chrome trims
+ */
+
+@media (min-width: 1200px) {
+  .container,
+  .topbar-inner {
+    max-width: var(--width-wide);
+  }
+
+  /* Let the install widget breathe along with the container.
+   * Cap at 920px — past that the long curl line still fits in
+   * one line on most laptop displays without horizontal scrolling. */
+  .install,
+  .screenshot {
+    max-width: 920px;
+  }
+
+  /* Slightly more vertical air on big screens. */
+  .hero { padding: 112px 0 56px; }
+  .section { padding: 72px 0; }
+}
+
+@media (min-width: 1440px) {
+  .container,
+  .topbar-inner {
+    max-width: var(--width-step);
+  }
+
+  .install,
+  .screenshot {
+    max-width: 1040px;
+  }
+
+  /* Force 4-column patches grid at this scale: floor each card at
+   * 240px so 4 of them fit comfortably across ~1232px content area. */
+  .patches-grid {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .how-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 600px) {
+  .container,
+  .topbar-inner { padding-left: var(--gutter-sm); padding-right: var(--gutter-sm); }
+  .hero { padding: 60px 0 36px; }
+  .topbar-inner { padding-top: 12px; padding-bottom: 12px; }
+  .topbar-links { display: none; }
+}
+
+/* Respect prefers-reduced-motion: kill the heartbeat dot + transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,169 @@
+/* Patches sections, How-it-works, and CTA. */
+
+.section {
+  padding: 56px 0;
+  border-top: 1px solid var(--border);
+}
+.section:first-of-type { border-top: 0; }
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 28px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.section-head h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.section-head h2 .num {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--green);
+  margin-right: 10px;
+  font-weight: 500;
+}
+.section-head p {
+  font-size: 0.875rem;
+  color: var(--dim);
+  max-width: 420px;
+  font-family: var(--font-mono);
+}
+
+/* Patches grid — auto-fill so wider screens flow into more columns. */
+
+.patches-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.patch-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  transition: border-color 0.2s var(--ease-out),
+              transform 0.2s var(--ease-out),
+              background 0.2s var(--ease-out);
+}
+.patch-card:hover {
+  border-color: var(--border-hi);
+  transform: translateY(-1px);
+  background: var(--surface-2);
+}
+
+.patch-card .badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-bottom: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.patch-card .name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+.patch-card .desc {
+  font-size: 0.825rem;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.badge.unlock { background: var(--green-tint); color: var(--green); }
+.badge.remove { background: var(--red-tint);   color: var(--red); }
+.badge.visual { background: var(--blue-tint);  color: var(--blue); }
+.badge.route  { background: var(--amber-tint); color: var(--amber); }
+
+/* How it works — 4 cards on a 2x2 grid that collapses on small screens. */
+
+.how-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.how-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 20px;
+}
+.how-card h3 {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--green);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.how-card p {
+  font-size: 0.875rem;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+.how-card code {
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+/* CTA */
+
+.cta {
+  text-align: center;
+  padding: 56px 0 24px;
+}
+.cta-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 11px 22px;
+  border-radius: 10px;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+.btn:hover {
+  border-color: var(--green);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+.btn.primary {
+  background: var(--green);
+  color: #000;
+  border-color: var(--green);
+}
+.btn.primary:hover {
+  background: var(--green-bright);
+  border-color: var(--green-bright);
+}
+.btn svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}

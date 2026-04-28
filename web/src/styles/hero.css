@@ -1,0 +1,258 @@
+/* Above-the-fold: hero meta pill, big title, install widget, screenshot. */
+
+.hero {
+  text-align: center;
+  padding: 88px 0 48px;
+  position: relative;
+}
+
+.hero-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 999px;
+  margin-bottom: 24px;
+  transition: border-color 0.2s;
+}
+.hero-meta:hover { border-color: var(--border-hi); }
+
+.hero-meta .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: pulse 2s ease-in-out infinite;
+}
+.hero-meta .dot.idle { background: var(--dim); box-shadow: none; animation: none; }
+.hero-meta .dot.bad  { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.hero h1 {
+  font-size: clamp(3rem, 8vw, 5rem);
+  font-weight: 800;
+  letter-spacing: -0.045em;
+  line-height: 1;
+  margin-bottom: 18px;
+}
+
+.hero h1 .accent {
+  background: linear-gradient(135deg, var(--green-bright), var(--green-deep));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero .tagline {
+  font-size: 1.125rem;
+  color: var(--text-2);
+  margin: 0 auto 12px;
+  max-width: 540px;
+}
+
+.hero .sub {
+  font-size: 0.875rem;
+  color: var(--dim);
+  margin-bottom: 18px;
+  font-family: var(--font-mono);
+}
+.hero .sub a {
+  color: var(--text-2);
+  border-bottom: 1px dashed var(--border-hi);
+}
+.hero .sub a:hover {
+  color: var(--green);
+  border-bottom-color: var(--green);
+  text-decoration: none;
+}
+
+/* Stats row — author socials + live repo numbers from the GitHub API. */
+
+.hero-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 auto 36px;
+  max-width: 640px;
+}
+
+.hero-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.hero-link:hover {
+  color: var(--text);
+  border-color: var(--border-hi);
+  background: var(--surface-2);
+  text-decoration: none;
+}
+.hero-link svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+  flex-shrink: 0;
+}
+.hero-link .stat-num {
+  color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.hero-link .stat-num.loading { color: var(--dim); font-weight: 400; }
+
+/* Per-link accent on hover so the brand still pokes through. */
+.hero-link.author-gh:hover { color: var(--text); }
+.hero-link.stars:hover     { color: var(--amber); border-color: rgba(251, 191, 36, 0.35); }
+.hero-link.stars:hover svg { fill: var(--amber); }
+.hero-link.downloads:hover { color: var(--green); border-color: var(--green-deep); }
+
+/* Install widget */
+
+.install {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  max-width: 720px;
+  margin: 0 auto 56px;
+  overflow: hidden;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.02) inset,
+    0 30px 80px -30px rgba(34, 197, 94, 0.15);
+}
+
+.install-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-deep);
+  padding: 0 6px;
+}
+
+.install-tab {
+  flex: 1;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--dim);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.install-tab:hover { color: var(--text-2); }
+.install-tab.active {
+  color: var(--green);
+  border-bottom-color: var(--green);
+}
+
+.install-panel { display: none; padding: 20px; }
+.install-panel.active { display: block; }
+
+.code-block {
+  position: relative;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.55;
+
+  /* Reserve room for the copy button so long commands don't slide
+     under it visually before scrolling kicks in. */
+  --copy-btn-gap: 60px;
+}
+.code-block pre {
+  margin: 0;
+  padding: 16px var(--copy-btn-gap) 16px 18px;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text);
+}
+.code-block .prompt { color: var(--dim); user-select: none; }
+
+/* Token coloring — keeps the long install one-liner readable.
+ * Single hue (everything green) was hard to skim; classify and tint. */
+.code-block .tok-cmd  { color: var(--text); font-weight: 500; }
+.code-block .tok-arg  { color: var(--text-2); }
+.code-block .tok-flag { color: var(--amber); }
+.code-block .tok-url  { color: var(--code-url); }
+.code-block .tok-op   { color: var(--green-bright); font-weight: 600; }
+
+.copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-hi);
+  color: var(--text-2);
+  padding: 5px 11px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.copy-btn:hover {
+  color: var(--text);
+  border-color: #3a3a3a;
+}
+.copy-btn.copied {
+  color: var(--green);
+  border-color: var(--green-deep);
+  background: var(--green-tint);
+}
+.copy-btn.failed {
+  color: var(--red);
+  border-color: rgba(239, 68, 68, 0.4);
+  background: var(--red-tint);
+}
+
+.install-note {
+  margin-top: 14px;
+  font-size: 0.8rem;
+  color: var(--dim);
+  font-family: var(--font-mono);
+}
+.install-note a { color: var(--text-2); }
+
+/* Screenshot */
+
+.screenshot {
+  max-width: 720px;
+  margin: 0 auto 80px;
+  text-align: center;
+}
+.screenshot img {
+  width: 100%;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  box-shadow: 0 0 60px rgba(34, 197, 94, 0.10);
+}
+.screenshot .caption {
+  margin-top: 12px;
+  font-size: 0.8rem;
+  color: var(--dim);
+  font-family: var(--font-mono);
+}
+.screenshot .caption .green-sq { color: var(--green); }
+.screenshot .caption .orange-sq { color: #ea7c4d; }
