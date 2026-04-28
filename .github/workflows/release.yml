@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+# Project policy: never run JS-based actions on Node 20 — they're already
+# deprecated and forced off after 2026-06-02. Pin every action that runs
+# JS (actions/checkout etc.) to Node 24 across all our workflows.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   release:
     runs-on: ubuntu-latest

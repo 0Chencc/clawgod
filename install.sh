@@ -61,7 +61,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -137,26 +137,19 @@ mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
 NATIVE_BIN=""
 NATIVE_BIN_LABEL=""
 NATIVE_BIN_TMPDIR=""
-VERSIONS_DIR="$HOME/.local/share/claude/versions"
-if [ -d "$VERSIONS_DIR" ]; then
-  for f in $(ls -t "$VERSIONS_DIR"/* 2>/dev/null); do
-    if file "$f" 2>/dev/null | grep -qE "Mach-O|ELF"; then
-      NATIVE_BIN="$f"
-      NATIVE_BIN_LABEL="$(basename "$f")"
-      break
-    fi
-  done
-fi
 
-# Fallback: backed-up .orig from a prior clawgod install
-if [ -z "$NATIVE_BIN" ] && [ -e "$BIN_DIR/claude.orig" ]; then
-  if file "$BIN_DIR/claude.orig" 2>/dev/null | grep -qE "Mach-O|ELF"; then
-    NATIVE_BIN="$BIN_DIR/claude.orig"
-  elif [ -L "$BIN_DIR/claude.orig" ]; then
-    NATIVE_BIN="$(readlink "$BIN_DIR/claude.orig")"
-  fi
-  [ -n "$NATIVE_BIN" ] && NATIVE_BIN_LABEL="$(basename "$NATIVE_BIN")"
-fi
+# Note on detection sources we deliberately skip:
+#   - `~/.local/share/claude/versions/`: Anthropic's official install drops
+#     the binary here on first run, but the directory only ever grows —
+#     since we patch out `claude update` (it would otherwise overwrite the
+#     bun runtime under our launcher), nothing refreshes it. Self-update via
+#     our `claude update` redirect should always pull the *current* upstream
+#     release, not whatever was downloaded the day clawgod was first set up.
+#   - Backup binaries (`claude.orig`): a frozen snapshot from initial install,
+#     same problem. Backups exist solely for `--uninstall` to restore vanilla
+#     Claude, never as an install source.
+# What's left below — npm-global, bun-global, and the npm-registry
+# fallback — all route to whatever's actually current at install time.
 
 # Detect platform suffix (also used by the npm fallback below)
 case "$(uname -s)" in
@@ -834,44 +827,19 @@ const { spawnSync } = require('child_process');
 const claudeDir = join(homedir(), '.claude');
 const clawgodDir = join(homedir(), '.clawgod');
 
-// ─── Version drift detection ────────────────────────────────────────
-// If the user upgraded their native Claude binary since we patched, the
-// snapshot in cli.original.cjs is stale. Compare the basename of the most
-// recent binary in ~/.local/share/claude/versions/ against what we stamped
-// at install time, and silently re-patch if they differ. Resolves stamp
-// + repatch script relative to this wrapper (__dirname) so it works
-// regardless of where the user installed clawgod.
-try {
-  const stamp = join(__dirname, '.source-version');
-  const versionsDir = join(homedir(), '.local/share/claude/versions');
-  if (existsSync(versionsDir)) {
-    let latest = null, latestMtime = 0;
-    for (const name of readdirSync(versionsDir)) {
-      const p = join(versionsDir, name);
-      let st;
-      try { st = statSync(p); } catch { continue; }
-      if (!st.isFile() || st.size < 10 * 1024 * 1024) continue;
-      if (st.mtimeMs > latestMtime) { latestMtime = st.mtimeMs; latest = p; }
-    }
-    if (latest) {
-      const have = existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : '';
-      const want = basename(latest);
-      if (have && have !== want) {
-        process.stderr.write(`[clawgod] new Claude version detected (${want}, was ${have}); re-patching...\n`);
-        const repatch = join(__dirname, 'repatch.mjs');
-        if (existsSync(repatch)) {
-          const r = spawnSync(process.execPath, [repatch, latest], { stdio: 'inherit' });
-          if (r.status !== 0) {
-            process.stderr.write('[clawgod] re-patch failed; running previous patched copy\n');
-          }
-        }
-      }
-    }
-  }
-} catch (e) {
-  process.stderr.write(`[clawgod] drift check skipped: ${e.message}\n`);
-}
-// ────────────────────────────────────────────────────────────────────
+// Note: there used to be a "drift detection" block here that scanned
+// ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
+// Removed because:
+//   1. Windows users don't have a `versions/` directory at all (Anthropic's
+//      Windows install doesn't follow that convention).
+//   2. We patch out `claude update` (it would otherwise overwrite the bun
+//      runtime under our launcher), so `versions/` no longer auto-grows
+//      on a healthy clawgod install.
+// In practice the block was reading a directory that never changes, but
+// could *retract* a fresher version that install.sh just pulled from npm
+// registry — putting users into a re-patch loop. Upgrades now go through
+// the patched `claude update` → install.sh redirect, which always pulls
+// the latest from npm.
 const configDir = process.env.CLAUDE_CONFIG_DIR || (existsSync(claudeDir) ? claudeDir : clawgodDir);
 const providerDir = clawgodDir;
 const configFile = join(providerDir, 'provider.json');
@@ -1034,6 +1002,52 @@ const patches = [
     pattern: /let ([\w$]+)=[\w$]+\(\);if\(\1!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
     replacer: () => '',
     sentinel: '!=="firstParty"&&',
+  },
+  {
+    // CLI subcommand registered via commander chain:
+    //   .command("update").alias("upgrade").description("…").action(async()=>{…})
+    // The original action's update path is broken under clawgod: detectInstallType()
+    // returns "unknown" because the launcher hides our cli.cjs from upstream's
+    // path heuristics, and the unknown-fallback branch on macOS overwrites
+    // ~/.bun/bin/bun by extracting the bun runtime out of the new native binary
+    // (preserving Apr-19-build mtime). That **silently downgrades** clawgod's
+    // required Bun and crashes cli.original.cjs the next launch with
+    // "Expected CommonJS module to have a function wrapper". On Windows the
+    // same fallback writes the new binary somewhere our drift detection
+    // doesn't scan, so the user sees "Successfully updated" but never gets
+    // the new version.
+    //
+    // Redirect to clawgod's own self-update so the upgrade goes through
+    // install.sh (re-extract + re-patch + re-launcher). Always pull the
+    // latest install.sh from the release so users get patcher fixes too.
+    // Escape hatch printed on every run: `install.sh --uninstall` restores
+    // claude.orig and lets vanilla `claude update` work again.
+    name: "Redirect `claude update` to clawgod self-update",
+    pattern: /(\.command\("update"\)\.alias\("upgrade"\)\.description\("[^"]+"\)\.action\(async\(\)=>\{)/g,
+    replacer: (m, prefix) => {
+      // PowerShell 5.1's Invoke-WebRequest ignores HTTP_PROXY/HTTPS_PROXY env
+      // (only reads IE system proxy). Read env explicitly and pass via -Proxy
+      // so it works on both PS 5.1 and PS 7. Use Invoke-RestMethod (irm) not
+      // Invoke-WebRequest (iwr): under -UseBasicParsing on PS 5.1, iwr's
+      // .Content is byte[] not string, so `iex (iwr -useb ...).Content`
+      // throws "Cannot convert System.Byte[] to System.String". irm always
+      // returns string in both versions. -EncodedCommand bypasses CLI
+      // arg-quoting; payload must be UTF-16LE base64.
+      const psScript =
+        "$p=if($env:HTTPS_PROXY){$env:HTTPS_PROXY}elseif($env:HTTP_PROXY){$env:HTTP_PROXY}else{$null};" +
+        "$u='https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1';" +
+        "if($p){iex(irm -Proxy $p $u)}else{iex(irm $u)}";
+      const psB64 = Buffer.from(psScript, 'utf16le').toString('base64');
+      return (
+        prefix +
+        `process.stderr.write("[clawgod] 'claude update' is handled by clawgod self-update.\\n[clawgod] To leave clawgod and use vanilla update: bash ~/.clawgod/install.sh --uninstall\\n[clawgod] Continuing now\\u2026\\n");` +
+        `const _w=process.platform==='win32';` +
+        `const _c=_w?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash'];` +
+        `const _r=require('child_process').spawnSync(_c[0],_c.slice(1),{stdio:'inherit'});` +
+        `process.exit(_r.status||0);`
+      );
+    },
+    sentinel: '.command("update").alias("upgrade")',
   },
   // ── 绿色主题 (patch 标识) ──
 
@@ -1280,6 +1294,40 @@ FEATURES_EOF
   info "Default features.json created"
 fi
 
+# ─── Sanity check: ensure user's Bun can actually load cli.original.cjs ──
+# Anthropic builds the native binary with a bleeding-edge Bun build (e.g.
+# 1.3.14 while stable still ships 1.3.13). Older Bun crashes loading the
+# extracted cli.original.cjs with "Expected CommonJS module to have a
+# function wrapper". Detect this BEFORE we install the launcher — better
+# to fail loudly than to leave the user with a launcher that panics on
+# first invocation.
+
+dim "Verifying Bun can load patched cli.original.cjs ..."
+sanity_out=$("$BUN_BIN" "$CLAWGOD_DIR/cli.cjs" --version 2>&1 || true)
+if echo "$sanity_out" | grep -q "Expected CommonJS module to have a function wrapper"; then
+  echo ""
+  warn "Bun $($BUN_BIN --version) cannot load Anthropic's cli.original.cjs."
+  warn ""
+  warn "  Anthropic builds with Bun's canary channel (currently ~1.3.14), while"
+  warn "  bun.sh's main download is on stable (currently 1.3.13). The canary build"
+  warn "  is NOT visible on bun.sh's download page — it lives on GitHub Releases"
+  warn "  and is reachable only via 'bun upgrade --canary'."
+  warn ""
+  warn "  If your bun is from bun.sh:"
+  warn "    bun upgrade --canary"
+  warn ""
+  warn "  If your bun is from a package manager (brew/apt/scoop) where the binary"
+  warn "  is behind a shim and refuses to self-replace ('bun upgrade' silently"
+  warn "  hangs or no-ops):"
+  warn "    <pkg-manager> uninstall bun"
+  warn "    curl -fsSL https://bun.sh/install | bash"
+  warn "    bun upgrade --canary"
+  warn ""
+  warn "  Then re-run install.sh — this sanity check will pass."
+  exit 1
+fi
+info "Bun loads cli.original.cjs"
+
 # ─── Replace claude command ───────────────────────────
 
 LAUNCHER_CONTENT="#!/bin/bash
@@ -1403,4 +1451,10 @@ warn "  If 'claude' still runs the old version, restart your terminal or run: ha
 echo ""
 dim "  Config: ~/.clawgod/provider.json"
 dim "  Flags:  ~/.clawgod/features.json"
+echo ""
+dim "  If 'claude' panics with 'Expected CommonJS module to have a function wrapper',"
+dim "  your Bun lags Anthropic's embedded Bun. Upgrade with one of:"
+dim "    bun upgrade --canary           (if installed via curl/install.sh)"
+dim "    scoop update bun               (scoop — may lag stable)"
+dim "    brew upgrade bun               (homebrew)"
 echo ""
