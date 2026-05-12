@@ -1281,9 +1281,24 @@ Write-OK "Bun loads cli.original.cjs"
 
 # ─── Replace claude command ───────────────────────────
 
-$cliPath = (Join-Path $ClawDir "cli.cjs") -replace '\\', '\\'
-$bunPath = $BunBin -replace '\\', '\\'
-$launcherContent = "@echo off`r`n`"$bunPath`" `"$cliPath`" %*"
+# Build launcher content using %USERPROFILE% env var where possible to avoid
+# encoding issues when the profile path contains non-ASCII characters (e.g.
+# Chinese/Korean/Japanese usernames). cmd.exe resolves %USERPROFILE% at
+# runtime so no problematic characters need to be baked into the .cmd file.
+$cliPathInCmd = "%USERPROFILE%\.clawgod\cli.cjs"
+$normalizedUserProfile = $env:USERPROFILE.TrimEnd('\', '/')
+$normalizedBunBin = $BunBin.TrimEnd('\', '/')
+$userProfilePrefix = "$normalizedUserProfile\"
+if ($normalizedBunBin.Equals($normalizedUserProfile, [StringComparison]::OrdinalIgnoreCase) -or
+    $normalizedBunBin.StartsWith($userProfilePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    $bunRelative = $normalizedBunBin.Substring($normalizedUserProfile.Length).TrimStart('\', '/')
+    $bunPathInCmd = "%USERPROFILE%\$bunRelative"
+} else {
+    # Bun outside USERPROFILE (e.g. system-wide install) — fall back to
+    # absolute path since %USERPROFILE%-relative expansion doesn't apply.
+    $bunPathInCmd = $BunBin
+}
+$launcherContent = "@echo off`r`n`"$bunPathInCmd`" `"$cliPathInCmd`" %*"
 
 # Find and back up original claude
 $claudeCmd = Join-Path $BinDir "claude.cmd"
@@ -1357,7 +1372,7 @@ if (Test-Path $claudeExe) {
 #  - User can invoke patched explicitly via `clawgod` regardless of which
 #    binary 'claude' resolves to
 foreach ($cmd in @("claude", "clawgod")) {
-    $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding ASCII
+    $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding Default
 }
 Write-OK "Commands 'claude' + 'clawgod' → patched"
 
