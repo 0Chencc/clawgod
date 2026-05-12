@@ -1035,8 +1035,14 @@ const patches = [
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
+    // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
+    // v2.1.119+: same gate plus extra branches for claude-opus-4-7.
+    // v2.1.139+: gate moved inside function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if($.includes("claude-3-")||...)return!0;return!1}
+    //            i.e. the `let` lifted to a comma-list before the if; the if-gate
+    //            itself is unchanged shape. We drop only the if-gate; downstream
+    //            model allow-list still runs and now accepts third-party calls.
     name: 'Auto-mode unlock for third-party API',
-    pattern: /let ([\w$]+)=[\w$]+\(\);if\(\1!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
+    pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
     replacer: () => '',
     sentinel: '!=="firstParty"&&',
   },
