@@ -427,9 +427,9 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 
 ## 八、补丁汇总
 
-截至 2026-05-15，clawgod 共 **28 个补丁**（原 24 + 新增 4）：
+截至 2026-05-16（v2.1.143），clawgod 共 **31 个补丁**：
 
-| # | 补丁名 | 类型 |
+| # | 补丁名 | 类别 |
 |---|--------|------|
 | 1 | USER_TYPE → ant | 核心破解 |
 | 2 | GrowthBook env overrides | 核心破解 |
@@ -440,17 +440,18 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 | 7 | Ultraplan enable | 功能解锁 |
 | 8 | Ultrareview enable | 功能解锁 |
 | 9 | Computer Use gate bypass | 功能解锁 |
-| 10 | Auto-mode unlock for third-party API | 核心破解 |
-| 11 | Redirect `claude update` to self-update | 功能 |
-| 12 | **Sub-agent model inherit from ANTHROPIC_MODEL** | **新增** |
-| 13 | **Force pY() to always return true** | **新增** |
-| 14 | **Remove DISABLE_EXPERIMENTAL_BETAS gate in NI6()** | **新增** |
-| 15 | **Strip all beta headers in messages API** | **新增** |
-| 16 | **Disable web_search for third-party API** | **新增** |
-| 17 | **Filter null from extraToolSchemas** | **新增** |
-| 18-24 | 绿色主题补丁（7 个） | 视觉 |
-| 25-28 | 限制移除（4 个） | 限制移除 |
-| 29-30 | 消息过滤（2 个） | 功能 |
+| 10 | Voice Mode enable (bypass GrowthBook kill) | 功能解锁 |
+| 11 | Auto-mode unlock for third-party API | 核心破解 |
+| 12 | Redirect `claude update` to clawgod self-update | 功能 |
+| 13 | Sub-agent model inherit from ANTHROPIC_MODEL | 核心破解 |
+| 14 | Force pY()/FYH() to always return true | 核心破解 |
+| 15 | Remove DISABLE_EXPERIMENTAL_BETAS gate in NI6()/dI6() | 核心破解 |
+| 16 | Strip all beta headers in messages API | 兼容性 |
+| 17 | Disable web_search for third-party API | 兼容性 |
+| 18 | Filter null from extraToolSchemas | 兼容性 |
+| 19-25 | 绿色主题补丁（7 个：RGB/ANSI/dark/light/shimmer/hex） | 视觉 |
+| 26-29 | 限制移除（4 个：CYBER_RISK/URL/CAUTIOUS/NOT_LOGGED_IN） | 限制移除 |
+| 30-31 | 消息过滤（2 个：attachment + s_8 form） | 功能 |
 
 **cli.cjs 智能配置**（非 patch.mjs 补丁，直接修改包装器）：
 - 自动检测第三方 API → 注入 `DISABLE_EXPERIMENTAL_BETAS` + `ENABLE_TOOL_SEARCH` + `API_TIMEOUT_MS` + `STREAM_IDLE_TIMEOUT`
@@ -502,27 +503,126 @@ node ~/.clawgod/patch.mjs
 
 每次更新后检查：
 1. **CHANGELOG** 中新的 `beta` header 或 `anthropic_beta` 字段 → 可能需要更新 beta stripping 补丁
-2. **新的 `tengu_*` 特征标志** → 更新 features.json
-3. **`pY()` 函数是否改变** → 如果函数结构变了，更新正则
-4. **`NI6()` 函数是否改变** → 如果 Tool Search 逻辑变了，更新正则
+2. **新的 `tengu_*` 特征标志** → 更新 features.json（2.1.143 已移除 `tengu_amber_quartz_disabled`）
+3. **`pY()` / `FYH()` 函数** → 检查 provider gate 是否改名或重构（2.1.143 中 `pY`→`FYH`，Lq→Jq）
+4. **`NI6()` / `dI6()` 函数** → 检查 Tool Search 逻辑（2.1.143 中 DISABLE_EXPERIMENTAL_BETAS 门禁已被移除）
 5. **新的 `vq()` 判断分支** → 检查是否影响 USER_TYPE
 6. **新的工具定义字段** → 检查是否被 `input_examples` 类似问题
+
+### 9.5 实战经验：2.1.142 → 2.1.143 升级
+
+```bash
+# 1. 从新版本 ELF 二进制提取 JS
+node ~/.clawgod/extract-natives.mjs ~/.local/share/claude/versions/2.1.143 ~/.clawgod --cli-js
+
+# 2. 后处理转为 CJS（需指定输出路径）
+node ~/.clawgod/post-process.mjs
+# 将生成的 CJS 替换 cli.original.cjs
+
+# 3. Verify 模式检查补丁
+node ~/.clawgod/patch.mjs --verify
+# 预期：多数显示「not yet applied」，少数显示：
+#   「regex stale」→ 正则失效，需要重新编写
+#   「sentinel absent」→ 函数已被上游重写/移除
+
+# 4. 修复失效正则
+# 常见原因：
+#   a) 混淆函数名变化（如 Lq→Jq）→ 正则中改为 `[\w$]+` 通配符
+#   b) 函数完全重写（如 NI6→dI6）→ 更新 pattern + sentinel
+#   c) 特征 flag 被移除（如 tengu_amber_quartz_disabled）→ 直接跳过
+
+# 5. 应用全部补丁
+node ~/.clawgod/patch.mjs
+```
+
+### 9.6 2.1.143 关键变化清单
+
+| 变化 | 影响 | 处理方式 |
+|------|------|----------|
+| `FYH()` 新 gate 函数（`pY()` 改名） | 限制 Tool Search、system prompt、tool filter 到 firstParty | 现有 `pY()` 补丁通配 `([\w$]+)` 自动匹配 |
+| `NI6()` → `dI6()`（DISABLE_EXPERIMENTAL_BETAS 移除） | 函数完全重写，门禁已不存在 | 补丁自动标记「已应用」（sentinel 不存在） |
+| `Lq` → `Jq`（header-merge 函数改名） | Beta stripping 补丁 regex 失效 | 修复为 `([\w$]+)` 通配匹配 |
+| Voice Mode flag 移除 | `tengu_amber_quartz_disabled` 不存在 | 跳过该补丁 |
+| 无新反第三方限制 | 除 FYH() 外无新增 gate | 无需新增补丁 |
 
 ---
 
 ## 十、关键文件路径
 
-| 文件 | 路径 |
-|------|------|
-| Claude Code 原生二进制 | `~/.local/share/claude/versions/2.1.142` |
-| ClawGod 安装目录 | `~/.clawgod/` |
-| 启动包装器 | `~/.clawgod/cli.cjs` |
-| 补丁后的源码 | `~/.clawgod/cli.original.cjs` |
-| 补丁前的备份 | `~/.clawgod/cli.original.cjs.bak` |
-| 补丁脚本 | `~/.clawgod/patch.mjs`（24+4=28 个补丁） |
-| 后处理脚本 | `~/.clawgod/post-process.mjs`（含 try/catch 修复） |
-| 特征标志 | `~/.clawgod/features.json` |
-| 提供者配置 | `~/.clawgod/provider.json` |
-| Native 模块提取 | `~/.clawgod/extract-natives.mjs` |
-| 重打补丁助手 | `~/.clawgod/repatch.mjs` |
-| 源码仓库 | `/home/aaa/develop/clawgod/src/`（完整复制） |
+| 文件 | 路径 | 说明 |
+|------|------|------|
+| Claude Code 原生二进制 | `~/.local/share/claude/versions/2.1.143` | 最新支持版本 |
+| ClawGod 安装目录 | `~/.clawgod/` | 运行时目录 |
+| 启动包装器 | `~/.clawgod/cli.cjs` | 智能配置 + 第三方 API 优化 |
+| 补丁后的源码 | `~/.clawgod/cli.original.cjs` | 已打补丁（14.5MB，不纳入 git） |
+| 补丁前的备份 | `~/.clawgod/cli.original.cjs.bak` | 用于 diff repatch |
+| 补丁脚本 | `~/.clawgod/patch.mjs` | **31 个补丁** |
+| 版本戳 | `~/.clawgod/.source-version` | 当前版本 `2.1.143` |
+| 后处理脚本 | `~/.clawgod/post-process.mjs` | ESM→CJS + try/catch 修复 |
+| 特征标志 | `~/.clawgod/features.json` | GrowthBook overrides |
+| 提供者配置 | `~/.clawgod/provider.json` | 第三方 API 模板 |
+| Native 模块提取 | `~/.clawgod/extract-natives.mjs` | Bun SEA 提取 |
+| 重打补丁助手 | `~/.clawgod/repatch.mjs` | diff-based repatch |
+| 源码仓库 | `/home/aaa/develop/clawgod/` | git 仓库（dev 分支） |
+
+---
+
+## 十一、dev 分支开发与版本兼容性
+
+### 11.1 分支策略
+
+```
+dev（我们的开发）
+  ↑ merge
+main（追踪 0Chencc/clawgod 上游）
+  ↑ fetch
+chencc/main（原作者 0Chencc）
+```
+
+| 分支 | 追踪 | 用途 |
+|------|------|------|
+| `main` | `origin/main` (gdlwolf) | 接收上游更新后合并到 dev |
+| `dev` | 无（默认分支） | 所有二开 + 修复 |
+| `chencc/main` | `0Chencc/clawgod` | 上游参考，cherry-pick 有用 commit |
+
+### 11.2 同步上游工作流
+
+```bash
+# 原作者更新了
+git checkout main
+git pull origin main                  # gdlwolf 的 main（fork 同步后）
+# 或直接从 chencc 拉
+git fetch chencc
+git checkout main && git merge chencc/main
+
+# 合并到 dev
+git checkout dev
+git merge main
+git push origin dev
+```
+
+### 11.3 版本升级检查清单
+
+每次新版 Claude Code 发布后的验证步骤：
+
+1. **提取 JS** → `extract-natives.mjs` + `post-process.mjs`
+2. **Verify 补丁** → `node patch.mjs --verify`
+3. **修复 regex stale** → 常见原因：混淆名变化、函数重写、flag 移除
+4. **审查新 gate** → 搜索 `!== "firstParty"`、`Dq() ==`、`ENABLE_TOOL_SEARCH` 等关键词
+5. **应用+冒烟** → `node patch.mjs` + `claude --help`
+6. **更新 wiki** → 记录关键变化到本文件 + `log.md`
+
+### 11.4 所有 commit 历史（dev 分支）
+
+```
+718c353 docs: add CHANGELOG.md following Anthropic convention
+be87bc3 chore: replace all 0Chencc/clawgod references with gdlwolf/clawgod
+d73eb79 feat(dev): init dev branch with 31 patches, LLM wiki, and third-party enhancements
+d73a48a fix(patcher): Auto-mode unlock regex fails on claude 2.1.139 (multi-var let) [cherry-pick chencc]
+f05db83 Merge pull request #70 from keyblues/fix/windows-launcher-encoding [cherry-pick chencc]
+8687867 fix(installer): require path separator boundary in USERPROFILE prefix check [cherry-pick chencc]
+1a25162 fix(installer): resolve garbled characters in .cmd launcher for non-ASCII Windows usernames [cherry-pick chencc]
+25e5315 fix(installer): hard-require Bun >= 1.3.14 with pre-flight version gate [upstream]
+b5306eb docs: add Star History section to all READMEs [upstream]
+... (更早的上游 commit)
+```
