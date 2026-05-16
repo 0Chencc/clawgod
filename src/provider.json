@@ -1,0 +1,7 @@
+{
+  "apiKey": "",
+  "baseURL": "https://api.anthropic.com",
+  "model": "",
+  "smallModel": "",
+  "timeoutMs": 3000000
+}
