@@ -1,13 +1,12 @@
 # ClawGod 完整备份 — 二开增强版
 
-这是 clawgod 的完整备份，包含 **31 个补丁（支持 Claude Code 2.1.143）** + cli.cjs 智能配置 + wiki 知识库。
+这是 clawgod 的完整备份，包含 **32 个补丁（支持 Claude Code 2.1.142-2.1.143）** + cli.cjs 智能配置 + wiki 知识库。
 
 ## 目录结构
 
 | 文件 | 说明 |
 |------|------|
-| `install.sh` | 原版安装脚本（来自源码仓库） |
-| `patch.mjs` | **31 个补丁**（核心文件，支持 Claude Code 2.1.142-2.1.143） |
+| `patch.mjs` | **32 个补丁**（核心文件，支持 Claude Code 2.1.142-2.1.143） |
 | `cli.cjs` | **智能包装器**（自动检测第三方 API → 注入优化配置） |
 | `.source-version` | 当前支持的 Claude Code 版本 |
 | `post-process.mjs` | 后处理脚本（含 .node require 的 try/catch 修复） |
@@ -44,6 +43,7 @@ node ~/.clawgod/patch.mjs
 
 - 修复了 `patch.mjs` 中 beta header 剥离的正则表达式，支持 2.1.143（minified 函数名 Lq→Jq 变化）
 - `NI6()`/`dI6()` 函数中的 DISABLE_EXPERIMENTAL_BETAS 门禁在 2.1.143 中已移除，补丁自动适配
+- 新增补丁 #32：WebSearch isEnabled() 前置 ANTHROPIC_BASE_URL 检测，防止模型在第三方 API 下仍然使用内置 web_search 而非 Tavily MCP
 - 所有补丁通过 `--verify` 模式验证，确保无 regressions
 - 完整的 LLM wiki 知识库（包含反限制分析、性能修复、架构文档）
 

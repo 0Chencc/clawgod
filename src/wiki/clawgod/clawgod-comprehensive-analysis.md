@@ -393,8 +393,29 @@ patch名称: 'Filter null from extraToolSchemas'
 ```
 
 **效果**：
-- 第三方 API 用户：模型看不到 web_search 工具，改用 web_fetch
+- 第三方 API 用户：模型看不到 web_search 工具（sub-request 层和 tool definition 层双重禁用）
 - 官方 API 用户：web_search 正常工作（条件判断不触发）
+
+**v2.1.143 新增问题**：仅靠补丁 A+B 不够，因为 `Dq()` 默认返回 `"firstParty"`（没有设置 `CLAUDE_CODE_USE_BEDROCK` 等环境变量时），导致 web_search 的 `isEnabled()` 返回 `true`，该工具定义依然出现在 API 请求中，模型仍会选中它。
+
+```javascript
+// 补丁 C：web_search 工具的 isEnabled() 前置 ANTHROPIC_BASE_URL 检测
+patch名称: 'Disable WebSearch isEnabled for third-party API'
+补丁前: isEnabled(){let H=Dq();if(H==="firstParty"||H==="anthropicAws")return!0;...return!1}
+补丁后: isEnabled(){
+          if(process.env.ANTHROPIC_BASE_URL && !/anthropic\.com/i.test(process.env.ANTHROPIC_BASE_URL))
+            return!1;  // 第三方 API → 工具不可用
+          let H=Dq();...
+        }
+```
+
+**三个补丁的协同关系**：
+
+| 补丁 | 作用层 | 解决的问题 |
+|------|--------|-----------|
+| A (VH5) | sub-request | web_search 内部子请求禁用服务器端工具 |
+| B (extraToolSchemas filter) | API 请求 | 过滤 `extraToolSchemas` 中的 null |
+| C (isEnabled) | **工具注册** | 不让模型看到 web_search 工具定义 |
 
 ### 7.5 GitHub Issue 分析结果
 
@@ -427,7 +448,7 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 
 ## 八、补丁汇总
 
-截至 2026-05-16（v2.1.143），clawgod 共 **31 个补丁**：
+截至 2026-05-16（v2.1.143），clawgod 共 **32 个补丁**：
 
 | # | 补丁名 | 类别 |
 |---|--------|------|
@@ -447,11 +468,12 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 | 14 | Force pY()/FYH() to always return true | 核心破解 |
 | 15 | Remove DISABLE_EXPERIMENTAL_BETAS gate in NI6()/dI6() | 核心破解 |
 | 16 | Strip all beta headers in messages API | 兼容性 |
-| 17 | Disable web_search for third-party API | 兼容性 |
+| 17 | Disable web_search for third-party API (VH5) | 兼容性 |
 | 18 | Filter null from extraToolSchemas | 兼容性 |
 | 19-25 | 绿色主题补丁（7 个：RGB/ANSI/dark/light/shimmer/hex） | 视觉 |
 | 26-29 | 限制移除（4 个：CYBER_RISK/URL/CAUTIOUS/NOT_LOGGED_IN） | 限制移除 |
 | 30-31 | 消息过滤（2 个：attachment + s_8 form） | 功能 |
+| **32** | **Disable WebSearch isEnabled for third-party API** | **兼容性** |
 
 **cli.cjs 智能配置**（非 patch.mjs 补丁，直接修改包装器）：
 - 自动检测第三方 API → 注入 `DISABLE_EXPERIMENTAL_BETAS` + `ENABLE_TOOL_SEARCH` + `API_TIMEOUT_MS` + `STREAM_IDLE_TIMEOUT`

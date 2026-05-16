@@ -674,6 +674,7 @@ function main() {
 }
 
 main();
+
 EXTRACTOR_EOF
 
 # ─── Extract cli.js + native modules from Bun binary ──────────
@@ -716,10 +717,16 @@ const dst = `${here}/cli.original.cjs`;
 let code = readFileSync(src, 'utf8');
 
 // (1) bunfs .node module paths → runtime vendor lookup
+// WRAP IN TRY/CATCH: vendor/ may be empty (as of v2.1.142 no embedded .node
+// modules are found), so require() throws MODULE_NOT_FOUND and crashes.
+// The IIFE returns null on failure, preserving functionality for features
+// whose native modules are missing while not crashing the whole process.
 code = code.replace(
   /require\(['"](\/\$bunfs\/root\/([\w-]+)\.node)['"]\)/g,
-  (m, _full, name) =>
-    `require(require('path').join(__dirname,'vendor',${JSON.stringify(name)},\`\${process.arch==='arm64'?'arm64':'x64'}-\${process.platform==='darwin'?'darwin':process.platform==='linux'?'linux':'win32'}\`,${JSON.stringify(name + '.node')}))`,
+  (m, _full, name) => {
+    const resolved = `require('path').join(__dirname,'vendor',${JSON.stringify(name)},\`\${process.arch==='arm64'?'arm64':'x64'}-\${process.platform==='darwin'?'darwin':process.platform==='linux'?'linux':'win32'}\`,${JSON.stringify(name + '.node')})`;
+    return `((()=>{try{return require(${resolved})}catch(e){return null}})())`;
+  },
 );
 
 // (2) build-time fileURLToPath() leaks → use cli.cjs's own __filename
@@ -734,6 +741,7 @@ code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirn
 writeFileSync(dst, code);
 unlinkSync(src);
 console.log(`cli.original.cjs: ${code.length} bytes`);
+
 POSTPROC_EOF
 node "$CLAWGOD_DIR/post-process.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
 [ -f "$CLAWGOD_DIR/cli.original.cjs" ] || { err "Post-process failed"; exit 1; }
@@ -794,6 +802,7 @@ run('patcher', [patcher]);
 
 writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
 console.log(`[clawgod] re-patched to ${basename(nativeBin)}`);
+
 REPATCH_EOF
 chmod +x "$CLAWGOD_DIR/repatch.mjs"
 info "Re-patch helper installed (repatch.mjs)"
@@ -841,7 +850,7 @@ const defaultConfig = {
   baseURL: 'https://api.anthropic.com',
   model: '',
   smallModel: '',
-  timeoutMs: 3000000,
+  timeoutMs: 60000,
 };
 
 let config = { ...defaultConfig };
@@ -878,6 +887,26 @@ process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
 // rg is the most reliable fallback under Bun runtime).
 process.env.USE_BUILTIN_RIPGREP ??= '1';
 
+// ─── 第三方 API 智能优化 ─────────────────────────────────
+// 当检测到使用非 api.anthropic.com 的 baseURL 时，自动应用
+// 第三方 API 兼容配置，避免 400 错误同时保持功能完整。
+const isThirdParty = config.baseURL && !/anthropic\.com/i.test(config.baseURL);
+
+if (isThirdParty) {
+  // 1. 禁用 beta headers — 避免第三方 API 不认识的 beta 导致 400
+  //    (NI6() 补丁已确保 Tool Search 不受此影响)
+  process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= '1';
+
+  // 2. 确保 Tool Search 启用（覆盖 DISABLE_EXPERIMENTAL_BETAS 的影响）
+  process.env.ENABLE_TOOL_SEARCH ??= 'auto:0';
+
+  // 3. 合理的超时（第三方 API 通常比官方慢）
+  process.env.API_TIMEOUT_MS ??= String(config.timeoutMs || 120000);
+
+  // 4. 流看门狗超时（慢响应不误判为断连）
+  process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS ??= '120000';
+}
+
 const featuresFile = join(providerDir, 'features.json');
 if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
   try {
@@ -888,6 +917,7 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 }
 
 require('./cli.original.cjs');
+
 WRAPPER_EOF
 chmod +x "$CLAWGOD_DIR/cli.cjs"
 info "Wrapper created (cli.cjs)"
@@ -1032,14 +1062,78 @@ const patches = [
       return (
         prefix +
         `process.stderr.write("[clawgod] 'claude update' is handled by clawgod self-update.\\n[clawgod] To leave clawgod and use vanilla update: bash ~/.clawgod/install.sh --uninstall\\n[clawgod] Continuing now\\u2026\\n");` +
-        `const _w=process.platform==='win32';` +
-        `const _c=_w?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash'];` +
-        `const _r=require('child_process').spawnSync(_c[0],_c.slice(1),{stdio:'inherit'});` +
-        `process.exit(_r.status||0);`
+        `const __cgW=process.platform==='win32';` +
+        `const __cgCmd=__cgW?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash'];` +
+        `const __cgRes=require('child_process').spawnSync(__cgCmd[0],__cgCmd.slice(1),{stdio:'inherit'});` +
+        `process.exit(__cgRes.status||0);`
       );
     },
     sentinel: '.command("update").alias("upgrade")',
   },
+  // ── 模型默认值重定向 ──
+  // Sub-agent 默认使用 MJ$() → MY().opus47（硬编码 claude-opus-4-7）
+  // 第三方 API 用户需要子 Agent 继承主模型，改为优先读 ANTHROPIC_MODEL env var
+  {
+    name: 'Sub-agent model inherit from ANTHROPIC_MODEL',
+    pattern: /function ([\w$]+)\(\)\{return MY\(\)\.(\w+)\}/g,
+    replacer: (m, fn, modelKey) => `function ${fn}(){return process.env.ANTHROPIC_MODEL||MY().${modelKey}}`,
+    selectIndex: 0,
+    optional: true,
+    sentinel: 'return MY().',
+  },
+
+  // ── 第三方 API 的 Tool Search 和特性启用 ──
+  // pY() 检查 ANTHROPIC_BASE_URL 是否是 api.anthropic.com。
+  // 第三方 API 用户 → pY()=false → Tool Search 被禁用 → skills/tools 无法动态加载
+  // 改为始终返回 true，和 USER_TYPE="ant" 思想一致"假装在用官方 API"
+  {
+    name: 'Force pY() to always return true (enable Tool Search for 3rd party)',
+    pattern: /function ([\w$]+)\(\)\{let H=process\.env\.ANTHROPIC_BASE_URL;if\(!H\)return!0;try\{let \$=new URL\(H\)\.host;return\["api\.anthropic\.com"\]\.includes\(\$\)\}catch\{return!1\}\}/g,
+    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    sentinel: 'ANTHROPIC_BASE_URL;if(!H)return!0;try{let $=new URL(H).host;return["api.anthropic.com"].includes($)}',
+  },
+
+  // ── 绕过 Catch-22：CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS 不再禁用 Tool Search ──
+  // 第三方 API 用户需要设置 DISABLE_EXPERIMENTAL_BETAS=1 避免 beta header 400 错误，
+  // 但 NI6() 中这个设置会导致 return "standard" 从而禁用 Tool Search。
+  // 移除这个检查，让 Tool Search 不受 DISABLE_EXPERIMENTAL_BETAS 影响。
+  {
+    name: 'Remove DISABLE_EXPERIMENTAL_BETAS gate in NI6() (keep Tool Search enabled)',
+    pattern: /function ([\w$]+)\(\)\{if\(bH\(process\.env\.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\)\)return"standard";let H=process\.env\.ENABLE_TOOL_SEARCH,\$=H\?WH4\(H\):null;if\(\$===0\)return"tst";if\(\$===100\)return"standard";if\(O95\(H\)\)return"tst-auto";if\(bH\(H\)\)return"tst";if\(E4\(process\.env\.ENABLE_TOOL_SEARCH\)\)return"standard";return"tst"\}/g,
+    replacer: (m, fn) => `function ${fn}(){let H=process.env.ENABLE_TOOL_SEARCH,$=H?WH4(H):null;if($===0)return"tst";if($===100)return"standard";if(O95(H))return"tst-auto";if(bH(H))return"tst";if(E4(process.env.ENABLE_TOOL_SEARCH))return"standard";return"tst"}`,
+    sentinel: 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS))return"standard";let H=process.env.ENABLE_TOOL_SEARCH,$=H?WH4(H):null',
+  },
+
+  // ── API 请求层全量 beta 过滤 ──
+  // 在 messages API 的 parse() 方法中，当 DISABLE_EXPERIMENTAL_BETAS=1 时，
+  // 清空所有 anthropic-beta header，避免第三方 API 不认识的 beta 导致 400。
+  // 同时也会阻止 beta 泄漏到请求体的 anthropic_beta 数组。
+  {
+    // Minified header-merge function name (Lq→Jq→etc) changes per build.
+    // Match any valid JS identifier via capture group.
+    name: 'Strip all beta headers in messages API when DISABLE_EXPERIMENTAL_BETAS=1',
+    pattern: /parse\(H,\$\)\{return \$=\{\.\.\.\$,headers:([\w$]+)\(\[\{"anthropic-beta":\[\.\.\.H\.betas\?\?\[\],"structured-outputs-2025-12-15"\]\.toString\(\)\},\$\?\.headers\]\)\},this\.create\(H,\$\)\.then\(/g,
+    replacer: (m, fn) => `parse(H,$){let _betas=process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS?[]:[...H.betas??[],"structured-outputs-2025-12-15"];return $={...$,headers:${fn}([{"anthropic-beta":_betas.toString()},$?.headers])},this.create(H,$).then(`,
+    sentinel: 'structured-outputs-2025-12-15"].toString()},$?.headers])},this.create(H,$).then(',
+  },
+
+  // ── web_search 对第三方 API 禁用 → 改用 web_fetch ──
+  // web_search 是 Anthropic 服务器端工具，第三方 API 没有搜索后端。
+  // 当检测到第三方 API 时，让 mt_() 返回 null（不注册该工具），
+  // 同时确保 extraToolSchemas 中的 null 被过滤掉。
+  {
+    name: 'Disable web_search for third-party API',
+    pattern: /function ([\w$]+)\(H\)\{return\{type:"web_search_20250305",name:"web_search",allowed_domains:H\.allowed_domains,blocked_domains:H\.blocked_domains,max_uses:8\}\}/g,
+    replacer: (m, fn) => `function ${fn}(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return null;return{type:"web_search_20250305",name:"web_search",allowed_domains:H.allowed_domains,blocked_domains:H.blocked_domains,max_uses:8}}`,
+    sentinel: 'allowed_domains:H.allowed_domains,blocked_domains:H.blocked_domains,max_uses:8',
+  },
+  {
+    name: 'Filter null from extraToolSchemas',
+    pattern: /r=\[\.\.\.A\.extraToolSchemas\?\?\[\]\]/g,
+    replacer: () => 'r=[...A.extraToolSchemas??[]].filter(Boolean)',
+    sentinel: 'r=[...A.extraToolSchemas??[]];',
+  },
+
   // ── 绿色主题 (patch 标识) ──
 
   {
@@ -1133,6 +1227,25 @@ const patches = [
     pattern: /if\(([\w$]+)\(\)==="ant"\)return ([\w$]+);let ([\w$]+)=([\w$]+) instanceof Set\?\4:([\w$]+)\(\4\);return ([\w$]+)\(\2,\3\)/g,
     replacer: (m, fn, ret) => `return ${ret}`,
     optional: true,  // legacy versions had a ternary instead
+  },
+
+  // ── WebSearch isEnabled() — 第三方 API 禁用 ──
+  // Dq()/vq() 默认返回 "firstParty"（因为没有环境变量），
+  // 导致 WebSearch 工具的 isEnabled() 返回 true，
+  // 模型看到 web_search 工具定义 → 优先使用内置搜索而非 Tavily MCP。
+  // 在 isEnabled() 开头添加 ANTHROPIC_BASE_URL 第三方检测，
+  // 和 VH5() 中的检测逻辑保持一致（patch #20）。
+  {
+    name: 'Disable WebSearch isEnabled for third-party API',
+    pattern: /isEnabled\(\)\{let H=([\w$]+)\(\);if\(H==="firstParty"\|\|H==="anthropicAws"\)return!0;if\(H==="gateway"\)return!1/g,
+    replacer: (m, name) => `isEnabled(){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;let H=${name}();if(H==="firstParty"||H==="anthropicAws")return!0;if(H==="gateway")return!1`,
+    sentinel: '!=="firstParty"&&!/anthropic',
+    validate: (match, code) => {
+      // Must be the WebSearch tool's isEnabled (with vertex/foundry fallthrough)
+      const pos = code.indexOf(match);
+      const lookahead = code.substring(pos + match.length, pos + match.length + 200);
+      return lookahead.includes('vertex') && lookahead.includes('foundry');
+    },
   },
 ];
 
@@ -1259,6 +1372,7 @@ if (!dryRun && !verify && applied > 0) {
 }
 
 console.log(`${'═'.repeat(55)}\n`);
+
 PATCHER_EOF
 info "Patcher created (patch.mjs)"
 
@@ -1272,10 +1386,10 @@ node "$CLAWGOD_DIR/patch.mjs" 2>&1 | while IFS= read -r line; do echo "  $line";
 if [ ! -f "$CLAWGOD_DIR/features.json" ]; then
   cat > "$CLAWGOD_DIR/features.json" << 'FEATURES_EOF'
 {
-  "tengu_harbor": true,
-  "tengu_session_memory": true,
+  "tengu_harbor": false,
+  "tengu_session_memory": false,
   "tengu_amber_flint": true,
-  "tengu_auto_background_agents": true,
+  "tengu_auto_background_agents": false,
   "tengu_destructive_command_warning": true,
   "tengu_immediate_model_command": true,
   "tengu_desktop_upsell": false,
@@ -1283,6 +1397,7 @@ if [ ! -f "$CLAWGOD_DIR/features.json" ]; then
   "tengu_amber_quartz_disabled": false,
   "tengu_prompt_cache_1h_config": {"allowlist": ["*"]}
 }
+
 FEATURES_EOF
   info "Default features.json created"
 fi

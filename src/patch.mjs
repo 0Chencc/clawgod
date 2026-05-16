@@ -135,10 +135,10 @@ const patches = [
       return (
         prefix +
         `process.stderr.write("[clawgod] 'claude update' is handled by clawgod self-update.\\n[clawgod] To leave clawgod and use vanilla update: bash ~/.clawgod/install.sh --uninstall\\n[clawgod] Continuing now\\u2026\\n");` +
-        `const _w=process.platform==='win32';` +
-        `const _c=_w?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash'];` +
-        `const _r=require('child_process').spawnSync(_c[0],_c.slice(1),{stdio:'inherit'});` +
-        `process.exit(_r.status||0);`
+        `const __cgW=process.platform==='win32';` +
+        `const __cgCmd=__cgW?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash'];` +
+        `const __cgRes=require('child_process').spawnSync(__cgCmd[0],__cgCmd.slice(1),{stdio:'inherit'});` +
+        `process.exit(__cgRes.status||0);`
       );
     },
     sentinel: '.command("update").alias("upgrade")',
@@ -300,6 +300,25 @@ const patches = [
     pattern: /if\(([\w$]+)\(\)==="ant"\)return ([\w$]+);let ([\w$]+)=([\w$]+) instanceof Set\?\4:([\w$]+)\(\4\);return ([\w$]+)\(\2,\3\)/g,
     replacer: (m, fn, ret) => `return ${ret}`,
     optional: true,  // legacy versions had a ternary instead
+  },
+
+  // ── WebSearch isEnabled() — 第三方 API 禁用 ──
+  // Dq()/vq() 默认返回 "firstParty"（因为没有环境变量），
+  // 导致 WebSearch 工具的 isEnabled() 返回 true，
+  // 模型看到 web_search 工具定义 → 优先使用内置搜索而非 Tavily MCP。
+  // 在 isEnabled() 开头添加 ANTHROPIC_BASE_URL 第三方检测，
+  // 和 VH5() 中的检测逻辑保持一致（patch #20）。
+  {
+    name: 'Disable WebSearch isEnabled for third-party API',
+    pattern: /isEnabled\(\)\{let H=([\w$]+)\(\);if\(H==="firstParty"\|\|H==="anthropicAws"\)return!0;if\(H==="gateway"\)return!1/g,
+    replacer: (m, name) => `isEnabled(){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;let H=${name}();if(H==="firstParty"||H==="anthropicAws")return!0;if(H==="gateway")return!1`,
+    sentinel: '!=="firstParty"&&!/anthropic',
+    validate: (match, code) => {
+      // Must be the WebSearch tool's isEnabled (with vertex/foundry fallthrough)
+      const pos = code.indexOf(match);
+      const lookahead = code.substring(pos + match.length, pos + match.length + 200);
+      return lookahead.includes('vertex') && lookahead.includes('foundry');
+    },
   },
 ];
 

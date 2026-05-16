@@ -11,3 +11,4 @@
 ## [2026-05-16] dev | 初始化 dev 二开分支，cherry-pick 4 个 chencc fix，推送 gdlwolf fork
 ## [2026-05-16] docs | 添加 CHANGELOG.md + 更新 wiki（新增第十一章 dev 分支开发指南）
 ## [2026-05-16] config | GitHub 默认分支改为 dev，main 加保护规则，所有 URL 改为 gdlwolf/clawgod
+## [2026-05-16] patch | 新增补丁 #32: WebSearch isEnabled() 前置 ANTHROPIC_BASE_URL 检测 — 修复 Dq() 默认返回 "firstParty" 导致模型仍能看到内置 web_search 而非 Tavily MCP

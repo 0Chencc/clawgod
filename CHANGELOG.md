@@ -5,9 +5,10 @@
 ### Added
 
 - **Dev branch init**: full clawgod toolchain with 31 patches, LLM wiki, and third-party API enhancements
-- **LLM knowledge base** (`wiki/`): comprehensive analysis covering bypass architecture (3-layer: GrowthBook → gate functions → message filters), all 31 patches catalog, performance fixes, and re-crack guide
+- **LLM knowledge base** (`wiki/`): comprehensive analysis covering bypass architecture (3-layer: GrowthBook → gate functions → message filters), all 32 patches catalog, performance fixes, and re-crack guide
 - **`.source-version` tracking**: records which Claude Code version the patched binary corresponds to
 - **`.gitignore`**: excludes regeneratable 14MB binary artifacts from git tracking
+- **Patch #32 — Disable WebSearch isEnabled for third-party API**: `Dq()`/`vq()` 默认返回 `"firstParty"`（无环境变量时），导致 web_search 工具的 `isEnabled()` 返回 `true`，模型仍能看到内置 web_search 工具而非 Tavily MCP。在 `isEnabled()` 开头添加 `ANTHROPIC_BASE_URL` 检测，和 VH5() 的检测逻辑一致，实现 tool definition 层的第三方 API 禁用
 
 ### Fixed
 
@@ -23,11 +24,11 @@
 - **Default branch**: set to `dev` so visitors see the latest development content by default
 - **Branch protection** on `main`: requires PR reviews, disables force push and deletion
 
-### Patches (31 total)
+### Patches (32 total)
 
 - **Feature unlocks**: internal user mode, GrowthBook overrides, Agent Teams, Computer Use (no subscription), auto-mode for third-party, Ultraplan, Ultrareview
 - **Restriction removals**: CYBER_RISK_INSTRUCTION, URL generation ban, cautious actions override, login notice suppression
-- **Third-party API compatibility**: force `pY()`→`true` (18 call sites), beta header stripping when `DISABLE_EXPERIMENTAL_BETAS=1`, web_search null filtering, attachment filter bypass, message list filter bypass
+- **Third-party API compatibility**: force `pY()`→`true` (18 call sites), beta header stripping when `DISABLE_EXPERIMENTAL_BETAS=1`, web_search null filtering + isEnabled third-party detection (dual layer), attachment filter bypass, message list filter bypass
 - **Self-update**: redirect `claude update` to clawgod installer
 - **Visual**: green theme (logo, brand color, shimmer, ANSI, hex)
 
