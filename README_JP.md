@@ -2,11 +2,11 @@
 
 [English](README.md) | [中文](README_ZH.md) | [日本語](README_JP.md)
 
-[![Latest](https://img.shields.io/github/v/release/0chencc/clawgod?style=flat&label=Latest)](https://github.com/0Chencc/clawgod/releases/latest)
-[![Released](https://img.shields.io/github/release-date/0chencc/clawgod?style=flat&label=Released)](https://github.com/0Chencc/clawgod/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/0chencc/clawgod/total?style=flat&label=Downloads)](https://github.com/0Chencc/clawgod/releases)
-[![Compat](https://img.shields.io/github/actions/workflow/status/0chencc/clawgod/compat-daily.yml?branch=main&style=flat&label=Compat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
-[![Claude tested](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/0Chencc/clawgod/badges/claude-version.json&style=flat)](https://github.com/0Chencc/clawgod/actions/workflows/compat-daily.yml)
+[![Latest](https://img.shields.io/github/v/release/gdlwolf/clawgod?style=flat&label=Latest)](https://github.com/gdlwolf/clawgod/releases/latest)
+[![Released](https://img.shields.io/github/release-date/gdlwolf/clawgod?style=flat&label=Released)](https://github.com/gdlwolf/clawgod/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/gdlwolf/clawgod/total?style=flat&label=Downloads)](https://github.com/gdlwolf/clawgod/releases)
+[![Compat](https://img.shields.io/github/actions/workflow/status/gdlwolf/clawgod/compat-daily.yml?branch=main&style=flat&label=Compat)](https://github.com/gdlwolf/clawgod/actions/workflows/compat-daily.yml)
+[![Claude tested](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/gdlwolf/clawgod/badges/claude-version.json&style=flat)](https://github.com/gdlwolf/clawgod/actions/workflows/compat-daily.yml)
 
 > [Claude Code](https://docs.anthropic.com/en/docs/claude-code) ゴッドモード。
 
@@ -27,12 +27,12 @@ ClawGod インストーラ実行**前**に揃えておくもの：
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.ps1 | iex
 ```
 
 緑のロゴ = パッチ適用済み。オレンジのロゴ = オリジナル。
@@ -124,12 +124,12 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash
 ```
 
 **Windows:**
 ```powershell
-irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.ps1 | iex
 ```
 
 ClawGod を外して Anthropic 本来の `claude update`（独自に管理されたパスへ書き込み、私たちの launcher を上書きします）を使いたい場合は、先にアンインストールしてください：
@@ -142,13 +142,13 @@ bash ~/.clawgod/install.sh --uninstall
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash -s -- --uninstall
 hash -r  # シェルキャッシュをリフレッシュ
 ```
 
 **Windows:**
 ```powershell
-irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 -OutFile install.ps1; .\install.ps1 -Uninstall
+irm https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.ps1 -OutFile install.ps1; .\install.ps1 -Uninstall
 ```
 
 アンインストールは `claude.orig` を `claude` に戻し、`clawgod` エイリアスを削除します。
@@ -161,4 +161,4 @@ GPL-3.0 — Anthropic とは無関係です。自己責任でご使用くださ�
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=0Chencc/clawgod&type=date&legend=top-left)](https://www.star-history.com/?repos=0Chencc%2Fclawgod&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=gdlwolf/clawgod&type=date&legend=top-left)](https://www.star-history.com/?repos=gdlwolf%2Fclawgod&type=date&legend=top-left)

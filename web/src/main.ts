@@ -15,7 +15,7 @@
  * behind the deferred JS fetch and cause a Flash of Unstyled Content.
  */
 
-const REPO = '0Chencc/clawgod';
+const REPO = 'gdlwolf/clawgod';
 const BADGES_JSON = `https://raw.githubusercontent.com/${REPO}/badges/claude-version.json`;
 
 const escape = (s: string) =>
