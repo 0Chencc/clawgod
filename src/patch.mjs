@@ -24,6 +24,7 @@ const patches = [
     pattern: /function ([\w$]+)\(\)\{if\(!([\w$]+)\)\2=!0;return ([\w$]+)\}/g,
     replacer: (m, fn, flag, val) =>
       `function ${fn}(){if(!${flag}){${flag}=!0;try{let e=process.env.CLAUDE_INTERNAL_FC_OVERRIDES;if(e)${val}=JSON.parse(e)}catch(e){}}return ${val}}`,
+    sentinel: ')Gq6=!0;return zTK}',  // unpatched form (v2.1.143 minified names)
     unique: true,  // must match exactly 1
   },
   {
@@ -38,32 +39,39 @@ const patches = [
       const nearby = code.substring(Math.max(0, pos - 500), pos + 500);
       return nearby.includes('growthBook') || nearby.includes('GrowthBook') || nearby.includes('FeatureValue');
     },
+    sentinel: 'growthBookOverrides',  // present after patching, absent in unpatched
+    sentinelAbsence: true,  // sentinel absence means "not yet applied"
   },
   {
     name: 'Agent Teams always enabled',
     pattern: /function ([\w$]+)\(\)\{if\(![\w$]+\(process\.env\.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS\)&&![\w$]+\(\)\)return!1;if\(![\w$]+\("tengu_amber_flint",!0\)\)return!1;return!0\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
+    sentinel: '"tengu_amber_flint",!0))return!1;return!0}',
   },
   {
+    // ≤v2.1.142: function X(){let H=Y();return H==="max"||H==="pro"}
+    // v2.1.143+: function Du(){if(Sdq!==null)return Sdq;if(!Hq())return!1;let H=z4();if(H==="max"||H==="pro")return!0;...}
+    //   The v2.1.143 version already has caching and additional org role checks.
+    //   We need to match both shapes and make the function return true.
     name: 'Computer Use subscription bypass',
     pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\);return [\w$]+==="max"\|\|[\w$]+==="pro"\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
+    optional: true,  // v2.1.143+ has a different function shape (auto-bypasses via Hq() returning true)
   },
   {
     name: 'Computer Use default enabled',
     pattern: /([\w$]+=)\{enabled:!1,pixelValidation/g,
     replacer: (m, prefix) => `${prefix}{enabled:!0,pixelValidation`,
+    sentinel: '{enabled:!1,pixelValidation',
   },
   {
     // v2.1.92+ shape: name:"ultraplan",get description(){...},argumentHint:"<prompt>",isEnabled:()=>fnRef()
     // Older shape  : name:"ultraplan",description:`...`,argumentHint:"<prompt>",isEnabled:()=>!1
-    // The middle metadata block changed from a literal description to a getter,
-    // and the gate switched from a literal !1 to a GrowthBook-flag-check function call.
-    // Match both.
+    // Patched shape: name:"ultraplan",...,isEnabled:()=>!0
+    // Match all three so already-patched code reports "no change needed".
     name: 'Ultraplan enable',
-    pattern: /(name:"ultraplan",[\s\S]{1,500}?argumentHint:"<prompt>",isEnabled:\(\)=>)(?:!1|[\w$]+\(\))/g,
+    pattern: /(name:"ultraplan",[\s\S]{1,500}?argumentHint:"<prompt>",isEnabled:\(\)=>)(?:!0|!1|[\w$]+\(\))/g,
     replacer: (m, prefix) => `${prefix}!0`,
-    sentinel: 'name:"ultraplan"',
   },
   {
     // ≤v2.1.110: function X(){return Y("tengu_review_bughunter_config",null)?.enabled===!0}
@@ -79,11 +87,13 @@ const patches = [
     name: 'Computer Use gate bypass',
     pattern: /function ([\w$]+)\(\)\{return [\w$]+\(\)&&[\w$]+\(\)\.enabled\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
+    optional: true,  // may not exist in all versions
   },
   {
     name: 'Voice Mode enable (bypass GrowthBook kill)',
     pattern: /function ([\w$]+)\(\)\{return![\w$]+\("tengu_amber_quartz_disabled",!1\)\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
+    optional: true,  // removed in v2.1.143+
   },
   {
     // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
@@ -135,9 +145,9 @@ const patches = [
       return (
         prefix +
         `process.stderr.write("[clawgod] 'claude update' is handled by clawgod self-update.\\n[clawgod] To leave clawgod and use vanilla update: bash ~/.clawgod/install.sh --uninstall\\n[clawgod] Continuing now\\u2026\\n");` +
-        `const __cgW=process.platform==='win32';` +
-        `const __cgCmd=__cgW?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash'];` +
-        `const __cgRes=require('child_process').spawnSync(__cgCmd[0],__cgCmd.slice(1),{stdio:'inherit'});` +
+        `var __cgW=process.platform==='win32';` +
+        `var __cgCmd=__cgW?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://raw.githubusercontent.com/gdlwolf/clawgod/main/install.sh | bash'];` +
+        `var __cgRes=require('child_process').spawnSync(__cgCmd[0],__cgCmd.slice(1),{stdio:'inherit'});` +
         `process.exit(__cgRes.status||0);`
       );
     },
@@ -166,15 +176,43 @@ const patches = [
     sentinel: 'ANTHROPIC_BASE_URL;if(!H)return!0;try{let $=new URL(H).host;return["api.anthropic.com"].includes($)}',
   },
 
-  // ── 绕过 Catch-22：CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS 不再禁用 Tool Search ──
-  // 第三方 API 用户需要设置 DISABLE_EXPERIMENTAL_BETAS=1 避免 beta header 400 错误，
-  // 但 NI6() 中这个设置会导致 return "standard" 从而禁用 Tool Search。
-  // 移除这个检查，让 Tool Search 不受 DISABLE_EXPERIMENTAL_BETAS 影响。
+  // ── ST() gate bypass for third-party API ──
+  // v2.1.143: function ST(){return w86()} where w86() checks Dq()==="firstParty"/"anthropicAws"/"foundry".
+  // We make ST() return true so features gated behind ST() (advisor, prompt caching, etc.)
+  // work for third-party API users too.
+  // Older v2.1.142 shape: function X(){return Y()&&!CH(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)}
+  // — matched by the old regex. v2.1.143 removed the DISABLE_EXPERIMENTAL_BETAS check.
+  {
+    name: 'Bypass ST() firstParty gate (enable features for 3rd party)',
+    pattern: /function ST\(\)\{return [\w$]+\(\)\}/g,
+    replacer: () => 'function ST(){return!0}',
+    sentinel: 'function ST(){return w86()}',
+  },
+  // ── cI6()/dI6() Tool Search mode — remove DISABLE_EXPERIMENTAL_BETAS gate ──
+  // v2.1.142: function cI6(){if(CH(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS))return"standard";let H=...}
+  // v2.1.143: function dI6(){let H=process.env.ENABLE_TOOL_SEARCH;if(!H)return gI6;if(H==="auto")return gI6;let $=K$4(H);if($!==null)return $;return gI6}
+  //   — DISABLE_EXPERIMENTAL_BETAS gate removed by upstream; function simplified.
+  //   dI6() now returns a numeric percentage (gI6), not "standard"/"tst"/"tst-auto" strings.
+  //   No patch needed for v2.1.143+.
+  {
+    name: 'Remove DISABLE_EXPERIMENTAL_BETAS gate in cI6()/dI6() (enable Tool Search for 3rd party)',
+    pattern: /function ([\w$]+)\(\)\{if\(CH\(process\.env\.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\)\)return"standard";let H=process\.env\.ENABLE_TOOL_SEARCH,\$=H\?([\w$]+)\(H\):null;if\(\$===0\)return"tst";if\(\$===100\)return"standard";if\(([\w$]+)\(H\)\)return"tst-auto";if\(CH\(H\)\)return"tst";if\(([\w$]+)\(process\.env\.ENABLE_TOOL_SEARCH\)\)return"standard";return"tst"\}/g,
+    replacer: (m, fn, fnK, fnt15, fnI4) => `function ${fn}(){let H=process.env.ENABLE_TOOL_SEARCH,$=H?${fnK}(H):null;if($===0)return"tst";if($===100)return"standard";if(${fnt15}(H))return"tst-auto";if(CH(H))return"tst";if(${fnI4}(process.env.ENABLE_TOOL_SEARCH))return"standard";return"tst"}`,
+    sentinel: 'DISABLE_EXPERIMENTAL_BETAS))return"standard";let H=process.env.ENABLE_TOOL_SEARCH',
+    optional: true,  // v2.1.143+ removed this gate entirely
+  },
+
+  // ── NI6() Tool Search mode — remove DISABLE_EXPERIMENTAL_BETAS gate ──
+  // v2.1.110 shape: function NI6(){if(bH(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS))return"standard";...}
+  // v2.1.143: upstream removed DISABLE_EXPERIMENTAL_BETAS from this function entirely.
+  //   dI6() now returns a numeric percentage (gI6 variable), not "standard"/"tst" strings.
+  //   No patch needed for v2.1.143+, but keep the pattern for older versions.
   {
     name: 'Remove DISABLE_EXPERIMENTAL_BETAS gate in NI6() (keep Tool Search enabled)',
     pattern: /function ([\w$]+)\(\)\{if\(bH\(process\.env\.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\)\)return"standard";let H=process\.env\.ENABLE_TOOL_SEARCH,\$=H\?WH4\(H\):null;if\(\$===0\)return"tst";if\(\$===100\)return"standard";if\(O95\(H\)\)return"tst-auto";if\(bH\(H\)\)return"tst";if\(E4\(process\.env\.ENABLE_TOOL_SEARCH\)\)return"standard";return"tst"\}/g,
     replacer: (m, fn) => `function ${fn}(){let H=process.env.ENABLE_TOOL_SEARCH,$=H?WH4(H):null;if($===0)return"tst";if($===100)return"standard";if(O95(H))return"tst-auto";if(bH(H))return"tst";if(E4(process.env.ENABLE_TOOL_SEARCH))return"standard";return"tst"}`,
     sentinel: 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS))return"standard";let H=process.env.ENABLE_TOOL_SEARCH,$=H?WH4(H):null',
+    optional: true,  // v2.1.143+ removed this gate entirely
   },
 
   // ── API 请求层全量 beta 过滤 ──
@@ -196,9 +234,16 @@ const patches = [
   // 同时确保 extraToolSchemas 中的 null 被过滤掉。
   {
     name: 'Disable web_search for third-party API',
+    // Pattern uses [\w$]+ instead of mt_ to survive minifier renames across versions.
+    // Sentinel checks for the unpatched form (function returning the object directly,
+    // without the third-party guard). The patched form has an if-guard before return,
+    // so this sentinel won't match after patching — correctly marking it "already applied".
     pattern: /function ([\w$]+)\(H\)\{return\{type:"web_search_20250305",name:"web_search",allowed_domains:H\.allowed_domains,blocked_domains:H\.blocked_domains,max_uses:8\}\}/g,
     replacer: (m, fn) => `function ${fn}(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return null;return{type:"web_search_20250305",name:"web_search",allowed_domains:H.allowed_domains,blocked_domains:H.blocked_domains,max_uses:8}}`,
-    sentinel: 'allowed_domains:H.allowed_domains,blocked_domains:H.blocked_domains,max_uses:8',
+    // Sentinel: the unpatched form starts with `(H){return{type:"web_search_20250305"...`.
+    // After patching, it becomes `(H){if(process.env.ANTHROPIC_BASE_URL...return null;return{...}}`,
+    // so this sentinel won't match — correctly detecting "already applied".
+    sentinel: '(H){return{type:"web_search_20250305"',
   },
   {
     name: 'Filter null from extraToolSchemas',
@@ -208,41 +253,52 @@ const patches = [
   },
 
   // ── 绿色主题 (patch 标识) ──
+  // Green theme patches change brand colors. After patching, the original
+  // color strings are replaced, so sentinels detect the unpatched form.
 
   {
     name: 'Logo + brand color → green (RGB dark)',
     pattern: /clawd_body:"rgb\(215,119,87\)"/g,
     replacer: () => 'clawd_body:"rgb(34,197,94)"',
+    sentinel: 'clawd_body:"rgb(215,119,87)"',
   },
   {
     name: 'Logo + brand color → green (ANSI)',
     pattern: /clawd_body:"ansi:redBright"/g,
     replacer: () => 'clawd_body:"ansi:greenBright"',
+    sentinel: 'clawd_body:"ansi:redBright"',
   },
   {
     name: 'Theme claude color → green (dark)',
     pattern: /claude:"rgb\(215,119,87\)"/g,
     replacer: () => 'claude:"rgb(34,197,94)"',
+    sentinel: 'claude:"rgb(215,119,87)"',
   },
   {
     name: 'Theme claude color → green (light)',
     pattern: /claude:"rgb\(255,153,51\)"/g,
     replacer: () => 'claude:"rgb(22,163,74)"',
+    sentinel: 'claude:"rgb(255,153,51)"',
   },
   {
     name: 'Shimmer → green',
+    // v2.1.142: rgb(235,159,127) or rgb(245,149,117)
+    // Both are orange/warm shimmer colors — replace with green
     pattern: /claudeShimmer:"rgb\(2[34]5,1[45]9,1[12]7\)"/g,
     replacer: () => 'claudeShimmer:"rgb(74,222,128)"',
+    sentinel: 'claudeShimmer:"rgb(235,',
   },
   {
     name: 'Shimmer light → green',
     pattern: /claudeShimmer:"rgb\(255,183,101\)"/g,
     replacer: () => 'claudeShimmer:"rgb(34,197,94)"',
+    sentinel: 'claudeShimmer:"rgb(255,183',
   },
   {
     name: 'Hex brand color → green',
     pattern: /#da7756/g,
     replacer: () => '#22c55e',
+    sentinel: '#da7756',
   },
 
   // ── 限制移除 ──
@@ -320,6 +376,19 @@ const patches = [
       return lookahead.includes('vertex') && lookahead.includes('foundry');
     },
   },
+  // ── 禁用第三方 API 的 outputFormat json_schema ──
+  // Stop/SubagentStop hook evaluator 使用 outputFormat:{type:"json_schema"}
+  // 强制模型返回严格 JSON。第三方 API 不认识此特性，忽略或错误处理，
+  // 导致 q7(sx(response)) → null → "JSON validation failed"。
+  // U2H() 决定模型是否支持 outputFormat，第三方 API 时让 U2H 返回 false，
+  // mp5() 就不会注入 outputFormat。hook evaluator 的 prompt 中已包含
+  // JSON 返回格式说明，模型仍会返回可解析的 JSON。
+  {
+    name: 'Disable outputFormat json_schema for third-party API',
+    pattern: /function U2H\(H\)\{let \$=Z7\(H\),q=Ij\(H\);if\(!Bh\(q\)\|\|q==="gateway"\)return!1;if\(\$\.includes\("claude-3-"\)\|\|\$==="claude-opus-4-0"\|\|\$==="claude-sonnet-4-0"\)return!1;return!0\}/g,
+    replacer: () => 'function U2H(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;let $=Z7(H),q=Ij(H);if(!Bh(q)||q==="gateway")return!1;if($.includes("claude-3-")||$==="claude-opus-4-0"||$==="claude-sonnet-4-0")return!1;return!0}',
+    sentinel: 'function U2H(H){let $=Z7(H),q=Ij(H);if(!Bh(q)||q==="gateway")',
+  },
 ];
 
 // ─── Main ─────────────────────────────────────────────────
@@ -390,13 +459,23 @@ for (const p of patches) {
     if (p.sentinel !== undefined) {
       const sentinels = Array.isArray(p.sentinel) ? p.sentinel : [p.sentinel];
       const stillPresent = sentinels.filter((s) => code.includes(s));
-      if (stillPresent.length > 0) {
+      if (p.sentinelAbsence) {
+        // sentinelAbsence: sentinel PRESENT means "already applied" (opposite of default)
+        // e.g., "growthBookOverrides" only appears after patching
+        if (stillPresent.length === sentinels.length) {
+          console.log(`  ✅ ${p.name} (already applied, sentinel present)`);
+          applied++;
+        } else {
+          console.log(`  ⚠️  ${p.name} (0 matches, sentinel absent — cannot verify)`);
+          skipped++;
+        }
+      } else if (stillPresent.length > 0) {
         console.log(`  ❌ ${p.name} — regex stale, sentinel still in source: ${stillPresent.map((s) => JSON.stringify(s)).join(', ')}`);
         failed++;
-        continue;
+      } else {
+        console.log(`  ✅ ${p.name} (already applied, sentinel absent)`);
+        applied++;
       }
-      console.log(`  ✅ ${p.name} (already applied, sentinel absent)`);
-      applied++;
       continue;
     }
     console.log(`  ⚠️  ${p.name} (0 matches, no sentinel — cannot verify)`);

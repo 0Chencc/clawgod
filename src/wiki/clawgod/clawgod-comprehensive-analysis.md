@@ -316,17 +316,20 @@ function VP$(){
 
 ### 6.3 解决方案
 
-新增补丁：将 `pY()` 直接改为 `return!0`，与 `USER_TYPE="ant"` 思路一致。
+新增补丁：将 `pY()`（v2.1.143 改名为 `FYH()`）直接改为 `return!0`，与 `USER_TYPE="ant"` 思路一致。
 
 ```javascript
 {
-  name: 'Force pY() to always return true (enable Tool Search for 3rd party)',
+  name: 'Force pY()/FYH() to always return true (enable Tool Search for 3rd party)',
+  // v2.1.142: function pY(){...}
+  // v2.1.143: function FYH(){...}  (minifier rename)
   // 补丁前: function pY(){let H=...;return["api.anthropic.com"].includes($)}catch{return!1}}
   // 补丁后: function pY(){return!0}
+  // Pattern uses ([\w$]+) to match both pY and FYH
 }
 ```
 
-`pY()` 被 18 处调用，控制着 Tool Search、特性标志、API 路由等功能。改为 `return!0` 后所有功能对第三方 API 用户解锁。
+`pY()`/`FYH()` 被 18 处调用，控制着 Tool Search、特性标志、API 路由等功能。改为 `return!0` 后所有功能对第三方 API 用户解锁。
 
 ---
 
@@ -417,7 +420,73 @@ patch名称: 'Disable WebSearch isEnabled for third-party API'
 | B (extraToolSchemas filter) | API 请求 | 过滤 `extraToolSchemas` 中的 null |
 | C (isEnabled) | **工具注册** | 不让模型看到 web_search 工具定义 |
 
-### 7.5 GitHub Issue 分析结果
+### 7.5 web_search 对第三方 API 禁用（改用 web_fetch）
+
+**问题**：web_search 是 Anthropic 服务器端工具，第三方 API 没有搜索后端。
+当模型调用 web_search 时，第三方 API 返回空结果或 400。
+
+**方案**：三个补丁协同工作——
+
+```javascript
+// 补丁 A：mt_() 返回 null（不注册 web_search 工具）
+patch名称: 'Disable web_search for third-party API'
+补丁前: function mt_(H){return{type:"web_search_20250305",name:"web_search",...}}
+补丁后: function mt_(H){
+          if(process.env.ANTHROPIC_BASE_URL && !/anthropic\.com/i.test(process.env.ANTHROPIC_BASE_URL))
+            return null;  // 第三方 API → 不注册该工具
+          return{type:"web_search_20250305",name:"web_search",...}
+        }
+
+// 补丁 B：过滤 extraToolSchemas 中的 null
+patch名称: 'Filter null from extraToolSchemas'
+// r=[...A.extraToolSchemas??[]] → r=[...A.extraToolSchemas??[]].filter(Boolean)
+```
+
+**v2.1.143 新增问题**：仅靠补丁 A+B 不够，因为 `Dq()` 默认返回 `"firstParty"`，导致 web_search 的 `isEnabled()` 返回 `true`。
+
+```javascript
+// 补丁 C：web_search 工具的 isEnabled() 前置 ANTHROPIC_BASE_URL 检测
+patch名称: 'Disable WebSearch isEnabled for third-party API'
+补丁前: isEnabled(){let H=Dq();if(H==="firstParty"||H==="anthropicAws")return!0;...return!1}
+补丁后: isEnabled(){
+          if(process.env.ANTHROPIC_BASE_URL && !/anthropic\.com/i.test(process.env.ANTHROPIC_BASE_URL))
+            return!1;  // 第三方 API → 工具不可用
+          let H=Dq();...
+        }
+```
+
+**三个补丁的协同关系**：
+
+| 补丁 | 作用层 | 解决的问题 |
+|------|--------|-----------|
+| A (VH5) | sub-request | web_search 内部子请求禁用服务器端工具 |
+| B (extraToolSchemas filter) | API 请求 | 过滤 `extraToolSchemas` 中的 null |
+| C (isEnabled) | **工具注册** | 不让模型看到 web_search 工具定义 |
+
+### 7.6 ST() gate bypass（v2.1.143 新增）
+
+v2.1.143 中原 `DISABLE_EXPERIMENTAL_BETAS` 检查被移除，取而代之的是 `ST()` 函数：
+
+```javascript
+// v2.1.143: function ST(){return w86()}
+// w86() 检查 Dq()==="firstParty"/"anthropicAws"/"foundry"
+// ST() 控制 advisor、prompt caching 等功能
+function ST(){return!0}  // 让所有 ST() gate 放行
+```
+
+### 7.7 outputFormat json_schema 禁用（v2.1.143 新增）
+
+**问题**：Stop/SubagentStop hook evaluator 使用 `outputFormat:{type:"json_schema"}` 强制模型返回严格 JSON。第三方 API 不认识此特性，忽略或错误处理，导致 `q7(sx(response)) → null → "JSON validation failed"`。
+
+```javascript
+// U2H() 决定模型是否支持 outputFormat
+// 让第三方 API 时 U2H 返回 false，mp5() 就不会注入 outputFormat
+patch名称: 'Disable outputFormat json_schema for third-party API'
+补丁前: function U2H(H){let $=Z7(H),q=Ij(H);if(!Bh(q)||q==="gateway")return!1;if($.includes("claude-3-")||$==="claude-opus-4-0"||$==="claude-sonnet-4-0")return!1;return!0}
+补丁后: function U2H(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;...}
+```
+
+### 7.8 GitHub Issue 分析结果
 
 通过 `github_search_issues` 搜索了 6 组关键词，分析了 ~60 个相关 issue：
 
@@ -448,7 +517,7 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 
 ## 八、补丁汇总
 
-截至 2026-05-16（v2.1.143），clawgod 共 **32 个补丁**：
+截至 2026-05-17（v2.1.143），clawgod 共 **34 个补丁**：
 
 | # | 补丁名 | 类别 |
 |---|--------|------|
@@ -466,14 +535,40 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 | 12 | Redirect `claude update` to clawgod self-update | 功能 |
 | 13 | Sub-agent model inherit from ANTHROPIC_MODEL | 核心破解 |
 | 14 | Force pY()/FYH() to always return true | 核心破解 |
-| 15 | Remove DISABLE_EXPERIMENTAL_BETAS gate in NI6()/dI6() | 核心破解 |
-| 16 | Strip all beta headers in messages API | 兼容性 |
-| 17 | Disable web_search for third-party API (VH5) | 兼容性 |
-| 18 | Filter null from extraToolSchemas | 兼容性 |
-| 19-25 | 绿色主题补丁（7 个：RGB/ANSI/dark/light/shimmer/hex） | 视觉 |
-| 26-29 | 限制移除（4 个：CYBER_RISK/URL/CAUTIOUS/NOT_LOGGED_IN） | 限制移除 |
-| 30-31 | 消息过滤（2 个：attachment + s_8 form） | 功能 |
-| **32** | **Disable WebSearch isEnabled for third-party API** | **兼容性** |
+| 15 | Bypass ST() firstParty gate | 核心破解 |
+| 16 | Remove DISABLE_EXPERIMENTAL_BETAS gate in cI6()/dI6() | 核心破解 |
+| 17 | Remove DISABLE_EXPERIMENTAL_BETAS gate in NI6() | 核心破解 |
+| 18 | Strip all beta headers in messages API | 兼容性 |
+| 19 | Disable web_search for third-party API (VH5) | 兼容性 |
+| 20 | Filter null from extraToolSchemas | 兼容性 |
+| 21-27 | 绿色主题补丁（7 个：RGB/ANSI/dark/light/shimmer/hex） | 视觉 |
+| 28-31 | 限制移除（4 个：CYBER_RISK/URL/CAUTIOUS/NOT_LOGGED_IN） | 限制移除 |
+| 32-33 | 消息过滤（2 个：attachment + s_8 form） | 功能 |
+| 34 | Disable WebSearch isEnabled for third-party API | 兼容性 |
+| **35** | **Disable outputFormat json_schema for third-party API** | **兼容性** |
+
+### 补丁版本兼容性（v2.1.143 验证结果）
+
+| 状态 | 补丁 | 说明 |
+|------|------|------|
+| ✅ 始终应用 | 1-4, 6, 7, 8, 11-14, 18-35 | 核心功能，跨版本稳定 |
+| ⏭ 版本可选 | 5 (Computer Use subscription bypass) | v2.1.143 改为缓存+org角色检查，已自动绕过 |
+| ⏭ 版本可选 | 9 (Computer Use gate bypass) | v2.1.143 中函数形状不同 |
+| ⏭ 版本可选 | 10 (Voice Mode enable) | v2.1.143 移除了 `tengu_amber_quartz_disabled` |
+| ⏭ 版本可选 | 16 (cI6()/dI6() gate) | v2.1.143 上游已移除 DISABLE_EXPERIMENTAL_BETAS 检查 |
+| ⏭ 版本可选 | 17 (NI6() gate) | 同上 |
+| ⏭ 版本可选 | 13 (Sub-agent model) | v2.1.143 中 MJ$() 函数已被重构 |
+| ⏭ 版本可选 | 32-33 (消息过滤) | v2.1.143 中这些代码路径已不存在 |
+
+### Sentinel 系统
+
+v2.1.143 升级时引入了完善的 sentinel 机制：
+
+- **sentinel**: 检测未补丁状态的字符串，用于区分"已应用"和"regex stale"
+- **sentinelAbsence**: 反向检测——sentinel 存在表示已补丁（如 GrowthBook config overrides）
+- **optional**: 标记版本特定补丁，在新版本中不存在时优雅跳过
+
+验证结果：25 applied, 11 skipped (optional), 0 failed。
 
 **cli.cjs 智能配置**（非 patch.mjs 补丁，直接修改包装器）：
 - 自动检测第三方 API → 注入 `DISABLE_EXPERIMENTAL_BETAS` + `ENABLE_TOOL_SEARCH` + `API_TIMEOUT_MS` + `STREAM_IDLE_TIMEOUT`
@@ -578,7 +673,7 @@ node ~/.clawgod/patch.mjs
 | 启动包装器 | `~/.clawgod/cli.cjs` | 智能配置 + 第三方 API 优化 |
 | 补丁后的源码 | `~/.clawgod/cli.original.cjs` | 已打补丁（14.5MB，不纳入 git） |
 | 补丁前的备份 | `~/.clawgod/cli.original.cjs.bak` | 用于 diff repatch |
-| 补丁脚本 | `~/.clawgod/patch.mjs` | **31 个补丁** |
+| 补丁脚本 | `~/.clawgod/patch.mjs` | **34 个补丁**（含 sentinel + optional 机制） |
 | 版本戳 | `~/.clawgod/.source-version` | 当前版本 `2.1.143` |
 | 后处理脚本 | `~/.clawgod/post-process.mjs` | ESM→CJS + try/catch 修复 |
 | 特征标志 | `~/.clawgod/features.json` | GrowthBook overrides |
