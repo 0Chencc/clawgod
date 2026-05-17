@@ -1344,6 +1344,56 @@ const patches = [
   //   如果 GrowthBook 未提供该 flag，Z$() 返回 !1 → oo7() 提前 return。
   // 需要在 features.json 中添加 tengu_moth_copse: true。
   // 此处不加代码补丁，而是依赖 features.json 覆盖。
+
+  // ── Fast Mode 解锁 — 第三方 API 用户无法使用 Fast Mode ──
+  // Y9() (v2.1.143 minified name, was _9()) 是 Fast Mode 的启用检查：
+  //   function Y9(){if(Dq()!=="firstParty")return!1;return!CH(process.env.CLAUDE_CODE_DISABLE_FAST_MODE)}
+  //   Dq() 默认返回 "firstParty"（无 Bedrock/Vertex 环境变量时），
+  //   但 pY() 被我们改为 return!0 后，某些代码路径中 Dq() 可能被重新评估。
+  //   直接让 Y9() 去掉 vq()/Dq() 检查，使 Fast Mode 对所有用户可用。
+  //   保留 DISABLE_FAST_MODE 环境变量的控制。
+  {
+    name: 'Enable Fast Mode for third-party API',
+    pattern: /function ([\w$]+)\(\)\{if\(([\w$]+)\(\)!=="firstParty"\)return!1;return!([\w$]+)\(process\.env\.CLAUDE_CODE_DISABLE_FAST_MODE\)\}/g,
+    replacer: (m, fn, vqfn, bhfn) => `function ${fn}(){return!${bhfn}(process.env.CLAUDE_CODE_DISABLE_FAST_MODE)}`,
+    sentinel: '!=="firstParty")return!1;return!',  // sentinel is the removed vq check
+  },
+
+  // ── Advisor 工具解锁 — 第三方 API 用户无法使用 Advisor ──
+  // uC() 是 Advisor 工具的启用检查：
+  //   function uC(){if(bH(process.env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL))return!1;if(vq()!=="firstParty"||!RT())return!1;...}
+  //   RT() 已被 ST() bypass 补丁覆盖（返回 true），但 vq()!=="firstParty" 仍阻止第三方用户。
+  //   移除 vq()!=="firstParty" 检查，同时保留 DISABLE_ADVISOR_TOOL 和 GrowthBook 控制。
+  {
+    name: 'Enable Advisor tool for third-party API',
+    pattern: /if\(bH\(process\.env\.CLAUDE_CODE_DISABLE_ADVISOR_TOOL\)\)return!1;if\(vq\(\)!=="firstParty"\|\|!([\w$]+)\(\)\)return!1;/g,
+    replacer: (m, fn) => 'if(bH(process.env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL))return!1;',
+    sentinel: 'DISABLE_ADVISOR_TOOL))return!1;if(vq()!=="firstParty"',
+  },
+
+  // ── Image Size Limit 提升 — 第三方 API 限制 5MB → 10MB ──
+  // ac1() 决定图片大小限制：
+  //   function ac1(){if(vq()==="firstParty"&&pY()&&Z$("tengu_crimson_vector",!1))return SxK;return Ql.maxBase64Size}
+  //   只有 firstParty+pY()+tengu_crimson_vector 才返回 SxK(10MB)，否则 5MB。
+  //   pY() 已补丁为 true，但 vq()==="firstParty" 对第三方 API 用户仍需通过。
+  //   让第三方 API 用户也享受 10MB 限制。
+  {
+    name: 'Unlock 10MB image size limit for third-party API',
+    pattern: /function ([\w$]+)\(\)\{if\(vq\(\)==="firstParty"&&([\w$]+)\(\)&&Z\$\("tengu_crimson_vector",!1\)\)return ([\w$]+);return ([\w$]+)\.maxBase64Size\}/g,
+    replacer: (m, fn, pYfn, sxk, ql) => `function ${fn}(){if(${pYfn}()&&Z$("tengu_crimson_vector",!1))return ${sxk};return ${ql}.maxBase64Size}`,
+    sentinel: 'vq()==="firstParty"&&',
+  },
+
+  // ── Send User File 工具解锁 — 第三方 API 用户无法发送文件给模型 ──
+  // isEnabled(){if(vq()!=="firstParty"||f4())return!1;if(!Z$("tengu_send_user_file",!0))return!1;...}
+  //   移除 vq()!=="firstParty" 检查。
+  {
+    name: 'Enable Send User File tool for third-party API',
+    pattern: /isEnabled\(\)\{if\(vq\(\)!=="firstParty"\|\|([\w$]+)\(\)\)return!1;if\(!Z\$\("tengu_send_user_file",!0\)\)return!1;/g,
+    replacer: (m, fn) => 'isEnabled(){if(!Z$("tengu_send_user_file",!0))return!1;',
+    sentinel: 'vq()!=="firstParty"||',
+    validate: (match, code) => code.indexOf('tengu_send_user_file') !== -1,
+  },
 ];
 
 // ─── Main ─────────────────────────────────────────────────
