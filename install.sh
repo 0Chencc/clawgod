@@ -1316,6 +1316,34 @@ const patches = [
     replacer: () => 'function U2H(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;let $=Z7(H),q=Ij(H);if(!Bh(q)||q==="gateway")return!1;if($.includes("claude-3-")||$==="claude-opus-4-0"||$==="claude-sonnet-4-0")return!1;return!0}',
     sentinel: 'function U2H(H){let $=Z7(H),q=Ij(H);if(!Bh(q)||q==="gateway")',
   },
+
+  // ── 解锁第三方 API 的 Auto-Memory ──
+  // ui$() (v2.1.143, was Pi$()) 是 auto-memory 系统的关键门禁函数：
+  //   1. Z$("tengu_sepia_cormorant",null) → 如果 null（默认），返回 false
+  //   2. 否则 iTK(modelName, allowlist) → 检查当前模型名是否在白名单中
+  //   3. Z$("tengu_umber_petrel",!1) → 最终开关，默认 false
+  // 第三方模型名不在 Anthropic 白名单 → ui$() 返回 false → x9() 关闭 auto-memory。
+  // 补丁：让 ui$() 直接返回 true，auto-memory 对所有模型启用。
+  // 注意：minifier 混淆名可能跨版本变化（v2.1.142: Pi$, v2.1.143: ui$），
+  //   所以 pattern 使用 [\\w$]+ 通配符匹配函数名。
+  {
+    name: 'Enable auto-memory for third-party API (bypass model allowlist gate)',
+    pattern: /function ([\w$]+)\(\)\{let H=Z\$\("tengu_sepia_cormorant",null\);if\(!Array\.isArray\(H\)\|\|H\.length===0\)return!1;let \$=[\w$]+\(\),q=\$!==void 0\?\$:[\w$]+\(\);if\(typeof q!=="string"\|\|![\w$]+\(q,H\)\)return!1;return Z\$\("tengu_umber_petrel",!1\)\}/g,
+    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    sentinel: 'tengu_sepia_cormorant",null);if(!Array.isArray(H)',
+  },
+
+  // ── 解锁 memorySelector（auto-memory 内容注入）──
+  // oo7() 是 memorySelector 函数，在用户输入时触发记忆搜索：
+  //   条件：!K (no selector) || $.agentId (subagent) || !x9() (auto off) || !Z$("tengu_moth_copse",!1)
+  //   最后一个条件：tengu_moth_copse 默认 false → 记忆内容指南不注入
+  // 补丁：将 Z$("tengu_moth_copse",!1) 条件在 o7() 中始终为 true。
+  // 注意：此补丁不易通过正则定位 oo7() 的具体调用，
+  //   因此改用 features.json 设置 tengu_moth_copse: true。
+  // 但 o7() 中的 !Z$("tengu_moth_copse",!1) 在 Z$() 的 default 为 !1，
+  //   如果 GrowthBook 未提供该 flag，Z$() 返回 !1 → oo7() 提前 return。
+  // 需要在 features.json 中添加 tengu_moth_copse: true。
+  // 此处不加代码补丁，而是依赖 features.json 覆盖。
 ];
 
 // ─── Main ─────────────────────────────────────────────────
@@ -1474,7 +1502,12 @@ if [ ! -f "$CLAWGOD_DIR/features.json" ]; then
   "tengu_desktop_upsell": false,
   "tengu_malort_pedway": {"enabled": true},
   "tengu_amber_quartz_disabled": false,
-  "tengu_prompt_cache_1h_config": {"allowlist": ["*"]}
+  "tengu_prompt_cache_1h_config": {"allowlist": ["*"]},
+  "tengu_moth_copse": true,
+  "tengu_umber_petrel": true,
+  "tengu_sepia_cormorant": ["claude", "deepseek", "qwen", "gpt", "gemini", "o1", "o3", "o4"],
+  "tengu_sedge_lantern": true,
+  "tengu_billiard_aviary": false
 }
 
 FEATURES_EOF

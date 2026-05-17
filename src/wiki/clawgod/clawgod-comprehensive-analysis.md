@@ -486,7 +486,48 @@ patch名称: 'Disable outputFormat json_schema for third-party API'
 补丁后: function U2H(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;...}
 ```
 
-### 7.8 GitHub Issue 分析结果
+### 7.9 Auto-Memory 解锁（v2.1.143 新增）
+
+**问题**：使用第三方模型时，auto-memory（自动记忆读写）功能被静默禁用。
+
+**根因**：`ui$()`（v2.1.142 中为 `Pi$()`）是 auto-memory 门禁函数，执行三重检查：
+
+```javascript
+function ui$(){
+  let H = Z$("tengu_sepia_cormorant", null);  // 模型名白名单
+  if(!Array.isArray(H) || H.length === 0) return!1;  // 默认 null → 返回 false
+  let $ = Jv(), q = $ !== void 0 ? $ : y8H();  // 获取当前模型名
+  if(typeof q !== "string" || !iTK(q, H)) return!1;  // 模型名不在白名单 → 返回 false
+  return Z$("tengu_umber_petrel",!1)  // 最终开关，默认 false
+}
+```
+
+第三方模型名（如 `deepseek-v3`）不在 Anthropic 白名单 `["claude"]` 中 → `ui$()` 返回 false → `x9()` 关闭 auto-memory。
+
+同时 `oo7()`（memorySelector）也受 `Z$("tengu_moth_copse",!1)` 门禁，默认 false。
+
+**补丁方案**：
+
+1. **代码补丁**：让 `ui$()` 直接返回 true
+
+```javascript
+pattern: /function ([\w$]+)\(\)\{let H=Z\$("tengu_sepia_cormorant"...}/g
+replacer: (m, fn) => `function ${fn}(){return!0}`
+```
+
+2. **features.json 覆盖**（双重保障，因为 Z$() 优先读 env override）：
+
+```json
+{
+  "tengu_moth_copse": true,           // 记忆内容指南注入
+  "tengu_umber_petrel": true,         // auto-memory 最终开关
+  "tengu_sepia_cormorant": ["claude","deepseek","qwen","gpt","gemini","o1","o3","o4"],
+  "tengu_sedge_lantern": true,         // recap (会话摘要) 功能
+  "tengu_billiard_aviary": false       // team memory 路径（保持本地）
+}
+```
+
+### 7.10 GitHub Issue 分析结果
 
 通过 `github_search_issues` 搜索了 6 组关键词，分析了 ~60 个相关 issue：
 
@@ -517,7 +558,7 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 
 ## 八、补丁汇总
 
-截至 2026-05-17（v2.1.143），clawgod 共 **34 个补丁**：
+截至 2026-05-17（v2.1.143），clawgod 共 **36 个补丁**：
 
 | # | 补丁名 | 类别 |
 |---|--------|------|
@@ -545,7 +586,8 @@ v2.1.132 context-1m beta → 400 (OPEN #56970)
 | 28-31 | 限制移除（4 个：CYBER_RISK/URL/CAUTIOUS/NOT_LOGGED_IN） | 限制移除 |
 | 32-33 | 消息过滤（2 个：attachment + s_8 form） | 功能 |
 | 34 | Disable WebSearch isEnabled for third-party API | 兼容性 |
-| **35** | **Disable outputFormat json_schema for third-party API** | **兼容性** |
+| 35 | Disable outputFormat json_schema for third-party API | 兼容性 |
+| **36** | **Enable auto-memory for third-party API** | **核心破解** |
 
 ### 补丁版本兼容性（v2.1.143 验证结果）
 
@@ -673,7 +715,7 @@ node ~/.clawgod/patch.mjs
 | 启动包装器 | `~/.clawgod/cli.cjs` | 智能配置 + 第三方 API 优化 |
 | 补丁后的源码 | `~/.clawgod/cli.original.cjs` | 已打补丁（14.5MB，不纳入 git） |
 | 补丁前的备份 | `~/.clawgod/cli.original.cjs.bak` | 用于 diff repatch |
-| 补丁脚本 | `~/.clawgod/patch.mjs` | **34 个补丁**（含 sentinel + optional 机制） |
+| 补丁脚本 | `~/.clawgod/patch.mjs` | **36 个补丁**（含 sentinel + optional 机制） |
 | 版本戳 | `~/.clawgod/.source-version` | 当前版本 `2.1.143` |
 | 后处理脚本 | `~/.clawgod/post-process.mjs` | ESM→CJS + try/catch 修复 |
 | 特征标志 | `~/.clawgod/features.json` | GrowthBook overrides |

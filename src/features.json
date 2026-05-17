@@ -8,5 +8,10 @@
   "tengu_desktop_upsell": false,
   "tengu_malort_pedway": {"enabled": true},
   "tengu_amber_quartz_disabled": false,
-  "tengu_prompt_cache_1h_config": {"allowlist": ["*"]}
+  "tengu_prompt_cache_1h_config": {"allowlist": ["*"]},
+  "tengu_moth_copse": true,
+  "tengu_umber_petrel": true,
+  "tengu_sepia_cormorant": ["claude", "deepseek", "qwen", "gpt", "gemini", "o1", "o3", "o4"],
+  "tengu_sedge_lantern": true,
+  "tengu_billiard_aviary": false
 }

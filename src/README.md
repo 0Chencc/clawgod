@@ -1,6 +1,6 @@
 # ClawGod 完整备份 — 二开增强版
 
-这是 clawgod 的完整备份，包含 **34 个补丁（支持 Claude Code 2.1.142-2.1.143）** + cli.cjs 智能配置 + wiki 知识库。
+这是 clawgod 的完整备份，包含 **36 个补丁（支持 Claude Code 2.1.142-2.1.143）** + cli.cjs 智能配置 + wiki 知识库。
 
 ## 目录结构
 
