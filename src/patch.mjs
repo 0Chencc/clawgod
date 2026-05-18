@@ -385,9 +385,10 @@ const patches = [
   // JSON 返回格式说明，模型仍会返回可解析的 JSON。
   {
     name: 'Disable outputFormat json_schema for third-party API',
-    pattern: /function U2H\(H\)\{let \$=Z7\(H\),q=Ij\(H\);if\(!Bh\(q\)\|\|q==="gateway"\)return!1;if\(\$\.includes\("claude-3-"\)\|\|\$==="claude-opus-4-0"\|\|\$==="claude-sonnet-4-0"\)return!1;return!0\}/g,
-    replacer: () => 'function U2H(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;let $=Z7(H),q=Ij(H);if(!Bh(q)||q==="gateway")return!1;if($.includes("claude-3-")||$==="claude-opus-4-0"||$==="claude-sonnet-4-0")return!1;return!0}',
-    sentinel: 'function U2H(H){let $=Z7(H),q=Ij(H);if(!Bh(q)||q==="gateway")',
+    pattern: /function ([\w$]+)\(H\)\{let \$=[\w$]+\(H\),q=[\w$]+\(H\);if\(![\w$]+\(q\)\|\|q==="gateway"\)return!1;if\(\$\.includes\("claude-3-"\)\|\|\$==="claude-opus-4-0"\|\|\$==="claude-sonnet-4-0"\)return!1;return!0\}/g,
+    replacer: (m, fn) => m.replace(`function ${fn}(H){`, `function ${fn}(H){if(process.env.ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;`),
+    sentinel: 'ANTHROPIC_BASE_URL&&!/anthropic\\.com/i.test(process.env.ANTHROPIC_BASE_URL))return!1;let $',
+    sentinelAbsence: true,  // sentinel presence = already patched
   },
 
   // ── 解锁第三方 API 的 Auto-Memory ──
@@ -401,7 +402,7 @@ const patches = [
   //   所以 pattern 使用 [\\w$]+ 通配符匹配函数名。
   {
     name: 'Enable auto-memory for third-party API (bypass model allowlist gate)',
-    pattern: /function ([\w$]+)\(\)\{let H=Z\$\("tengu_sepia_cormorant",null\);if\(!Array\.isArray\(H\)\|\|H\.length===0\)return!1;let \$=[\w$]+\(\),q=\$!==void 0\?\$:[\w$]+\(\);if\(typeof q!=="string"\|\|![\w$]+\(q,H\)\)return!1;return Z\$\("tengu_umber_petrel",!1\)\}/g,
+    pattern: /function ([\w$]+)\(\)\{let H=[\w$]+\("tengu_sepia_cormorant",null\);if\(!Array\.isArray\(H\)\|\|H\.length===0\)return!1;let \$=[\w$]+\(\),q=\$!==void 0\?\$:[\w$]+\(\);if\(typeof q!=="string"\|\|![\w$]+\(q,H\)\)return!1;return [\w$]+\("tengu_umber_petrel",!1\)\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
     sentinel: 'tengu_sepia_cormorant",null);if(!Array.isArray(H)',
   },
@@ -497,7 +498,7 @@ const patches = [
   // 修复：移除 DISABLE_COMPACT 前置条件，允许用户独立指定上下文大小。
   {
     name: 'Allow CLAUDE_CODE_MAX_CONTEXT_TOKENS without DISABLE_COMPACT',
-    pattern: /if\(CH\(process\.env\.DISABLE_COMPACT\)&&process\.env\.CLAUDE_CODE_MAX_CONTEXT_TOKENS\)\{/g,
+    pattern: /if\([\w$]+\(process\.env\.DISABLE_COMPACT\)&&process\.env\.CLAUDE_CODE_MAX_CONTEXT_TOKENS\)\{/g,
     replacer: (m) => 'if(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS){',
     sentinel: 'DISABLE_COMPACT)&&process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS',
   },
@@ -561,9 +562,9 @@ const patches = [
   //   补丁：移除 firstParty 检查、xz 检查（已补丁为true）和 local-agent 检查。
   {
     name: 'Unlock Auto Mode for third-party API',
-    pattern: /if\(Dq\(\)!=="firstParty"\)return rQ=Ha\(!1\);if\(!xz\(\)\)return rQ=Ha\(!1\);if\(process\.env\.CLAUDE_CODE_ENTRYPOINT==="local-agent"\)return rQ=Ha\(!1\)/g,
+    pattern: /if\([\w$]+\(\)!=="firstParty"\)return rQ=Ha\(!1\);if\(!xz\(\)\)return rQ=Ha\(!1\);if\(process\.env\.CLAUDE_CODE_ENTRYPOINT==="local-agent"\)return rQ=Ha\(!1\)/g,
     replacer: (m) => 'if(!xz())return rQ=Ha(!1)',
-    sentinel: 'Dq()!=="firstParty")return rQ=Ha(!1)',
+    sentinel: 'firstParty")return rQ=Ha(!1)',
     validate: (match, code) => {
       const pos = code.indexOf(match);
       const nearby = code.substring(Math.max(0, pos - 100), pos + 100);
@@ -579,27 +580,38 @@ const patches = [
   //   补丁：移除 firstParty 检查，允许第三方 API 使用 channels。
   {
     name: 'Unlock Channels for third-party API',
-    pattern: /if\(Dq\(\)!=="firstParty"\)return\{action:"skip",kind:"provider",reason:"channels are not available on third-party providers"\}/g,
+    pattern: /if\([\w$]+\(\)!=="firstParty"\)return\{action:"skip",kind:"provider",reason:"channels are not available on third-party providers"\}/g,
     replacer: (m) => '',
     sentinel: 'channels are not available on third-party providers',
   },
 
   // ── Model Migration 解锁 ──
-  // ZH9() (legacy opus migration) 和 IH9() (sonnet 4.5→4.6 migration)
-  // 都以 if(Dq()!=="firstParty")return 开头，
+  // Xe4() (legacy opus) 和 Ne4() (sonnet 4.5→4.6)
+  // 都以 if(vq()!=="firstParty")return 开头，
   // 导致第三方 API 用户无法自动升级旧版模型设置。
   // 补丁：移除这两个函数的 firstParty 检查。
+  // 使用 validate 区分 Opus 和 Sonnet 迁移函数。
   {
     name: 'Unlock legacy Opus model migration for third-party API',
-    pattern: /function ZH9\(\)\{if\(Dq\(\)!=="firstParty"\)return;/g,
-    replacer: (m) => 'function ZH9(){',
-    sentinel: 'function ZH9(){if(Dq()!=="firstParty")return;',
+    pattern: /function [\w$]+\(\)\{if\([\w$]+\(\)!=="firstParty"\)return;/g,
+    replacer: (m) => m.replace(/if\([\w$]+\(\)!=="firstParty"\)return;/, ''),
+    sentinel: '"claude-opus-4"',  // sentinel for opus migration context
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(pos, pos + 500);
+      return nearby.includes('claude-opus-4');
+    },
   },
   {
     name: 'Unlock Sonnet 4.5→4.6 migration for third-party API',
-    pattern: /function IH9\(\)\{if\(Dq\(\)!=="firstParty"\)return;/g,
-    replacer: (m) => 'function IH9(){',
-    sentinel: 'function IH9(){if(Dq()!=="firstParty")return;',
+    pattern: /function [\w$]+\(\)\{if\([\w$]+\(\)!=="firstParty"\)return;/g,
+    replacer: (m) => m.replace(/if\([\w$]+\(\)!=="firstParty"\)return;/, ''),
+    sentinel: '"claude-sonnet-4-5"',  // sentinel for sonnet migration context
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(pos, pos + 500);
+      return nearby.includes('claude-sonnet-4-5');
+    },
   },
 ];
 
