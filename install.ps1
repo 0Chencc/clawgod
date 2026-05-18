@@ -208,7 +208,7 @@ if (-not $NativeBin) {
     $NativeBinTmpDir = Join-Path $env:TEMP "clawgod-binary-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path $NativeBinTmpDir | Out-Null
     $fetchScript = Join-Path $NativeBinTmpDir "fetch.mjs"
-    @'
+    $fetchCode = @'
 // Download a scoped npm tarball (no npm CLI dependency) and extract it
 // using Node's built-in zlib + a minimal POSIX tar parser.
 import { request as httpsRequest } from 'node:https';
@@ -264,7 +264,8 @@ while (off + 512 <= buf.length) {
 }
 console.log(`Extracted ${files} files`);
 console.log(`VERSION=${meta.version}`);
-'@ | Set-Content $fetchScript -Encoding UTF8
+'@
+    [System.IO.File]::WriteAllText($fetchScript, $fetchCode, [System.Text.UTF8Encoding]::new($false))
 
     $output = & node $fetchScript "$npmPkg@latest" $NativeBinTmpDir 2>&1
     $exitCode = $LASTEXITCODE
@@ -304,7 +305,7 @@ if (-not $NativeBin) {
 
 # Always write the extractor (used for cli.js and/or .node modules)
 $extractorPath = Join-Path $ClawDir "extract-natives.mjs"
-@'
+$extractorCode = @'
 #!/usr/bin/env node
 /**
  * ClawGod native module extractor
@@ -721,7 +722,8 @@ function main() {
 }
 
 main();
-'@ | Set-Content $extractorPath -Encoding UTF8
+'@
+[System.IO.File]::WriteAllText($extractorPath, $extractorCode, [System.Text.UTF8Encoding]::new($false))
 
 # ─── Extract cli.js + native modules from Bun binary ──────────
 
@@ -747,7 +749,7 @@ Write-Dim "Extracting native modules from $NativeBinLabel ..."
 
 Write-Dim "Rewriting bunfs paths and IIFE invocation ..."
 $postProc = Join-Path $ClawDir "post-process.mjs"
-@'
+$postProcCode = @'
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -774,7 +776,8 @@ code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirn
 writeFileSync(dst, code);
 unlinkSync(src);
 console.log(`cli.original.cjs: ${code.length} bytes`);
-'@ | Set-Content $postProc -Encoding UTF8
+'@
+[System.IO.File]::WriteAllText($postProc, $postProcCode, [System.Text.UTF8Encoding]::new($false))
 & node $postProc 2>&1 | ForEach-Object { Write-Host "  $_" }
 if (-not (Test-Path (Join-Path $ClawDir "cli.original.cjs"))) {
     Write-Err "Post-process failed"
@@ -794,7 +797,7 @@ Write-OK "cli.original.cjs ready ($NativeBinLabel)"
 
 # ─── Write re-patch helper (used by wrapper on version drift) ─────────
 
-@'
+$repatchCode = @'
 #!/usr/bin/env bun
 import { spawnSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
@@ -834,12 +837,13 @@ run('patcher', [patcher]);
 
 writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
 console.log(`[clawgod] re-patched to ${basename(nativeBin)}`);
-'@ | Set-Content (Join-Path $ClawDir "repatch.mjs") -Encoding UTF8
+'@
+[System.IO.File]::WriteAllText((Join-Path $ClawDir "repatch.mjs"), $repatchCode, [System.Text.UTF8Encoding]::new($false))
 Write-OK "Re-patch helper installed (repatch.mjs)"
 
 # ─── Write wrapper (cli.cjs, runs under Bun) ──────────────────
 
-@'
+$wrapperCode = @'
 #!/usr/bin/env bun
 const { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, statSync, renameSync } = require('fs');
 const { join, basename } = require('path');
@@ -917,7 +921,8 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 }
 
 require('./cli.original.cjs');
-'@ | Set-Content (Join-Path $ClawDir "cli.cjs") -Encoding UTF8
+'@
+[System.IO.File]::WriteAllText((Join-Path $ClawDir "cli.cjs"), $wrapperCode, [System.Text.UTF8Encoding]::new($false))
 Write-OK "Wrapper created (cli.cjs)"
 
 # ─── Write universal patcher ──────────────────────────
@@ -927,7 +932,6 @@ $patcherUrl = "https://raw.githubusercontent.com/gdlwolf/clawgod/main/patcher.mj
 
 # Inline the patcher to avoid extra download
 $patcherCode = @'
-
 #!/usr/bin/env node
 /**
  * ClawGod Universal Patcher — 正则模式匹配, 跨版本兼容
@@ -1669,7 +1673,7 @@ console.log(`${'═'.repeat(55)}\n`);
 
 '@
 
-Set-Content (Join-Path $ClawDir "patch.mjs") $patcherCode -Encoding UTF8
+[System.IO.File]::WriteAllText((Join-Path $ClawDir "patch.mjs"), $patcherCode, [System.Text.UTF8Encoding]::new($false))
 Write-OK "Patcher created (patch.mjs)"
 
 # ─── Apply patches ────────────────────────────────────
@@ -1681,7 +1685,7 @@ node (Join-Path $ClawDir "patch.mjs")
 
 $featuresFile = Join-Path $ClawDir "features.json"
 if (-not (Test-Path $featuresFile)) {
-    @'
+    $featuresJson = @'
 {
   "tengu_harbor": true,
   "tengu_session_memory": true,
@@ -1692,7 +1696,8 @@ if (-not (Test-Path $featuresFile)) {
   "tengu_desktop_upsell": false,
   "tengu_prompt_cache_1h_config": {"allowlist": ["*"]}
 }
-'@ | Set-Content $featuresFile -Encoding UTF8
+'@
+    [System.IO.File]::WriteAllText($featuresFile, $featuresJson, [System.Text.UTF8Encoding]::new($false))
     Write-OK "Default features.json created"
 }
 
