@@ -4,11 +4,16 @@
 
 ### Added
 
-- **Dev branch init**: full clawgod toolchain with 31 patches, LLM wiki, and third-party API enhancements
-- **LLM knowledge base** (`wiki/`): comprehensive analysis covering bypass architecture (3-layer: GrowthBook → gate functions → message filters), all 32 patches catalog, performance fixes, and re-crack guide
-- **`.source-version` tracking**: records which Claude Code version the patched binary corresponds to
-- **`.gitignore`**: excludes regeneratable 14MB binary artifacts from git tracking
-- **Patch #32 — Disable WebSearch isEnabled for third-party API**: `Dq()`/`vq()` 默认返回 `"firstParty"`（无环境变量时），导致 web_search 工具的 `isEnabled()` 返回 `true`，模型仍能看到内置 web_search 工具而非 Tavily MCP。在 `isEnabled()` 开头添加 `ANTHROPIC_BASE_URL` 检测，和 VH5() 的检测逻辑一致，实现 tool definition 层的第三方 API 禁用
+- **Patch #45 — Unlock Auto Mode for third-party API**: removes `Dq()!=="firstParty"` and `local-agent` gates from `$i()`, allowing auto-mode (AFK detection) for all API key users
+- **Patch #46 — Unlock Channels for third-party API**: removes `{action:"skip",kind:"provider"}` gate from `qrH()`, enabling MCP channel permissions for third-party providers
+- **Patch #47 — Unlock legacy Opus model migration for third-party API**: removes `Dq()!=="firstParty"` gate from `ZH9()`, allowing old Opus models to auto-migrate to Opus 4.6
+- **Patch #48 — Unlock Sonnet 4.5→4.6 migration for third-party API**: removes `Dq()!=="firstParty"` gate from `IH9()`, allowing Sonnet 4.5 settings to auto-upgrade to 4.6
+- **Wiki updated**: added 7 new patch cards (Fast Mode, Advisor, Send User File, 10MB image, Auto-memory, 1M context, 1h cache, Global cache, Channels, Model migrations) and 2 restriction removal cards (WebSearch block, outputFormat block)
+
+### Changed
+
+- **Total patches: 48** (up from 44)
+- **og:description** updated to reflect 48+ patches
 
 ### Fixed
 

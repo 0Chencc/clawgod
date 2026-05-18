@@ -6,7 +6,7 @@
   <title>ClawGod — God Mode for Claude Code</title>
   <meta name="description" content="Unlock internal features, remove restrictions from Claude Code. One command, no compilation." />
   <meta property="og:title" content="ClawGod — God Mode for Claude Code" />
-  <meta property="og:description" content="Unlock 24+ hidden commands, remove restrictions, green theme. One command install." />
+  <meta property="og:description" content="Unlock 48+ patches, remove restrictions, green theme. One command install." />
   <meta property="og:image" content="https://clawgod.0chen.cc/bypass.png" />
   <meta property="og:url" content="https://clawgod.0chen.cc" />
   <!-- Inter + JetBrains Mono are self-hosted and base64-inlined into
@@ -111,15 +111,27 @@
       <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Ultrareview</div><div class="desc">Automated bug-hunter review via Claude Code Remote.</div></article>
       <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Voice Mode</div><div class="desc">Built-in voice dictation, no kill-switch.</div></article>
       <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Auto-mode third-party</div><div class="desc">Auto-mode unlocked for non-Anthropic API endpoints.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Fast Mode</div><div class="desc">Fast mode (Opus accelerated output) for third-party APIs.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Advisor tool</div><div class="desc">Stronger model advisor for third-party API users.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Send User File</div><div class="desc">File upload tool for third-party API users.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">10MB image upload</div><div class="desc">Image size limit raised from 5MB to 10MB for third-party.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Auto-memory</div><div class="desc">Auto-memory enabled for all models, bypass allowlist.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">1M context window</div><div class="desc">Default context window raised from 200K to 1M tokens.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">1h cache TTL</div><div class="desc">Prompt cache 1-hour TTL bypasses OAuth subscription check.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Global cache scope</div><div class="desc">Cross-session prompt cache for third-party APIs.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Channels</div><div class="desc">MCP channel permissions for third-party API users.</div></article>
+      <article class="patch-card"><span class="badge unlock">Unlock</span><div class="name">Model migrations</div><div class="desc">Auto-upgrade legacy Opus and Sonnet 4.5 → 4.6 for all APIs.</div></article>
     </div>
   </section>
 
   <section class="section">
     <header class="section-head">
       <h2><span class="num">02</span>Restriction removals</h2>
-      <p>System prompt instructions stripped at patch time.</p>
+      <p>System prompt instructions and API-side restrictions stripped or bypassed.</p>
     </header>
     <div class="patches-grid">
+      <article class="patch-card"><span class="badge remove">Remove</span><div class="name">WebSearch block</div><div class="desc">Stops WebSearch tool from crashing on third-party endpoints.</div></article>
+      <article class="patch-card"><span class="badge remove">Remove</span><div class="name">outputFormat block</div><div class="desc">Stops json_schema output format from crashing on non-Anthropic APIs.</div></article>
       <article class="patch-card"><span class="badge remove">Remove</span><div class="name">CYBER_RISK_INSTRUCTION</div><div class="desc">Security testing refusal — pentest, C2, exploits.</div></article>
       <article class="patch-card"><span class="badge remove">Remove</span><div class="name">URL guess restriction</div><div class="desc">"NEVER generate or guess URLs" instruction.</div></article>
       <article class="patch-card"><span class="badge remove">Remove</span><div class="name">Cautious actions</div><div class="desc">Forced confirmation before destructive operations.</div></article>
