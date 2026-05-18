@@ -1394,6 +1394,140 @@ const patches = [
     sentinel: 'vq()!=="firstParty"||',
     validate: (match, code) => code.indexOf('tengu_send_user_file') !== -1,
   },
+
+  // ── 上下文窗口限制解除 — 第三方 API 默认 200k → 1M ──
+  // EP(H,$) 返回模型上下文窗口大小：
+  //   function EP(H,$){
+  //     if(CH(DISABLE_COMPACT)&&process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS){...return K}
+  //     if(lG(H))return 1e6;        // [1m] 标签
+  //     if($?.includes(xU.header)&&Fc(H))return 1e6;  // beta header + model 检查
+  //     if(OqH(H))return 1e6;        // opus-4-7
+  //     let q=Zl$(H);if(q!==null)return q;  // kelp_forest_sonnet 缓存
+  //     return M86                 // 默认 200000
+  //   }
+  //   对第三方模型（如 GLM-5.1），[1m] 标签不存在，beta header 也没有，
+  //   最终返回 M86=200000。这导致：
+  //   1. 自动压缩在 ~167k tokens 时触发（应该 980k）
+  //   2. 上下文窗口显示错误（200k 而非 1M）
+  //   3. 在第三方 API 下无法充分利用 1M 上下文
+  //   修复：将 M86 默认值从 200000 改为 1000000
+  {
+    name: 'Raise default context window from 200k to 1M for third-party models',
+    pattern: /var M86=200000/g,
+    replacer: (m) => 'var M86=1000000',
+    sentinel: 'var M86=200000',
+  },
+
+  // ── CLAUDE_CODE_MAX_CONTEXT_TOKENS 环境变量解锁 ──
+  // EP 函数要求同时设置 DISABLE_COMPACT 才能使用 MAX_CONTEXT_TOKENS，
+  // 这意味着用户要么禁用自动压缩，要么无法自定义上下文大小。
+  // 修复：移除 DISABLE_COMPACT 前置条件，允许用户独立指定上下文大小。
+  {
+    name: 'Allow CLAUDE_CODE_MAX_CONTEXT_TOKENS without DISABLE_COMPACT',
+    pattern: /if\(CH\(process\.env\.DISABLE_COMPACT\)&&process\.env\.CLAUDE_CODE_MAX_CONTEXT_TOKENS\)\{/g,
+    replacer: (m) => 'if(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS){',
+    sentinel: 'DISABLE_COMPACT)&&process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+  },
+
+  // ── 1h Cache TTL 解锁 — 第三方 API 默认只有 5 分钟缓存 ──
+  // ivH() 决定缓存 TTL 是否为 1h：
+  //   function ivH(H){
+  //     if(bH(FORCE_PROMPT_CACHING_5M))return!1;
+  //     if(bH(ENABLE_PROMPT_CACHING_1H))return!0;    // 环境变量可以强制
+  //     if(vq()==="bedrock"&&bH(ENABLE_PROMPT_CACHING_1H_BEDROCK))return!0;
+  //     if(!qq()||bZ.isUsingOverage)return!1;          // ← 第三方被拦截
+  //     let $=nv8();if($===null)$=Z$("tengu_prompt_cache_1h_config",{...}).allowlist;
+  //     ...
+  //   }
+  //   qq() 检查 OAuth 认证状态，使用 ANTHROPIC_API_KEY 的第三方用户
+  //   没有通过 OAuth 认证，导致 qq()=false，ivH() 返回 false。
+  //   结果：第三方 API 只有 5 分钟缓存 TTL，而不是 1 小时。
+  //   修复：跳过 qq() 和 isUsingOverage 的检查，让 GrowthBook flag 接管。
+  {
+    name: 'Unlock 1h cache TTL for third-party API (bypass auth gate)',
+    pattern: /if\(!qq\(\)\|\|[\w$]+\.isUsingOverage\)return!1;/g,
+    replacer: (m) => '/* patched: bypass auth check for 1h cache */if(!1)return!1;',
+    sentinel: '!qq()||bZ.isUsingOverage)return!1;',
+    validate: (match, code) => {
+      // Only apply if this appears near tengu_prompt_cache_1h_config
+      const idx = code.indexOf(match[0]);
+      const nearby = code.substring(Math.max(0, idx - 300), idx + 300);
+      return nearby.includes('tengu_prompt_cache_1h_config');
+    },
+  },
+
+  // ── Global Cache Scope 解锁 — 第三方 API 缓存不跨会话共享 ──
+  // FYH()（v2.1.142 为 SYH）决定缓存 scope 是否为 global：
+  //   function FYH(){
+  //     if(!ST())return!1;    // 实验性 beta（已补丁为 true）
+  //     if(!xz())return!1;    // 已补丁为 true
+  //     let H=Dq();return H==="firstParty"||H==="anthropicAws"  // ← 第三方被拦截
+  //   }
+  //   第三方 API 的 Dq()!=="firstParty" → FYH()=false → scope=undefined（本地缓存）
+  //   结果：缓存只在当前请求内有效，不会跨会话持久化。
+  //   修复：让 FYH() 对第三方模型也返回 true，启用 global scope。
+  {
+    name: 'Unlock global cache scope for third-party API',
+    pattern: /function ([\w$]+)\(\)\{if\(!([\w$]+)\(\)\)return!1;if\(!([\w$]+)\(\)\)return!1;let H=([\w$]+)\(\);return H==="firstParty"\|\|H==="anthropicAws"\}/g,
+    replacer: (m, fn, rt, xz, dq) => `function ${fn}(){if(!${rt}())return!1;if(!${xz}())return!1;return!0}`,
+    sentinel: 'H==="firstParty"||H==="anthropicAws"}',
+  },
+// ── Auto Mode (AFK Detection) 解锁 ──
+  // $i() 是 auto-mode 启用检查：
+  //   function $i(){
+  //     if(rQ!==void 0)return rQ;
+  //     if(v6H())return rQ=Ha(!0);           // GrowthBook feature flag
+  //     if(Dq()==="gateway")return rQ=Ha(!0); // gateway 始终启用
+  //     if(Dq()!=="firstParty")return rQ=Ha(!1);  ← 第三方被拦截
+  //     if(!xz())return rQ=Ha(!1);           // 已补丁为 true
+  //     if(process.env.CLAUDE_CODE_ENTRYPOINT==="local-agent")return rQ=Ha(!1);
+  //     let H=xq();...OAuth/subscription checks...
+  //   }
+  //   第三方 API 即使 Dq() 返回 "firstParty"，后续的 OAuth/subscription
+  //   检查仍然会阻止没有 OAuth token 的 API key 用户。
+  //   补丁：移除 firstParty 检查、xz 检查（已补丁为true）和 local-agent 检查。
+  {
+    name: 'Unlock Auto Mode for third-party API',
+    pattern: /if\(Dq\(\)!=="firstParty"\)return rQ=Ha\(!1\);if\(!xz\(\)\)return rQ=Ha\(!1\);if\(process\.env\.CLAUDE_CODE_ENTRYPOINT==="local-agent"\)return rQ=Ha\(!1\)/g,
+    replacer: (m) => 'if(!xz())return rQ=Ha(!1)',
+    sentinel: 'Dq()!=="firstParty")return rQ=Ha(!1)',
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(Math.max(0, pos - 100), pos + 100);
+      return nearby.includes('rQ!==') || nearby.includes('v6H');
+    },
+  },
+
+  // ── Channels 功能解锁 ──
+  // qrH() 在 channels 注册时检查 provider：
+  //   if(Dq()!=="firstParty")return{action:"skip",kind:"provider",
+  //     reason:"channels are not available on third-party providers"}
+  //   第三方 API 用户无法使用 MCP channels 功能。
+  //   补丁：移除 firstParty 检查，允许第三方 API 使用 channels。
+  {
+    name: 'Unlock Channels for third-party API',
+    pattern: /if\(Dq\(\)!=="firstParty"\)return\{action:"skip",kind:"provider",reason:"channels are not available on third-party providers"\}/g,
+    replacer: (m) => '',
+    sentinel: 'channels are not available on third-party providers',
+  },
+
+  // ── Model Migration 解锁 ──
+  // ZH9() (legacy opus migration) 和 IH9() (sonnet 4.5→4.6 migration)
+  // 都以 if(Dq()!=="firstParty")return 开头，
+  // 导致第三方 API 用户无法自动升级旧版模型设置。
+  // 补丁：移除这两个函数的 firstParty 检查。
+  {
+    name: 'Unlock legacy Opus model migration for third-party API',
+    pattern: /function ZH9\(\)\{if\(Dq\(\)!=="firstParty"\)return;/g,
+    replacer: (m) => 'function ZH9(){',
+    sentinel: 'function ZH9(){if(Dq()!=="firstParty")return;',
+  },
+  {
+    name: 'Unlock Sonnet 4.5→4.6 migration for third-party API',
+    pattern: /function IH9\(\)\{if\(Dq\(\)!=="firstParty"\)return;/g,
+    replacer: (m) => 'function IH9(){',
+    sentinel: 'function IH9(){if(Dq()!=="firstParty")return;',
+  },
 ];
 
 // ─── Main ─────────────────────────────────────────────────
