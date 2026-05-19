@@ -101,6 +101,37 @@ if (-not $BunBin) {
         exit 1
     }
 }
+
+# Resolve bun.ps1 → bun.exe. When Bun is installed via `npm install -g bun`,
+# Get-Command returns a .ps1 wrapper script. A .cmd launcher cannot invoke .ps1
+# directly — Windows opens the file association dialog instead of executing it.
+# Walk through known locations to find the real bun.exe.
+if ($BunBin -and $BunBin -match '\.ps1$') {
+    $resolved = $null
+    # npm global: bun.ps1 sits next to node_modules/bun/bin/bun.exe
+    $npmCandidate = Join-Path (Split-Path $BunBin) "node_modules\bun\bin\bun.exe"
+    if (Test-Path $npmCandidate) { $resolved = $npmCandidate }
+    # Also check bun.cmd's directory (same parent as .ps1)
+    if (-not $resolved) {
+        $bunCmd = Join-Path (Split-Path $BunBin) "bun.cmd"
+        if (Test-Path $bunCmd) {
+            $cmdContent = Get-Content $bunCmd -Raw -ErrorAction SilentlyContinue
+            if ($cmdContent -match '"([^"]*bun\.exe)"') { $resolved = $Matches[1] }
+        }
+    }
+    # Fallback: common install locations
+    if (-not $resolved) {
+        $homeBun = Join-Path $env:USERPROFILE ".bun\bin\bun.exe"
+        if (Test-Path $homeBun) { $resolved = $homeBun }
+    }
+    if ($resolved) {
+        Write-Dim "Resolved bun.ps1 → $resolved"
+        $BunBin = $resolved
+    } else {
+        Write-Warn "Bun resolved to .ps1 wrapper ($BunBin). The launcher may not work."
+        Write-Warn "Consider installing Bun via bun.sh/install.ps1 for a native bun.exe."
+    }
+}
 Write-OK "Bun: $(& $BunBin --version)"
 
 # ─── Bun version pre-flight ───────────────────────────────────────────
