@@ -237,7 +237,7 @@ if [ -z "$NATIVE_BIN" ]; then
 fi
 
 if [ -z "$NATIVE_BIN" ]; then
-  warn "Native Claude Code binary not found in $VERSIONS_DIR"
+  warn "Native Claude Code binary not found"
   warn "Install the official binary first:"
   warn "  curl -fsSL https://claude.ai/install.sh | bash"
   warn "Then re-run this script."

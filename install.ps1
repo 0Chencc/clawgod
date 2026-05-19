@@ -14,8 +14,7 @@
 #>
 param(
     [string]$Version = "latest",
-    [switch]$Uninstall,
-    [switch]$DryRun
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +28,10 @@ function Write-OK($msg)   { Write-Host "  ✓ $msg" -ForegroundColor Green }
 function Write-Err($msg)  { Write-Host "  ✗ $msg" -ForegroundColor Red }
 function Write-Warn($msg) { Write-Host "  ! $msg" -ForegroundColor Yellow }
 function Write-Dim($msg)  { Write-Host "  $msg" -ForegroundColor DarkGray }
+
+$Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
+filter Write-Utf8NoBom([string]$Path) { [System.IO.File]::WriteAllText($Path, $_, $Utf8NoBom) }
 
 Write-Host ""
 Write-Host "  ClawGod Installer" -ForegroundColor White -NoNewline
@@ -59,11 +62,13 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs",".source-version","node_modules","bun-runtime")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs",".source-version","node_modules","bun-runtime","vendor")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
     Write-OK "ClawGod uninstalled"
+    Write-Host ""
+    Write-Dim "Restart your terminal for changes to take effect."
     Write-Host ""
     exit 0
 }
@@ -153,7 +158,15 @@ $BunVersionNum = ($BunVersionRaw -split '-')[0]
 $BunVersionOk = $false
 try {
     if ($BunVersionNum) {
-        $BunVersionOk = ([version]$BunVersionNum) -ge ([version]$MinBunVersion)
+        $minParts = $MinBunVersion -split '\.'
+        $bunParts = $BunVersionNum -split '\.'
+        for ($i = 0; $i -lt [Math]::Max($minParts.Length, $bunParts.Length); $i++) {
+            $m = if ($i -lt $minParts.Length) { [int]$minParts[$i] } else { 0 }
+            $b = if ($i -lt $bunParts.Length) { [int]$bunParts[$i] } else { 0 }
+            if ($b -gt $m) { $BunVersionOk = $true; break }
+            if ($b -lt $m) { break }
+        }
+        if (-not $BunVersionOk -and ($bunParts -join '.') -eq ($minParts -join '.')) { $BunVersionOk = $true }
     }
 } catch {}
 if (-not $BunVersionOk) {
@@ -239,26 +252,68 @@ if (-not $NativeBin) {
     $NativeBinTmpDir = Join-Path $env:TEMP "clawgod-binary-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path $NativeBinTmpDir | Out-Null
     $fetchScript = Join-Path $NativeBinTmpDir "fetch.mjs"
+    $useNpmFetch = $false
+    if ($env:HTTPS_PROXY -or $env:HTTP_PROXY -or $env:https_proxy -or $env:http_proxy) {
+        if (Get-Command npm -ErrorAction SilentlyContinue) {
+            $useNpmFetch = $true
+        } else {
+            Write-Warn "HTTP proxy detected but npm not found. fetch.mjs may not work through your proxy."
+            Write-Warn "Install npm or set NO_PROXY=registry.npmjs.org to bypass."
+        }
+    }
+    if ($useNpmFetch) {
+        $npmPkg = "@anthropic-ai/claude-code-$platformSuffix"
+        Push-Location $NativeBinTmpDir
+        try {
+            $npmOut = npm pack "$npmPkg@latest" --silent 2>&1
+            $tarball = Get-ChildItem $NativeBinTmpDir -Filter "*.tgz" | Select-Object -First 1
+            if ($tarball) {
+                tar xzf $tarball.FullName 2>$null
+                $cand = Join-Path $NativeBinTmpDir "package\claude.exe"
+                if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 10MB) {
+                    $NativeBin = $cand
+                    $pkgJson = Join-Path $NativeBinTmpDir "package\package.json"
+                    if (Test-Path $pkgJson) {
+                        $NativeBinLabel = (Get-Content $pkgJson -Raw | ConvertFrom-Json).version
+                    } else { $NativeBinLabel = "npm-latest" }
+                    Write-OK "Downloaded $npmPkg@$NativeBinLabel (via npm)"
+                }
+            }
+        } finally { Pop-Location }
+        if (-not $NativeBin) {
+            Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
+            Write-Err "npm pack failed. Try without proxy or install manually."
+            exit 1
+        }
+    } else {
     @'
 // Download a scoped npm tarball (no npm CLI dependency) and extract it
 // using Node's built-in zlib + a minimal POSIX tar parser.
 import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { URL } from 'node:url';
 
 const [, , pkgSpec, outDir] = process.argv;
 const last = pkgSpec.lastIndexOf('@');
 const pkg = last > 0 ? pkgSpec.slice(0, last) : pkgSpec;
 const ver = last > 0 ? pkgSpec.slice(last + 1) : 'latest';
 
-function get(url) {
+function get(url, redirects = 0) {
   return new Promise((resolve, reject) => {
-    httpsRequest(url, { method: 'GET' }, (res) => {
+    if (redirects > 5) return reject(new Error(`Too many redirects`));
+    const parsed = new URL(url);
+    const reqMod = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
+    const opts = { method: 'GET', hostname: parsed.hostname, port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80), path: parsed.pathname + parsed.search };
+    reqMod(opts, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return get(res.headers.location).then(resolve, reject);
+        res.resume();
+        return get(res.headers.location, redirects + 1).then(resolve, reject);
       }
       if (res.statusCode !== 200) {
+        res.resume();
         return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
       }
       const chunks = [];
@@ -295,7 +350,7 @@ while (off + 512 <= buf.length) {
 }
 console.log(`Extracted ${files} files`);
 console.log(`VERSION=${meta.version}`);
-'@ | Set-Content $fetchScript -Encoding UTF8
+'@ | Write-Utf8NoBom -Path $fetchScript
 
     $output = & node $fetchScript "$npmPkg@latest" $NativeBinTmpDir 2>&1
     $exitCode = $LASTEXITCODE
@@ -323,6 +378,7 @@ console.log(`VERSION=${meta.version}`);
         exit 1
     }
     Write-OK "Downloaded $npmPkg@$NativeBinLabel"
+    }
 }
 
 if (-not $NativeBin) {
@@ -752,7 +808,7 @@ function main() {
 }
 
 main();
-'@ | Set-Content $extractorPath -Encoding UTF8
+'@ | Write-Utf8NoBom -Path $extractorPath
 
 # ─── Extract cli.js + native modules from Bun binary ──────────
 
@@ -805,7 +861,7 @@ code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirn
 writeFileSync(dst, code);
 unlinkSync(src);
 console.log(`cli.original.cjs: ${code.length} bytes`);
-'@ | Set-Content $postProc -Encoding UTF8
+'@ | Write-Utf8NoBom -Path $postProc
 & node $postProc 2>&1 | ForEach-Object { Write-Host "  $_" }
 if (-not (Test-Path (Join-Path $ClawDir "cli.original.cjs"))) {
     Write-Err "Post-process failed"
@@ -865,7 +921,7 @@ run('patcher', [patcher]);
 
 writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
 console.log(`[clawgod] re-patched to ${basename(nativeBin)}`);
-'@ | Set-Content (Join-Path $ClawDir "repatch.mjs") -Encoding UTF8
+'@ | Write-Utf8NoBom -Path (Join-Path $ClawDir "repatch.mjs")
 Write-OK "Re-patch helper installed (repatch.mjs)"
 
 # ─── Write wrapper (cli.cjs, runs under Bun) ──────────────────
@@ -960,15 +1016,12 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 }
 
 require('./cli.original.cjs');
-'@ | Set-Content (Join-Path $ClawDir "cli.cjs") -Encoding UTF8
+'@ | Write-Utf8NoBom -Path (Join-Path $ClawDir "cli.cjs")
 Write-OK "Wrapper created (cli.cjs)"
 
 # ─── Write universal patcher ──────────────────────────
-# (Same Node.js patcher as bash version — extract from install.sh or inline)
+# (Same Node.js patcher as bash version — inline to avoid extra download)
 
-$patcherUrl = "https://raw.githubusercontent.com/0Chencc/clawgod/main/patcher.mjs"
-
-# Inline the patcher to avoid extra download
 $patcherCode = @'
 #!/usr/bin/env node
 /**
@@ -1250,7 +1303,7 @@ if (!dryRun && !verify && applied > 0) {
 console.log(`${'='.repeat(55)}\n`);
 '@
 
-Set-Content (Join-Path $ClawDir "patch.mjs") $patcherCode -Encoding UTF8
+$patcherCode | Write-Utf8NoBom -Path (Join-Path $ClawDir "patch.mjs")
 Write-OK "Patcher created (patch.mjs)"
 
 # ─── Apply patches ────────────────────────────────────
@@ -1262,7 +1315,7 @@ node (Join-Path $ClawDir "patch.mjs")
 
 $featuresFile = Join-Path $ClawDir "features.json"
 if (-not (Test-Path $featuresFile)) {
-    @'
+    $featuresJson = @'
 {
   "tengu_harbor": true,
   "tengu_session_memory": true,
@@ -1271,9 +1324,12 @@ if (-not (Test-Path $featuresFile)) {
   "tengu_destructive_command_warning": true,
   "tengu_immediate_model_command": true,
   "tengu_desktop_upsell": false,
+  "tengu_malort_pedway": {"enabled": true},
+  "tengu_amber_quartz_disabled": false,
   "tengu_prompt_cache_1h_config": {"allowlist": ["*"]}
 }
-'@ | Set-Content $featuresFile -Encoding UTF8
+'@
+    [System.IO.File]::WriteAllText($featuresFile, $featuresJson, (New-Object System.Text.UTF8Encoding $false))
     Write-OK "Default features.json created"
 }
 
@@ -1347,7 +1403,7 @@ if ($normalizedBunBin.Equals($normalizedUserProfile, [StringComparison]::Ordinal
     # absolute path since %USERPROFILE%-relative expansion doesn't apply.
     $bunPathInCmd = $BunBin
 }
-$launcherContent = "@echo off`r`n`"$bunPathInCmd`" `"$cliPathInCmd`" %*"
+$launcherContent = "@echo off`r`nif not exist `"$cliPathInCmd`" (`r`n  echo clawgod: cli.cjs not found. Reinstall: irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 ^| iex`r`n  exit /b 127`r`n)`r`nif not exist `"$bunPathInCmd`" (`r`n  echo clawgod: bun not found at $bunPathInCmd. Install: https://bun.sh/install`r`n  exit /b 127`r`n)`r`n`"$bunPathInCmd`" `"$cliPathInCmd`" %*"
 
 # Find and back up original claude
 $claudeCmd = Join-Path $BinDir "claude.cmd"
