@@ -21,7 +21,7 @@ ClawGod インストーラ実行**前**に揃えておくもの：
 | **Claude Code**（ネイティブバイナリ） | ClawGod は既に入っている公式 Bun standalone バイナリにパッチを当てる | [`claude.ai/install.sh`](https://claude.ai/install.sh)（macOS/Linux）または [`claude.ai/install.ps1`](https://claude.ai/install.ps1)（Windows） |
 | **ripgrep** | Claude Code の Grep ツールが必須 | `brew install ripgrep` / `apt install ripgrep` / `winget install BurntSushi.ripgrep.MSVC` |
 | **Node.js >= 18** | パッチャが利用 | [nodejs.org](https://nodejs.org) |
-| **Bun** | パッチ済み cli.js の実行ランタイム、未検出時は自動インストール [bun.sh](https://bun.sh) | バージョン更新: `bun upgrade --canary` または `powershell -c "iex & {$(irm https://bun.sh/install.ps1)} -Version canary"` (Windows) |
+| **Bun** | パッチ済み cli.js の実行ランタイム、未検出時は自動インストール | [bun.sh](https://bun.sh)、`npm install -g bun`、`scoop install bun`、または `choco install bun` |
 
 ## インストール
 

@@ -157,15 +157,7 @@ $BunVersionNum = ($BunVersionRaw -split '-')[0]
 $BunVersionOk = $false
 try {
     if ($BunVersionNum) {
-        $minParts = $MinBunVersion -split '\.'
-        $bunParts = $BunVersionNum -split '\.'
-        for ($i = 0; $i -lt [Math]::Max($minParts.Length, $bunParts.Length); $i++) {
-            $m = if ($i -lt $minParts.Length) { [int]$minParts[$i] } else { 0 }
-            $b = if ($i -lt $bunParts.Length) { [int]$bunParts[$i] } else { 0 }
-            if ($b -gt $m) { $BunVersionOk = $true; break }
-            if ($b -lt $m) { break }
-        }
-        if (-not $BunVersionOk -and ($bunParts -join '.') -eq ($minParts -join '.')) { $BunVersionOk = $true }
+        $BunVersionOk = ([version]$BunVersionNum) -ge ([version]$MinBunVersion)
     }
 } catch {}
 if (-not $BunVersionOk) {
@@ -252,8 +244,11 @@ if (-not $NativeBin) {
     New-Item -ItemType Directory -Force -Path $NativeBinTmpDir | Out-Null
     $fetchScript = Join-Path $NativeBinTmpDir "fetch.mjs"
     $useNpmFetch = $false
-    if ($env:HTTPS_PROXY -or $env:HTTP_PROXY -or $env:https_proxy -or $env:http_proxy) {
-        if (Get-Command npm -ErrorAction SilentlyContinue) {
+    $noProxy = $env:NO_PROXY
+    if ($env:HTTPS_PROXY -or $env:HTTP_PROXY) {
+        if ($noProxy -match '(?i)npmjs\.org') {
+            Write-Dim "NO_PROXY includes npmjs.org — using direct fetch"
+        } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
             $useNpmFetch = $true
         } else {
             Write-Warn "HTTP proxy detected but npm not found. fetch.mjs may not work through your proxy."
@@ -261,7 +256,6 @@ if (-not $NativeBin) {
         }
     }
     if ($useNpmFetch) {
-        $npmPkg = "@anthropic-ai/claude-code-$platformSuffix"
         Push-Location $NativeBinTmpDir
         try {
             $npmOut = npm pack "$npmPkg@latest" --silent 2>&1
@@ -281,7 +275,8 @@ if (-not $NativeBin) {
         } finally { Pop-Location }
         if (-not $NativeBin) {
             Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
-            Write-Err "npm pack failed. Try without proxy or install manually."
+            Write-Err "npm pack failed. Output:"
+            Write-Dim ($npmOut -join "`n")
             exit 1
         }
     } else {
@@ -351,32 +346,31 @@ console.log(`Extracted ${files} files`);
 console.log(`VERSION=${meta.version}`);
 '@ | Set-Content $fetchScript -Encoding UTF8
 
-    $output = & node $fetchScript "$npmPkg@latest" $NativeBinTmpDir 2>&1
-    $exitCode = $LASTEXITCODE
-    $output | ForEach-Object { Write-Host "  $_" }
-    Remove-Item -Force $fetchScript -ErrorAction SilentlyContinue
+        $output = & node $fetchScript "$npmPkg@latest" $NativeBinTmpDir 2>&1
+        $exitCode = $LASTEXITCODE
+        $output | ForEach-Object { Write-Host "  $_" }
+        Remove-Item -Force $fetchScript -ErrorAction SilentlyContinue
 
-    if ($exitCode -ne 0) {
-        Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
-        Write-Err "Fetch failed (node exit $exitCode). Install the official binary manually:"
-        Write-Err "    irm https://claude.ai/install.ps1 | iex"
-        exit 1
-    }
+        if ($exitCode -ne 0) {
+            Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
+            Write-Err "Fetch failed (node exit $exitCode). Install the official binary manually:"
+            Write-Err "    irm https://claude.ai/install.ps1 | iex"
+            exit 1
+        }
 
-    $cand = Join-Path $NativeBinTmpDir "package\claude.exe"
-    if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 10MB) {
-        $NativeBin = $cand
-        # Pull the version line printed by fetch.mjs ("VERSION=2.1.x")
-        $verLine = $output | Where-Object { $_ -match '^VERSION=' } | Select-Object -First 1
-        if ($verLine) { $NativeBinLabel = ($verLine -replace '^VERSION=', '').Trim() }
-        else { $NativeBinLabel = "npm-latest" }
-    } else {
-        Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
-        Write-Err "Tarball downloaded but expected package\claude.exe was missing or too small."
-        Write-Err "  Tempdir kept for inspection: $NativeBinTmpDir"
-        exit 1
-    }
-    Write-OK "Downloaded $npmPkg@$NativeBinLabel"
+        $cand = Join-Path $NativeBinTmpDir "package\claude.exe"
+        if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 10MB) {
+            $NativeBin = $cand
+            $verLine = $output | Where-Object { $_ -match '^VERSION=' } | Select-Object -First 1
+            if ($verLine) { $NativeBinLabel = ($verLine -replace '^VERSION=', '').Trim() }
+            else { $NativeBinLabel = "npm-latest" }
+        } else {
+            Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
+            Write-Err "Tarball downloaded but expected package\claude.exe was missing or too small."
+            Write-Err "  Tempdir kept for inspection: $NativeBinTmpDir"
+            exit 1
+        }
+        Write-OK "Downloaded $npmPkg@$NativeBinLabel"
     }
 }
 

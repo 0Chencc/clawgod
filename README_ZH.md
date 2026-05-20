@@ -21,7 +21,7 @@
 | **Claude Code**（原生二进制） | ClawGod 是基于你已装的官方 Bun standalone 二进制做 patch | [`claude.ai/install.sh`](https://claude.ai/install.sh)（macOS/Linux）或 [`claude.ai/install.ps1`](https://claude.ai/install.ps1)（Windows） |
 | **ripgrep** | Claude Code 内置 Grep tool 必需 | `brew install ripgrep` / `apt install ripgrep` / `winget install BurntSushi.ripgrep.MSVC` |
 | **Node.js >= 18** | patcher 使用 | [nodejs.org](https://nodejs.org) |
-| **Bun** | 运行 patched cli.js 的 runtime，缺失时自动安装 [bun.sh](https://bun.sh) | 更新版本: `bun upgrade --canary` 或 `powershell -c "iex & {$(irm https://bun.sh/install.ps1)} -Version canary"` （Windows）                 |
+| **Bun** | 运行 patched cli.js 的 runtime，缺失时自动安装 | [bun.sh](https://bun.sh)、`npm install -g bun`、`scoop install bun` 或 `choco install bun` |
 
 ## 安装
 
