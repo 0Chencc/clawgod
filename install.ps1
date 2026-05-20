@@ -29,10 +29,6 @@ function Write-Err($msg)  { Write-Host "  ✗ $msg" -ForegroundColor Red }
 function Write-Warn($msg) { Write-Host "  ! $msg" -ForegroundColor Yellow }
 function Write-Dim($msg)  { Write-Host "  $msg" -ForegroundColor DarkGray }
 
-$Utf8NoBom = New-Object System.Text.UTF8Encoding $false
-
-filter Write-Utf8NoBom([string]$Path) { [System.IO.File]::WriteAllText($Path, $_, $Utf8NoBom) }
-
 Write-Host ""
 Write-Host "  ClawGod Installer" -ForegroundColor White -NoNewline
 Write-Host " (Windows)" -ForegroundColor DarkGray
@@ -110,24 +106,27 @@ if (-not $BunBin) {
 # Resolve bun.ps1 → bun.exe. When Bun is installed via `npm install -g bun`,
 # Get-Command returns a .ps1 wrapper script. A .cmd launcher cannot invoke .ps1
 # directly — Windows opens the file association dialog instead of executing it.
-# Walk through known locations to find the real bun.exe.
+# Probe known install paths instead of parsing wrapper scripts.
 if ($BunBin -and $BunBin -match '\.ps1$') {
     $resolved = $null
-    # npm global: bun.ps1 sits next to node_modules/bun/bin/bun.exe
-    $npmCandidate = Join-Path (Split-Path $BunBin) "node_modules\bun\bin\bun.exe"
-    if (Test-Path $npmCandidate) { $resolved = $npmCandidate }
-    # Also check bun.cmd's directory (same parent as .ps1)
+    $bunDir = Split-Path $BunBin
+    # 1. npm global: bun.ps1 sits next to node_modules/bun/bin/bun.exe
+    $cand = Join-Path $bunDir "node_modules\bun\bin\bun.exe"
+    if (Test-Path $cand) { $resolved = $cand }
+    # 2. bun.sh official install
     if (-not $resolved) {
-        $bunCmd = Join-Path (Split-Path $BunBin) "bun.cmd"
-        if (Test-Path $bunCmd) {
-            $cmdContent = Get-Content $bunCmd -Raw -ErrorAction SilentlyContinue
-            if ($cmdContent -match '"([^"]*bun\.exe)"') { $resolved = $Matches[1] }
-        }
+        $cand = Join-Path $env:USERPROFILE ".bun\bin\bun.exe"
+        if (Test-Path $cand) { $resolved = $cand }
     }
-    # Fallback: common install locations
+    # 3. Scoop: shim exe lives in ~/scoop/shims/
     if (-not $resolved) {
-        $homeBun = Join-Path $env:USERPROFILE ".bun\bin\bun.exe"
-        if (Test-Path $homeBun) { $resolved = $homeBun }
+        $cand = Join-Path $env:USERPROFILE "scoop\shims\bun.exe"
+        if (Test-Path $cand) { $resolved = $cand }
+    }
+    # 4. Chocolatey: typically in C:\ProgramData\chocolatey\bin\
+    if (-not $resolved) {
+        $chocoBin = Join-Path $env:ProgramData "chocolatey\bin\bun.exe"
+        if (Test-Path $chocoBin) { $resolved = $chocoBin }
     }
     if ($resolved) {
         Write-Dim "Resolved bun.ps1 → $resolved"
@@ -350,7 +349,7 @@ while (off + 512 <= buf.length) {
 }
 console.log(`Extracted ${files} files`);
 console.log(`VERSION=${meta.version}`);
-'@ | Write-Utf8NoBom -Path $fetchScript
+'@ | Set-Content $fetchScript -Encoding UTF8
 
     $output = & node $fetchScript "$npmPkg@latest" $NativeBinTmpDir 2>&1
     $exitCode = $LASTEXITCODE
@@ -808,7 +807,7 @@ function main() {
 }
 
 main();
-'@ | Write-Utf8NoBom -Path $extractorPath
+'@ | Set-Content $extractorPath -Encoding UTF8
 
 # ─── Extract cli.js + native modules from Bun binary ──────────
 
@@ -861,7 +860,7 @@ code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirn
 writeFileSync(dst, code);
 unlinkSync(src);
 console.log(`cli.original.cjs: ${code.length} bytes`);
-'@ | Write-Utf8NoBom -Path $postProc
+'@ | Set-Content $postProc -Encoding UTF8
 & node $postProc 2>&1 | ForEach-Object { Write-Host "  $_" }
 if (-not (Test-Path (Join-Path $ClawDir "cli.original.cjs"))) {
     Write-Err "Post-process failed"
@@ -921,7 +920,7 @@ run('patcher', [patcher]);
 
 writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
 console.log(`[clawgod] re-patched to ${basename(nativeBin)}`);
-'@ | Write-Utf8NoBom -Path (Join-Path $ClawDir "repatch.mjs")
+'@ | Set-Content (Join-Path $ClawDir "repatch.mjs") -Encoding UTF8
 Write-OK "Re-patch helper installed (repatch.mjs)"
 
 # ─── Write wrapper (cli.cjs, runs under Bun) ──────────────────
@@ -1016,7 +1015,7 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 }
 
 require('./cli.original.cjs');
-'@ | Write-Utf8NoBom -Path (Join-Path $ClawDir "cli.cjs")
+'@ | Set-Content (Join-Path $ClawDir "cli.cjs") -Encoding UTF8
 Write-OK "Wrapper created (cli.cjs)"
 
 # ─── Write universal patcher ──────────────────────────
@@ -1303,7 +1302,7 @@ if (!dryRun && !verify && applied > 0) {
 console.log(`${'='.repeat(55)}\n`);
 '@
 
-$patcherCode | Write-Utf8NoBom -Path (Join-Path $ClawDir "patch.mjs")
+Set-Content (Join-Path $ClawDir "patch.mjs") $patcherCode -Encoding UTF8
 Write-OK "Patcher created (patch.mjs)"
 
 # ─── Apply patches ────────────────────────────────────
