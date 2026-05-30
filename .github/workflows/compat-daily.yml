@@ -12,10 +12,14 @@ on:
     branches: [main]
     paths:
       - install.sh
+      - install.ps1
+      - tests/**
       - .github/workflows/compat-daily.yml
   pull_request:
     paths:
       - install.sh
+      - install.ps1
+      - tests/**
       - .github/workflows/compat-daily.yml
 
 permissions:
@@ -85,6 +89,13 @@ jobs:
           bun --version
           node --version
           uname -a
+
+      - name: Run static installer tests
+        shell: bash
+        run: |
+          node tests/auto-mode-patterns.test.mjs
+          tests/sidecar-mode.test.sh
+          bash -n install.sh
 
       - name: Run install.sh (npm-fallback path)
         # No official Claude binary pre-installed → install.sh exercises

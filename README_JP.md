@@ -25,6 +25,8 @@ ClawGod インストーラ実行**前**に揃えておくもの：
 
 ## インストール
 
+デフォルトインストールでは `claude` launcher を置き換え、通常の `claude` コマンドでパッチ済みビルドを実行します：
+
 **macOS / Linux:**
 ```bash
 curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash
@@ -33,6 +35,18 @@ curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.s
 **Windows (PowerShell):**
 ```powershell
 irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
+```
+
+Sidecar インストールではネイティブ Claude Code をそのまま残し、明示的な `clawgod` コマンドだけを追加します：
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s -- --sidecar
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 -OutFile install.ps1; .\install.ps1 -Sidecar
 ```
 
 緑のロゴ = パッチ適用済み。オレンジのロゴ = オリジナル。
@@ -87,6 +101,8 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 
 `clawgod` は曖昧さのないエントリポイントです：Windows で `claude.exe` が `claude.cmd` を覆い隠す場合でも `clawgod.cmd` は常に動作し、公式自動更新で `claude` が上書きされても `clawgod` はパッチ済みビルドを実行し続けます。
 
+Sidecar モードでは、`claude` は公式ネイティブコマンドのままで、`clawgod` だけがパッチ済みコピーを実行します。
+
 ## 設定
 
 初回起動時に `~/.clawgod/provider.json` が自動生成されます。`apiKey` を設定すれば **OAuth ログイン不要**で、Anthropic 互換エンドポイントに接続できます。
@@ -119,7 +135,9 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 
 ## アップデート
 
-**そのまま `claude update` を実行するだけで OK です。** ClawGod はこのコマンドを自身のインストーラへ流すようパッチしており、npm から Anthropic の現行リリース（`@anthropic-ai/claude-code-<plat>@latest`）を取得し、cli.js を再抽出、パッチを再適用、launcher を書き直します。そのため上流の `claude update` コマンドは期待通りに動作します——1 コマンドで最新の Claude を取得し、パッチも適用された状態を保てます。
+デフォルトモードでは、**そのまま `claude update` を実行するだけで OK です。** ClawGod はこのコマンドを自身のインストーラへ流すようパッチしており、npm から Anthropic の現行リリース（`@anthropic-ai/claude-code-<plat>@latest`）を取得し、cli.js を再抽出、パッチを再適用、launcher を書き直します。そのため上流の `claude update` コマンドは期待通りに動作します——1 コマンドで最新の Claude を取得し、パッチも適用された状態を保てます。
+
+Sidecar モードでは、`clawgod update` でパッチ済みコピーを更新します。ネイティブの `claude update` は Anthropic 公式 updater のままで、ClawGod には影響しません。
 
 直接インストーラを実行したい場合（効果は同じで、どちらも同じ上流リリースを取得してパッチを当て直します）：
 

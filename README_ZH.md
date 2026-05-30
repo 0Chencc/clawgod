@@ -25,6 +25,8 @@
 
 ## 安装
 
+默认安装会替换 `claude` launcher，让日常 `claude` 命令直接运行 patched 版本：
+
 **macOS / Linux:**
 ```bash
 curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash
@@ -33,6 +35,18 @@ curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.s
 **Windows (PowerShell):**
 ```powershell
 irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
+```
+
+旁路安装会保留原生 Claude Code，只安装显式的 `clawgod` 命令：
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s -- --sidecar
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 -OutFile install.ps1; .\install.ps1 -Sidecar
 ```
 
 绿色 Logo = 已 Patch。橙色 Logo = 原版。
@@ -87,6 +101,8 @@ claude.orig         # 原版未修改版本（自动备份）
 
 `clawgod` 是一个无歧义的入口：Windows 上即便 `claude.exe` 抢占了 `claude.cmd`，`clawgod.cmd` 始终生效；即便官方自动更新覆盖了 `claude`，`clawgod` 仍跑 patched 版本。
 
+旁路模式下，`claude` 保持官方原生命令不变，只有 `clawgod` 运行 patched 副本。
+
 ## 配置
 
 首次启动会自动生成 `~/.clawgod/provider.json`。填入 `apiKey` 即可**跳过 OAuth 登录**，对接任何 Anthropic 协议端点。
@@ -119,7 +135,9 @@ claude.orig         # 原版未修改版本（自动备份）
 
 ## 更新
 
-**直接照常跑 `claude update` 即可。** ClawGod 把这条命令 patch 成走自己的 installer——从 npm 拉 Anthropic 当前发布（`@anthropic-ai/claude-code-<plat>@latest`）、重新提取 cli.js、重新打补丁、重写 launcher。所以上游 `claude update` 命令对用户依然如常工作——一条命令拿到最新 Claude + 补丁仍然生效。
+默认模式下，**直接照常跑 `claude update` 即可。** ClawGod 把这条命令 patch 成走自己的 installer——从 npm 拉 Anthropic 当前发布（`@anthropic-ai/claude-code-<plat>@latest`）、重新提取 cli.js、重新打补丁、重写 launcher。所以上游 `claude update` 命令对用户依然如常工作——一条命令拿到最新 Claude + 补丁仍然生效。
+
+旁路模式下，运行 `clawgod update` 更新 patched 副本。原生 `claude update` 仍然是 Anthropic 官方 updater，不会影响 ClawGod。
 
 如果你想直接调 installer（效果一样，两条路径都会拉同一个上游 release 并重新 patch）:
 

@@ -4,16 +4,18 @@
     ClawGod Installer for Windows
 .DESCRIPTION
     Downloads Claude Code from npm, applies feature unlock patches,
-    and replaces the 'claude' command with the patched version.
+    and installs patched launchers.
 .EXAMPLE
     irm clawgod.0chen.cc/install.ps1 | iex
     # or
     .\install.ps1
     .\install.ps1 -Version 2.1.89
+    .\install.ps1 -Sidecar
     .\install.ps1 -Uninstall
 #>
 param(
     [string]$Version = "latest",
+    [switch]$Sidecar,
     [switch]$Uninstall
 )
 
@@ -21,6 +23,7 @@ $ErrorActionPreference = "Stop"
 
 $ClawDir = Join-Path $env:USERPROFILE ".clawgod"
 $BinDir  = Join-Path $env:USERPROFILE ".local\bin"
+$InstallMode = if ($Sidecar) { "sidecar" } else { "hijack" }
 
 # ─── Colors ───────────────────────────────────────────
 
@@ -58,7 +61,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs",".source-version","node_modules","bun-runtime","vendor")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs",".source-version","install-mode","node_modules","bun-runtime","vendor")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -207,6 +210,7 @@ catch {
 
 New-Item -ItemType Directory -Force -Path $ClawDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir  | Out-Null
+Set-Content (Join-Path $ClawDir "install-mode") $InstallMode -Encoding ASCII
 
 $NativeBin = $null
 $NativeBinLabel = $null
@@ -1127,16 +1131,43 @@ const patches = [
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
-    // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
-    // v2.1.119+: same gate plus extra branches for claude-opus-4-7.
-    // v2.1.139+: gate moved inside function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if($.includes("claude-3-")||...)return!0;return!1}
-    //            i.e. the `let` lifted to a comma-list before the if; the if-gate
-    //            itself is unchanged shape. We drop only the if-gate; downstream
-    //            model allow-list still runs and now accepts third-party calls.
-    name: 'Auto-mode unlock for third-party API',
+    // ≤v2.1.139: function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if(...)return!0;return!1}
+    name: 'Auto-mode unlock for third-party API (legacy provider gate)',
     pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
     replacer: () => '',
-    sentinel: '!=="firstParty"&&',
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(Math.max(0, pos - 500), pos + 500);
+      return nearby.includes('claude-opus-4-6') || nearby.includes('claude-opus-4-7');
+    },
+    optional: true,
+  },
+  {
+    // v2.1.158+: provider check moved into iH6(q), with env override
+    // CLAUDE_CODE_ENABLE_AUTO_MODE. Remove the call-site gate so third-party
+    // users reach the same model allow-list without setting an env var.
+    name: 'Auto-mode unlock for third-party API (env gate)',
+    pattern: /if\(![\w$]+\(([\w$]+)\)\)return!1;/g,
+    replacer: () => '',
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(Math.max(0, pos - 500), pos + 500);
+      return nearby.includes('CLAUDE_CODE_ENABLE_AUTO_MODE') && nearby.includes('claude-opus-4-6');
+    },
+    optional: true,
+  },
+  {
+    // v2.1.158+: a second branch blocks third-party providers from the newer
+    // auto-mode model families even after the env gate is bypassed.
+    name: 'Auto-mode unlock for third-party API (model gate)',
+    pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"&&\([\s\S]{1,180}?\)\)return!1;/g,
+    replacer: () => '',
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(Math.max(0, pos - 500), pos + 500);
+      return nearby.includes('CLAUDE_CODE_ENABLE_AUTO_MODE') && nearby.includes('claude-opus-4-6');
+    },
+    optional: true,
   },
   {
     // Redirect CLI `claude update` to clawgod self-update. Upstream's
@@ -1152,22 +1183,25 @@ const patches = [
     replacer: (m, prefix) => {
       // PowerShell 5.1's Invoke-WebRequest ignores HTTP_PROXY/HTTPS_PROXY env
       // (only reads IE system proxy). Read env explicitly and pass via -Proxy
-      // so it works on both PS 5.1 and PS 7. Use Invoke-RestMethod (irm) not
-      // Invoke-WebRequest (iwr): under -UseBasicParsing on PS 5.1, iwr's
-      // .Content is byte[] not string, so `iex (iwr -useb ...).Content`
-      // throws "Cannot convert System.Byte[] to System.String". irm always
-      // returns string in both versions. -EncodedCommand bypasses CLI
-      // arg-quoting; payload must be UTF-16LE base64.
+      // so it works on both PS 5.1 and PS 7. Download to a temp file instead
+      // of piping through iex so we can pass -Sidecar as a normal parameter.
+      // -EncodedCommand bypasses CLI arg-quoting; payload is UTF-16LE base64.
       const psScript =
         "$p=if($env:HTTPS_PROXY){$env:HTTPS_PROXY}elseif($env:HTTP_PROXY){$env:HTTP_PROXY}else{$null};" +
         "$u='https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1';" +
-        "if($p){iex(irm -Proxy $p $u)}else{iex(irm $u)}";
+        "$m=Join-Path $env:USERPROFILE '.clawgod\\install-mode';" +
+        "$s=(Test-Path $m)-and((Get-Content $m -Raw).Trim()-eq 'sidecar');" +
+        "$t=Join-Path $env:TEMP 'clawgod-install.ps1';" +
+        "if($p){iwr -UseBasicParsing -Proxy $p $u -OutFile $t}else{iwr -UseBasicParsing $u -OutFile $t};" +
+        "if($s){& $t -Sidecar}else{& $t}";
       const psB64 = Buffer.from(psScript, 'utf16le').toString('base64');
       return (
         prefix +
         `process.stderr.write("[clawgod] 'claude update' is handled by clawgod self-update.\\n[clawgod] To leave clawgod and use vanilla update: bash ~/.clawgod/install.sh --uninstall\\n[clawgod] Continuing now\\u2026\\n");` +
         `const _w=process.platform==='win32';` +
-        `const _c=_w?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash'];` +
+        `const _m=require('fs').existsSync(require('path').join(require('os').homedir(),'.clawgod','install-mode'))?require('fs').readFileSync(require('path').join(require('os').homedir(),'.clawgod','install-mode'),'utf8').trim():'';` +
+        `const _s=_m==='sidecar'?' --sidecar':'';` +
+        `const _c=_w?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s --'+_s];` +
         `const _r=require('child_process').spawnSync(_c[0],_c.slice(1),{stdio:'inherit'});` +
         `process.exit(_r.status||0);`
       );
@@ -1431,81 +1465,80 @@ if ($normalizedBunBin.Equals($normalizedUserProfile, [StringComparison]::Ordinal
 }
 $launcherContent = "@echo off`r`nif not exist `"$cliPathInCmd`" (`r`n  echo clawgod: cli.cjs not found. Reinstall: irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 ^| iex`r`n  exit /b 127`r`n)`r`nif not exist `"$bunPathInCmd`" (`r`n  echo clawgod: bun not found at $bunPathInCmd. Install: https://bun.sh/install`r`n  exit /b 127`r`n)`r`n`"$bunPathInCmd`" `"$cliPathInCmd`" %*"
 
-# Find and back up original claude
 $claudeCmd = Join-Path $BinDir "claude.cmd"
 $claudeExe = Join-Path $BinDir "claude.exe"
 $claudeOrigCmd = Join-Path $BinDir "claude.orig.cmd"
 $claudeOrigExe = Join-Path $BinDir "claude.orig.exe"
 
-# Check multiple locations for original claude
-$originalFound = $false
-foreach ($loc in @(
-    (Join-Path $BinDir "claude.exe"),
-    (Join-Path $BinDir "claude.cmd"),
-    (Join-Path $env:USERPROFILE ".local\share\claude\versions"),
-    (Join-Path $env:LOCALAPPDATA "Programs\claude-code")
-)) {
-    if (Test-Path $loc) {
-        # Back up .exe if exists and not already backed up
-        if ($loc -like "*.exe" -and -not (Test-Path $claudeOrigExe)) {
-            Copy-Item $loc $claudeOrigExe -Force
-            Write-OK "Original claude.exe backed up → claude.orig.exe"
-            $originalFound = $true
-        }
-        # Back up .cmd if exists and not already backed up
-        if ($loc -like "*.cmd" -and -not (Test-Path $claudeOrigCmd)) {
-            Copy-Item $loc $claudeOrigCmd -Force
-            Write-OK "Original claude.cmd backed up → claude.orig.cmd"
-            $originalFound = $true
-        }
-        # If it's a versions directory, find the latest exe
-        if (Test-Path $loc -PathType Container) {
-            $latestExe = Get-ChildItem $loc -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($latestExe -and -not (Test-Path $claudeOrigExe)) {
-                Copy-Item $latestExe.FullName $claudeOrigExe -Force
-                Write-OK "Original claude backed up → claude.orig.exe ($($latestExe.Name))"
+if ($InstallMode -eq "sidecar") {
+    Write-Dim "Sidecar mode: leaving native 'claude' unchanged"
+    $launcherContent | Set-Content (Join-Path $BinDir "clawgod.cmd") -Encoding Default
+    Write-OK "Command 'clawgod' → patched"
+} else {
+    # Check multiple locations for original claude
+    $originalFound = $false
+    foreach ($loc in @(
+        (Join-Path $BinDir "claude.exe"),
+        (Join-Path $BinDir "claude.cmd"),
+        (Join-Path $env:USERPROFILE ".local\share\claude\versions"),
+        (Join-Path $env:LOCALAPPDATA "Programs\claude-code")
+    )) {
+        if (Test-Path $loc) {
+            # Back up .exe if exists and not already backed up
+            if ($loc -like "*.exe" -and -not (Test-Path $claudeOrigExe)) {
+                Copy-Item $loc $claudeOrigExe -Force
+                Write-OK "Original claude.exe backed up → claude.orig.exe"
                 $originalFound = $true
             }
+            # Back up .cmd if exists and not already backed up
+            if ($loc -like "*.cmd" -and -not (Test-Path $claudeOrigCmd)) {
+                Copy-Item $loc $claudeOrigCmd -Force
+                Write-OK "Original claude.cmd backed up → claude.orig.cmd"
+                $originalFound = $true
+            }
+            # If it's a versions directory, find the latest exe
+            if (Test-Path $loc -PathType Container) {
+                $latestExe = Get-ChildItem $loc -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($latestExe -and -not (Test-Path $claudeOrigExe)) {
+                    Copy-Item $latestExe.FullName $claudeOrigExe -Force
+                    Write-OK "Original claude backed up → claude.orig.exe ($($latestExe.Name))"
+                    $originalFound = $true
+                }
+            }
+            break
         }
-        break
     }
-}
 
-# Clean up leftover timestamped/old exes from previous installs
-Get-ChildItem $BinDir -Filter "claude.*.exe" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ne "claude.orig.exe" } |
-    ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+    # Clean up leftover timestamped/old exes from previous installs
+    Get-ChildItem $BinDir -Filter "claude.*.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne "claude.orig.exe" } |
+        ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
 
-# Remove claude.exe so .cmd takes precedence
-# Keep one backup as claude.orig.exe, discard the rest
-if (Test-Path $claudeExe) {
-    if (-not (Test-Path $claudeOrigExe)) {
-        Rename-Item $claudeExe $claudeOrigExe -Force
-        Write-OK "Renamed claude.exe → claude.orig.exe"
-    } else {
-        # Backup already exists — just remove the new claude.exe
-        try {
-            Remove-Item -Force $claudeExe
-        } catch {
-            # File locked (running process) — rename aside with timestamp
-            $ts = Get-Date -Format "yyyyMMddHHmmss"
-            Rename-Item $claudeExe "claude.$ts.exe" -Force -ErrorAction SilentlyContinue
+    # Remove claude.exe so .cmd takes precedence
+    # Keep one backup as claude.orig.exe, discard the rest
+    if (Test-Path $claudeExe) {
+        if (-not (Test-Path $claudeOrigExe)) {
+            Rename-Item $claudeExe $claudeOrigExe -Force
+            Write-OK "Renamed claude.exe → claude.orig.exe"
+        } else {
+            # Backup already exists — just remove the new claude.exe
+            try {
+                Remove-Item -Force $claudeExe
+            } catch {
+                # File locked (running process) — rename aside with timestamp
+                $ts = Get-Date -Format "yyyyMMddHHmmss"
+                Rename-Item $claudeExe "claude.$ts.exe" -Force -ErrorAction SilentlyContinue
+            }
+            Write-OK "Removed claude.exe (.cmd now takes priority)"
         }
-        Write-OK "Removed claude.exe (.cmd now takes priority)"
     }
-}
 
-
-# Write .cmd launcher for both 'claude' and the explicit 'clawgod' alias.
-# Why both:
-#  - claude.cmd may be shadowed by a claude.exe higher in PATH
-#  - clawgod.cmd has no .exe competitor, so it always works
-#  - User can invoke patched explicitly via `clawgod` regardless of which
-#    binary 'claude' resolves to
-foreach ($cmd in @("claude", "clawgod")) {
-    $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding Default
+    # Write .cmd launcher for both 'claude' and the explicit 'clawgod' alias.
+    foreach ($cmd in @("claude", "clawgod")) {
+        $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding Default
+    }
+    Write-OK "Commands 'claude' + 'clawgod' → patched"
 }
-Write-OK "Commands 'claude' + 'clawgod' → patched"
 
 # ─── Ensure BinDir is in PATH ─────────────────────────
 
@@ -1522,15 +1555,30 @@ if ($userPath -notlike "*$BinDir*") {
 Write-Host ""
 Write-Host "  ClawGod installed!" -ForegroundColor Green
 Write-Host ""
-Write-Dim "  claude            — Start patched Claude Code (green logo)"
-Write-Dim "  claude.orig       — Run original unpatched Claude Code"
+if ($InstallMode -eq "sidecar") {
+    Write-Dim "  clawgod           — Start patched Claude Code (green logo)"
+    Write-Dim "  claude            — Unchanged native Claude Code"
+} else {
+    Write-Dim "  claude            — Start patched Claude Code (green logo)"
+    Write-Dim "  claude.orig       — Run original unpatched Claude Code"
+    Write-Dim "  clawgod           — Explicit patched Claude Code alias"
+}
 Write-Host ""
-Write-Dim "  Updates: 'claude update' is patched to route through this installer."
-Write-Dim "  Just run it as usual — pulls latest Anthropic release + re-patches"
-Write-Dim "  in one step. To leave clawgod and use vanilla update:"
-Write-Dim "    bash ~/.clawgod/install.sh --uninstall"
+if ($InstallMode -eq "sidecar") {
+    Write-Dim "  Updates: run 'clawgod update' to refresh the patched sidecar."
+    Write-Dim "  Native 'claude update' remains Anthropic's own updater."
+} else {
+    Write-Dim "  Updates: 'claude update' is patched to route through this installer."
+    Write-Dim "  Just run it as usual — pulls latest Anthropic release + re-patches"
+    Write-Dim "  in one step. To leave clawgod and use vanilla update:"
+    Write-Dim "    . $ClawDir\install.ps1 -Uninstall"
+}
 Write-Host ""
-Write-Err "  If 'claude' still runs the old version, restart your terminal."
+if ($InstallMode -eq "sidecar") {
+    Write-Err "  If 'clawgod' is not found, restart your terminal."
+} else {
+    Write-Err "  If 'claude' still runs the old version, restart your terminal."
+}
 Write-Host ""
 Write-Dim "  Config: ~/.clawgod/provider.json"
 Write-Dim "  Flags:  ~/.clawgod/features.json"

@@ -4,22 +4,24 @@ set -e
 # ─────────────────────────────────────────────────────────
 #  ClawGod Installer
 #
-#  Downloads Claude Code from npm, applies patches, replaces claude command
+#  Downloads Claude Code from npm, applies patches, and installs launchers
 #
 #  用法:
 #    curl -fsSL https://raw.githubusercontent.com/0Chencc/clawgod/main/install.sh | bash
 #    # 或
-#    bash install.sh [--version 2.1.89]
+#    bash install.sh [--version 2.1.89] [--sidecar]
 # ─────────────────────────────────────────────────────────
 
 CLAWGOD_DIR="$HOME/.clawgod"
 BIN_DIR="$HOME/.local/bin"
 VERSION="${CLAWGOD_VERSION:-latest}"
+INSTALL_MODE="hijack"
 
 # Parse args
 while [[ $# -gt 0 ]]; do
   case $1 in
     --version) VERSION="$2"; shift 2 ;;
+    --sidecar) INSTALL_MODE="sidecar"; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     *) shift ;;
   esac
@@ -61,7 +63,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/.source-version" "$CLAWGOD_DIR/install-mode"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -159,6 +161,7 @@ info "ripgrep: $(rg --version | head -1)"
 # Local binary detection is intentionally skipped — see policy note below.
 
 mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
+printf '%s\n' "$INSTALL_MODE" > "$CLAWGOD_DIR/install-mode"
 
 NATIVE_BIN=""
 NATIVE_BIN_LABEL=""
@@ -1004,16 +1007,43 @@ const patches = [
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
-    // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
-    // v2.1.119+: same gate plus extra branches for claude-opus-4-7.
-    // v2.1.139+: gate moved inside function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if($.includes("claude-3-")||...)return!0;return!1}
-    //            i.e. the `let` lifted to a comma-list before the if; the if-gate
-    //            itself is unchanged shape. We drop only the if-gate; downstream
-    //            model allow-list still runs and now accepts third-party calls.
-    name: 'Auto-mode unlock for third-party API',
+    // ≤v2.1.139: function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if(...)return!0;return!1}
+    name: 'Auto-mode unlock for third-party API (legacy provider gate)',
     pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
     replacer: () => '',
-    sentinel: '!=="firstParty"&&',
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(Math.max(0, pos - 500), pos + 500);
+      return nearby.includes('claude-opus-4-6') || nearby.includes('claude-opus-4-7');
+    },
+    optional: true,
+  },
+  {
+    // v2.1.158+: provider check moved into iH6(q), with env override
+    // CLAUDE_CODE_ENABLE_AUTO_MODE. Remove the call-site gate so third-party
+    // users reach the same model allow-list without setting an env var.
+    name: 'Auto-mode unlock for third-party API (env gate)',
+    pattern: /if\(![\w$]+\(([\w$]+)\)\)return!1;/g,
+    replacer: () => '',
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(Math.max(0, pos - 500), pos + 500);
+      return nearby.includes('CLAUDE_CODE_ENABLE_AUTO_MODE') && nearby.includes('claude-opus-4-6');
+    },
+    optional: true,
+  },
+  {
+    // v2.1.158+: a second branch blocks third-party providers from the newer
+    // auto-mode model families even after the env gate is bypassed.
+    name: 'Auto-mode unlock for third-party API (model gate)',
+    pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"&&\([\s\S]{1,180}?\)\)return!1;/g,
+    replacer: () => '',
+    validate: (match, code) => {
+      const pos = code.indexOf(match);
+      const nearby = code.substring(Math.max(0, pos - 500), pos + 500);
+      return nearby.includes('CLAUDE_CODE_ENABLE_AUTO_MODE') && nearby.includes('claude-opus-4-6');
+    },
+    optional: true,
   },
   {
     // CLI subcommand registered via commander chain:
@@ -1039,22 +1069,25 @@ const patches = [
     replacer: (m, prefix) => {
       // PowerShell 5.1's Invoke-WebRequest ignores HTTP_PROXY/HTTPS_PROXY env
       // (only reads IE system proxy). Read env explicitly and pass via -Proxy
-      // so it works on both PS 5.1 and PS 7. Use Invoke-RestMethod (irm) not
-      // Invoke-WebRequest (iwr): under -UseBasicParsing on PS 5.1, iwr's
-      // .Content is byte[] not string, so `iex (iwr -useb ...).Content`
-      // throws "Cannot convert System.Byte[] to System.String". irm always
-      // returns string in both versions. -EncodedCommand bypasses CLI
-      // arg-quoting; payload must be UTF-16LE base64.
+      // so it works on both PS 5.1 and PS 7. Download to a temp file instead
+      // of piping through iex so we can pass -Sidecar as a normal parameter.
+      // -EncodedCommand bypasses CLI arg-quoting; payload is UTF-16LE base64.
       const psScript =
         "$p=if($env:HTTPS_PROXY){$env:HTTPS_PROXY}elseif($env:HTTP_PROXY){$env:HTTP_PROXY}else{$null};" +
         "$u='https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1';" +
-        "if($p){iex(irm -Proxy $p $u)}else{iex(irm $u)}";
+        "$m=Join-Path $env:USERPROFILE '.clawgod\\install-mode';" +
+        "$s=(Test-Path $m)-and((Get-Content $m -Raw).Trim()-eq 'sidecar');" +
+        "$t=Join-Path $env:TEMP 'clawgod-install.ps1';" +
+        "if($p){iwr -UseBasicParsing -Proxy $p $u -OutFile $t}else{iwr -UseBasicParsing $u -OutFile $t};" +
+        "if($s){& $t -Sidecar}else{& $t}";
       const psB64 = Buffer.from(psScript, 'utf16le').toString('base64');
       return (
         prefix +
         `process.stderr.write("[clawgod] 'claude update' is handled by clawgod self-update.\\n[clawgod] To leave clawgod and use vanilla update: bash ~/.clawgod/install.sh --uninstall\\n[clawgod] Continuing now\\u2026\\n");` +
         `const _w=process.platform==='win32';` +
-        `const _c=_w?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash'];` +
+        `const _m=require('fs').existsSync(require('path').join(require('os').homedir(),'.clawgod','install-mode'))?require('fs').readFileSync(require('path').join(require('os').homedir(),'.clawgod','install-mode'),'utf8').trim():'';` +
+        `const _s=_m==='sidecar'?' --sidecar':'';` +
+        `const _c=_w?['powershell','-NoProfile','-EncodedCommand','${psB64}']:['bash','-c','curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s --'+_s];` +
         `const _r=require('child_process').spawnSync(_c[0],_c.slice(1),{stdio:'inherit'});` +
         `process.exit(_r.status||0);`
       );
@@ -1408,32 +1441,6 @@ if [ -z "$CLAUDE_BIN" ]; then
 fi
 CLAUDE_DIR=$(dirname "$CLAUDE_BIN")
 
-# Back up original claude (only once)
-if [ ! -e "$CLAUDE_BIN.orig" ]; then
-  if [ -L "$CLAUDE_BIN" ]; then
-    # Symlink (native install) — preserve target
-    NATIVE_BIN="$(readlink "$CLAUDE_BIN")"
-    ln -sf "$NATIVE_BIN" "$CLAUDE_BIN.orig"
-    info "Original claude backed up → claude.orig (→ $NATIVE_BIN)"
-  elif [ -f "$CLAUDE_BIN" ] && file "$CLAUDE_BIN" 2>/dev/null | grep -q "Mach-O\|ELF\|script"; then
-    # Binary or script (pnpm/npm global install)
-    cp "$CLAUDE_BIN" "$CLAUDE_BIN.orig"
-    info "Original claude backed up → claude.orig"
-  else
-    # Try versions dir as fallback
-    VERSIONS_DIR="$HOME/.local/share/claude/versions"
-    if [ -d "$VERSIONS_DIR" ]; then
-      NATIVE_BIN="$(ls -t "$VERSIONS_DIR"/* 2>/dev/null | while read f; do
-        file "$f" 2>/dev/null | grep -q "Mach-O\|ELF" && echo "$f" && break
-      done)" || true
-      if [ -n "$NATIVE_BIN" ]; then
-        ln -sf "$NATIVE_BIN" "$CLAUDE_BIN.orig"
-        info "Original claude backed up → claude.orig (→ $NATIVE_BIN)"
-      fi
-    fi
-  fi
-fi
-
 # Write launcher to the SAME directory where claude was found.
 # CRITICAL: `echo > $f` follows symlinks — if $CLAUDE_BIN is a symlink
 # (e.g. official ~/.local/bin/claude → ~/.local/share/claude/versions/X)
@@ -1449,13 +1456,43 @@ write_launcher() {
   chmod +x "$target"
 }
 
-write_launcher "$CLAUDE_BIN"
-info "Command 'claude' → patched ($CLAUDE_BIN)"
+if [ "$INSTALL_MODE" = "sidecar" ]; then
+  dim "Sidecar mode: leaving native 'claude' unchanged"
+else
+  # Back up original claude (only once)
+  if [ ! -e "$CLAUDE_BIN.orig" ]; then
+    if [ -L "$CLAUDE_BIN" ]; then
+      # Symlink (native install) — preserve target
+      NATIVE_BIN="$(readlink "$CLAUDE_BIN")"
+      ln -sf "$NATIVE_BIN" "$CLAUDE_BIN.orig"
+      info "Original claude backed up → claude.orig (→ $NATIVE_BIN)"
+    elif [ -f "$CLAUDE_BIN" ] && file "$CLAUDE_BIN" 2>/dev/null | grep -q "Mach-O\|ELF\|script"; then
+      # Binary or script (pnpm/npm global install)
+      cp "$CLAUDE_BIN" "$CLAUDE_BIN.orig"
+      info "Original claude backed up → claude.orig"
+    else
+      # Try versions dir as fallback
+      VERSIONS_DIR="$HOME/.local/share/claude/versions"
+      if [ -d "$VERSIONS_DIR" ]; then
+        NATIVE_BIN="$(ls -t "$VERSIONS_DIR"/* 2>/dev/null | while read f; do
+          file "$f" 2>/dev/null | grep -q "Mach-O\|ELF" && echo "$f" && break
+        done)" || true
+        if [ -n "$NATIVE_BIN" ]; then
+          ln -sf "$NATIVE_BIN" "$CLAUDE_BIN.orig"
+          info "Original claude backed up → claude.orig (→ $NATIVE_BIN)"
+        fi
+      fi
+    fi
+  fi
 
-# Also install to ~/.local/bin if claude was elsewhere (ensures PATH consistency)
-if [ "$CLAUDE_DIR" != "$BIN_DIR" ]; then
-  write_launcher "$BIN_DIR/claude"
-  dim "Also installed to $BIN_DIR/claude"
+  write_launcher "$CLAUDE_BIN"
+  info "Command 'claude' → patched ($CLAUDE_BIN)"
+
+  # Also install to ~/.local/bin if claude was elsewhere (ensures PATH consistency)
+  if [ "$CLAUDE_DIR" != "$BIN_DIR" ]; then
+    write_launcher "$BIN_DIR/claude"
+    dim "Also installed to $BIN_DIR/claude"
+  fi
 fi
 
 # Always expose an unambiguous `clawgod` alias alongside the `claude` override.
@@ -1490,15 +1527,30 @@ hash -r 2>/dev/null
 echo ""
 echo -e "  ${BOLD}${GREEN}ClawGod installed!${NC}"
 echo ""
-dim "  claude            — Start patched Claude Code (green logo)"
-dim "  claude.orig       — Run original unpatched Claude Code"
+if [ "$INSTALL_MODE" = "sidecar" ]; then
+  dim "  clawgod           — Start patched Claude Code (green logo)"
+  dim "  claude            — Unchanged native Claude Code"
+else
+  dim "  claude            — Start patched Claude Code (green logo)"
+  dim "  claude.orig       — Run original unpatched Claude Code"
+  dim "  clawgod           — Explicit patched Claude Code alias"
+fi
 echo ""
-dim "  Updates: 'claude update' is patched to route through this installer."
-dim "  Just run it as usual — pulls latest Anthropic release + re-patches"
-dim "  in one step. To leave clawgod and use vanilla update:"
-dim "    bash ~/.clawgod/install.sh --uninstall"
+if [ "$INSTALL_MODE" = "sidecar" ]; then
+  dim "  Updates: run 'clawgod update' to refresh the patched sidecar."
+  dim "  Native 'claude update' remains Anthropic's own updater."
+else
+  dim "  Updates: 'claude update' is patched to route through this installer."
+  dim "  Just run it as usual — pulls latest Anthropic release + re-patches"
+  dim "  in one step. To leave clawgod and use vanilla update:"
+  dim "    bash ~/.clawgod/install.sh --uninstall"
+fi
 echo ""
-warn "  If 'claude' still runs the old version, restart your terminal or run: hash -r"
+if [ "$INSTALL_MODE" = "sidecar" ]; then
+  warn "  If 'clawgod' is not found, restart your terminal or run: hash -r"
+else
+  warn "  If 'claude' still runs the old version, restart your terminal or run: hash -r"
+fi
 echo ""
 dim "  Config: ~/.clawgod/provider.json"
 dim "  Flags:  ~/.clawgod/features.json"

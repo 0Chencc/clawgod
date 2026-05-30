@@ -25,6 +25,8 @@ Install these **before** running the ClawGod installer:
 
 ## Install
 
+Default install replaces the `claude` launcher so your normal command runs the patched build:
+
 **macOS / Linux:**
 ```bash
 curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash
@@ -33,6 +35,18 @@ curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.s
 **Windows (PowerShell):**
 ```powershell
 irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex
+```
+
+Sidecar install leaves native Claude Code untouched and installs only the explicit `clawgod` command:
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s -- --sidecar
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 -OutFile install.ps1; .\install.ps1 -Sidecar
 ```
 
 Green logo = patched. Orange logo = original.
@@ -87,6 +101,8 @@ claude.orig         # Original unpatched version (auto-backed-up)
 
 `clawgod` is unambiguous: on Windows where `claude.exe` may shadow `claude.cmd`, `clawgod.cmd` always works. Even after official self-update overwrites `claude`, `clawgod` keeps running the patched build.
 
+In sidecar mode, `claude` remains the official native command and only `clawgod` runs the patched copy.
+
 ## Configuration
 
 `~/.clawgod/provider.json` is auto-created on first run. Setting `apiKey` lets you skip OAuth entirely and point ClawGod at any Anthropic-compatible endpoint.
@@ -119,7 +135,9 @@ A `.source-version` stamp in `~/.clawgod/` records which native version was patc
 
 ## Update
 
-**Just run `claude update` as usual.** ClawGod patches the command to route through its own installer, which pulls the current Anthropic release from npm (`@anthropic-ai/claude-code-<plat>@latest`), re-extracts cli.js, re-applies patches, and rewrites the launcher. So the upstream update command keeps working the way you expect — you get the latest Claude, with patches still applied, in one step.
+In default mode, **just run `claude update` as usual.** ClawGod patches the command to route through its own installer, which pulls the current Anthropic release from npm (`@anthropic-ai/claude-code-<plat>@latest`), re-extracts cli.js, re-applies patches, and rewrites the launcher. So the upstream update command keeps working the way you expect — you get the latest Claude, with patches still applied, in one step.
+
+In sidecar mode, run `clawgod update` to update the patched copy. Native `claude update` remains Anthropic's own updater and does not touch ClawGod.
 
 If you'd rather invoke the installer directly (same effect, both paths fetch the same upstream release and re-patch):
 
