@@ -1193,6 +1193,33 @@ const patches = [
     sentinel: '?"claude.exe":"claude")',
     optional: true,  // v2.1.88-era bundles compute the path differently
   },
+  {
+    // Companion to the #82 fix above. On the v2.1.140+ generator the emitted
+    // multitool shell function is:
+    //   local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+    //   [[ -x $_cc_bin ]] || _cc_bin=<…>/claude.orig
+    //   if [[ ! -x $_cc_bin ]]; then command grep "$@"; return; fi
+    //   ARGV0=ugrep "$_cc_bin" -G …
+    // CLAUDE_CODE_EXECPATH is the PRIMARY; #82 only redirected the claude.orig
+    // *fallback*. But the clawgod launcher runs the patched cli.cjs **under
+    // bun**, so process.execPath — and thus CLAUDE_CODE_EXECPATH — is always
+    // the bun binary. bun is executable, so the primary `[[ -x ]]` test always
+    // wins, the claude.orig fallback is dead code, and the shim runs
+    // `bun -G …`, which bun rejects: `error: Invalid Argument '-G'`. Every
+    // grep/rg/etc. multitool call inside a Bash-tool shell fails — #82 never
+    // actually took effect on this shape. (issue #82)
+    //
+    // Fix: drop CLAUDE_CODE_EXECPATH from the shim entirely (under clawgod it
+    // is never anything but bun) and bind _cc_bin straight to the native
+    // claude.orig backup. The existing `[[ ! -x $_cc_bin ]]` guard then
+    // degrades to the real system grep/rg when claude.orig is absent (e.g. the
+    // npm-fallback install path, which retains no native binary) — strictly
+    // better than crashing out through bun.
+    name: 'Multitool shim: drop bun execPath, use native claude.orig',
+    pattern: /`  local _cc_bin="\\\$\{\$\{\w+\}:-\}"`,`  \[\[ -x \$_cc_bin \]\] \|\| _cc_bin=(\$\{[\w$]+\(\[[\w$]*\]\)\})`/g,
+    replacer: (m, backupInterp) => '`  local _cc_bin=' + backupInterp + '`',
+    optional: true,  // generator shape varies across versions
+  },
 ];
 
 // ─── Main ─────────────────────────────────────────────────
