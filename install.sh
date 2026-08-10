@@ -2063,6 +2063,7 @@ if [ ! -x \"\$BUN_BIN\" ]; then
   exit 127
 fi
 export CLAUDE_CODE_EXECPATH=\"$CLAUDE_BIN.orig\"
+export HERDR_AGENT=\"\${HERDR_AGENT:-claude}\"
 exec \"\$BUN_BIN\" \"\$CLAWGOD_CLI\" \"\$@\""
 
 
