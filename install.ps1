@@ -1542,8 +1542,13 @@ const patches = [
     // version is re-extracted, re-patched, and re-launchered without ever
     // touching the bun runtime. Escape hatch for users who want vanilla
     // update is printed every run.
+    //
+    // v2.1.232+ wraps the action handler in a framework helper:
+    //   .action(async()=>{…})              ≤v2.1.231
+    //   .action(t(async(a)=>{…}))          v2.1.232+
+    // Match both via the optional t( wrapper and a parameter run.
     name: "Redirect `claude update` to clawgod self-update",
-    pattern: /(\.command\("update"\)\.alias\("upgrade"\)\.description\("[^"]+"\))(\.action\(async\(\)=>\{)/g,
+    pattern: /(\.command\("update"\)\.alias\("upgrade"\)\.description\("[^"]+"\))(\.action\((?:t\()?async\([^)]*\)=>\{)/g,
     replacer: (m, chain, action) => {
       // PowerShell 5.1's Invoke-WebRequest ignores HTTP_PROXY/HTTPS_PROXY env
       // (only reads IE system proxy). Read env explicitly and pass via -Proxy
