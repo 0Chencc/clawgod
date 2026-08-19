@@ -184,4 +184,4 @@ GPL-3.0 — 与 Anthropic 无关，风险自负。
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=0Chencc/clawgod&type=date&legend=top-left)](https://www.star-history.com/?repos=0Chencc%2Fclawgod&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=0Chencc/clawgod&type=date&legend=top-left)](https://star-history.dera.page/#0Chencc/clawgod&type=date&legend=top-left)
