@@ -1409,7 +1409,11 @@ const patches = [
   },
   {
     name: 'Bun.isStandaloneExecutable → true',
-    pattern: /function ([\w$]+)\(\)\{return Bun\.isStandaloneExecutable===!0\}/g,
+    // v2.1.236+ wraps the guard in a typeof-Bun check:
+    //   function fv(){return Bun.isStandaloneExecutable===!0}                          <=v2.1.235
+    //   function kw(){return typeof Bun<"u"&&Bun.isStandaloneExecutable===!0}        v2.1.236+
+    // Match both via an optional `typeof Bun<"u"&&` prefix.
+    pattern: /function ([\w$]+)\(\)\{return (?:typeof Bun<"u"&&)?Bun\.isStandaloneExecutable===!0\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {

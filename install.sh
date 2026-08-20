@@ -1300,8 +1300,13 @@ const patches = [
     // to behave as if running the native binary. The property is frozen on
     // Bun 1.4+ (configurable:false, writable:false), so runtime monkey-patch
     // is impossible — patch the source instead. See issue #133.
+    //
+    // v2.1.236+ wraps the guard in a typeof-Bun check:
+    //   function fv(){return Bun.isStandaloneExecutable===!0}        ≤v2.1.235
+    //   function kw(){return typeof Bun<"u"&&Bun.isStandaloneExecutable===!0}  v2.1.236+
+    // Match both via an optional `typeof Bun<"u"&&` prefix.
     name: 'Bun.isStandaloneExecutable → true',
-    pattern: /function ([\w$]+)\(\)\{return Bun\.isStandaloneExecutable===!0\}/g,
+    pattern: /function ([\w$]+)\(\)\{return (?:typeof Bun<"u"&&)?Bun\.isStandaloneExecutable===!0\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
