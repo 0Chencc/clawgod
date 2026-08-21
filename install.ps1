@@ -1547,12 +1547,15 @@ const patches = [
     // touching the bun runtime. Escape hatch for users who want vanilla
     // update is printed every run.
     //
-    // v2.1.232+ wraps the action handler in a framework helper:
+    // v2.1.232+ wraps the action handler in a framework helper. The helper
+    // is a minified identifier whose name drifts across builds:
     //   .action(async()=>{…})              ≤v2.1.231
-    //   .action(t(async(a)=>{…}))          v2.1.232+
-    // Match both via the optional t( wrapper and a parameter run.
+    //   .action(t(async(a)=>{…}))          v2.1.232 … v2.1.237
+    //   .action(n(async(u)=>{…}))          v2.1.238+
+    // Match any one-letter minified helper via `identifier(` rather than
+    // hardcoding a name, so a future rename keeps matching.
     name: "Redirect `claude update` to clawgod self-update",
-    pattern: /(\.command\("update"\)\.alias\("upgrade"\)\.description\("[^"]+"\))(\.action\((?:t\()?async\([^)]*\)=>\{)/g,
+    pattern: /(\.command\("update"\)\.alias\("upgrade"\)\.description\("[^"]+"\))(\.action\((?:[A-Za-z_$][\w$]*\()?async\([^)]*\)=>\{)/g,
     replacer: (m, chain, action) => {
       // PowerShell 5.1's Invoke-WebRequest ignores HTTP_PROXY/HTTPS_PROXY env
       // (only reads IE system proxy). Read env explicitly and pass via -Proxy
