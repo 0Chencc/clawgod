@@ -1,0 +1,52 @@
+name: Reject README-only PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  reject-readme-only:
+    name: Reject README-only changes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get changed files
+        id: changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api \
+            --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+            --jq '.[].filename' > changed_files.txt
+
+          echo "Changed files:"
+          cat changed_files.txt
+
+      - name: Reject README-only changes
+        run: |
+          FILE_COUNT=$(wc -l < changed_files.txt)
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::PR contains no changed files."
+            exit 1
+          fi
+
+          # Reject PRs that modify nothing but README.md / README_JP.md / README_ZH.md.
+          # These docs-only PRs carry no value for this project.
+          while IFS= read -r file; do
+            case "$file" in
+              README.md|README_JP.md|README_ZH.md) ;;
+              *) echo "OK: PR contains changes beyond README docs."; exit 0 ;;
+            esac
+          done < changed_files.txt
+
+          echo "::error::PRs that only modify README.md / README_JP.md / README_ZH.md are not allowed."
+          exit 1
