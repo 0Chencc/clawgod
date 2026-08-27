@@ -601,7 +601,28 @@ function main() {
 
   mkdirSync(outputDir, { recursive: true });
 
+  const entryMod = modules.find((m) => m.entry);
+  const entryText = entryMod ? entryMod.content.toString('utf8') : '';
+  // v2.1.245+ splits the app into an ESM chunk graph: the entry is a small
+  // ~20KB ESM module static-importing sibling /$bunfs/root/_NNN.js chunks + a
+  // handful of boot modules, with lazy import() of chunk-*.js. The ~1400
+  // remaining js records and ~170 text/file assets must all be kept on disk
+  // as flat siblings, or the entry throws "Cannot find module
+  // '/$bunfs/root/_821.js'". Legacy (<v2.1.245) kept a single ~28MB CJS entry
+  // with no sibling js modules — that path stays unchanged (extract entry only).
+  const isChunked = !!entryMod &&
+    !entryText.includes('(function(exports, require, module') &&
+    (entryText.includes('import{') || entryText.includes('from"/$bunfs/root'));
+
+  // When chunked, also extract every non-napi module to a flat dir so the
+  // ESM graph resolves. We flatten /$bunfs/root/sub/path → sub__path and keep
+  // napi under vendor/. We postpone path rewriting to post-process.mjs
+  // (which knows the final install dir).
+  const platDir = `${section.arch}-${section.os}`;
+  const graphDir = join(outputDir, 'bunfs');
+
   let cliCount = 0, napiCount = 0, dropped = 0;
+  const napiNames = new Set();
   for (const m of modules) {
     if (m.entry) {
       const out = join(outputDir, 'cli.original.js');
@@ -611,20 +632,51 @@ function main() {
     } else if (m.loader === 'napi') {
       const base = napiBasename(m.name);
       if (!base) { console.warn(`  skip napi ${m.name}: empty basename`); dropped++; continue; }
-      const dir = join(outputDir, 'vendor', base, `${section.arch}-${section.os}`);
+      const dir = join(outputDir, 'vendor', base, platDir);
       mkdirSync(dir, { recursive: true });
       const out = join(dir, `${base}.node`);
       writeFileSync(out, m.content);
       console.log(`  napi     ${(m.content.length / 1024).toFixed(0).padStart(5)} KB → ${out}`);
       napiCount++;
+      napiNames.add(m.name.replaceAll('\\', '/'));
+    } else if (isChunked && m.name.startsWith('/$bunfs/root/')) {
+      // js chunk / text asset / file asset: write to flat graph dir so Bun
+      // can resolve the rewritten /$bunfs/root/ specifiers.
+      const sub = m.name.replace(/^\/\$bunfs\/root\//, '').replaceAll('\\', '/');
+      if (!sub) { dropped++; continue; }
+      const flat = sub.replace(/\//g, '__');
+      mkdirSync(graphDir, { recursive: true });
+      writeFileSync(join(graphDir, flat), m.content);
+      console.log(`  chunk    ${(m.content.length / 1024).toFixed(0).padStart(6)} KB → bunfs/${flat}`);
+      dropped++;  // count as dropped-from-entry (informational)
     } else {
       dropped++;
     }
   }
-  console.log(`Extracted: ${cliCount} cli.js + ${napiCount} napi (${dropped} dropped)`);
+  console.log(`Extracted: ${cliCount} cli.js + ${napiCount} napi + ${isChunked ? 'chunk-graph' : 'dropped'} (${dropped} other)`);
+  console.log(`  bunfs graph: ${isChunked ? 'yes (' + platDir + ')' : 'no (legacy single-bundle)'}`);
   if (cliCount !== 1) {
     console.error(`error: expected exactly 1 entry-point, got ${cliCount}`);
     process.exit(2);
+  }
+  if (isChunked) {
+    // Write a path-map JSON so post-process.mjs can rewrite every
+    // /$bunfs/root/X string literal to the on-disk absolute path.
+    const pathMap = {};
+    for (const m of modules) {
+      if (!m.name.startsWith('/$bunfs/root/')) continue;
+      const normName = m.name.replaceAll('\\', '/');
+      const sub = normName.replace(/^\/\$bunfs\/root\//, '');
+      if (!sub) continue;
+      if (m.loader === 'napi') {
+        const base = napiBasename(m.name);
+        pathMap[normName] = `vendor/${base}/${platDir}/${base}.node`;
+      } else {
+        pathMap[normName] = `bunfs/${sub.replace(/\//g, '__')}`;
+      }
+    }
+    writeFileSync(join(outputDir, 'pathmap.json'), JSON.stringify(pathMap, null, 0) + '\n');
+    console.log(`Graph chunks: ${modules.filter((m) => m.loader === 'js').length} js + napi in vendor/`);
   }
 }
 
@@ -636,11 +688,13 @@ EXTRACTOR_EOF
 # so the wrapper's drift detector can re-run them when the user upgrades
 # their native Claude binary.
 
-# Single extractor pass: writes cli.original.js to $CLAWGOD_DIR and creates
-# vendor/<name>/<arch>-<os>/<name>.node for every napi module in one go.
-rm -rf "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/cli.original.js" 2>/dev/null
+# Single extractor pass: writes cli.original.js + (v2.1.245+) full chunk graph
+# to $CLAWGOD_DIR/bunfs/ and vendor/<name>/<arch>-<os>/<name>.node, plus a
+# pathmap.json for post-process path rewriting.
+rm -rf "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bunfs" "$CLAWGOD_DIR/pathmap.json" \
+  "$CLAWGOD_DIR/cli.original.js" 2>/dev/null
 
-dim "Extracting cli.js + napi modules from $(echo "$NATIVE_BIN_LABEL") ..."
+dim "Extracting cli.js + modules from $(echo "$NATIVE_BIN_LABEL") ..."
 if ! node "$CLAWGOD_DIR/extract-natives.mjs" "$NATIVE_BIN" "$CLAWGOD_DIR" 2>&1 | while IFS= read -r line; do echo "  $line"; done; then
   err "Failed to extract from native binary"
   exit 1
@@ -658,40 +712,93 @@ fi
 
 dim "Rewriting bunfs paths and IIFE invocation ..."
 cat > "$CLAWGOD_DIR/post-process.mjs" << 'POSTPROC_EOF'
-import { readFileSync, writeFileSync, unlinkSync } from 'fs';
-import { dirname } from 'path';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from 'fs';
+import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = `${here}/cli.original.js`;
 const dst = `${here}/cli.original.cjs`;
+const pathMapFile = `${here}/pathmap.json`;
 
 let code = readFileSync(src, 'utf8');
 
-// Strip leading @bun pragma comments (e.g. "// @bun @bytecode @bun-cjs\n")
-// Bun requires the file to start directly with "(function" to recognize
-// the CommonJS wrapper; any preceding comment breaks that detection.
-code = code.replace(/^(?:\/\/[^\n]*\n)+/, '');
+// v2.1.245+ splits the app into an ESM chunk graph; post-process then
+// rewrites the whole bunfs/ dir too. Legacy single-bundle has no pathmap.
+const isChunked = existsSync(pathMapFile);
 
-// (1) bunfs .node module paths → runtime vendor lookup
-code = code.replace(
-  /require\(['"](\/\$bunfs\/root\/([\w-]+)\.node)['"]\)/g,
-  (m, _full, name) =>
-    `require(require('path').join(__dirname,'vendor',${JSON.stringify(name)},\`\${process.arch==='arm64'?'arm64':'x64'}-\${process.platform==='darwin'?'darwin':process.platform==='linux'?'linux':'win32'}\`,${JSON.stringify(name + '.node')}))`,
-);
+// (0) Strip leading @bun pragma comments (e.g. "// @bun @bytecode @bun-cjs\n")
+// Bun requires the file to start directly with "(function" (CJS) or the
+// first import (ESM) — any preceding comment breaks that detection.
+function stripPragma(c) { return c.replace(/^(?:\/\/[^\n]*\n)+/, ''); }
 
-// (2) build-time fileURLToPath() leaks → use cli.cjs's own __filename
-code = code.replace(
-  /[\w$]+\.fileURLToPath\("file:\/\/\/home\/runner\/work\/claude-cli-internal\/claude-cli-internal\/[^"]*"\)/g,
-  () => '__filename',
-);
+// build-time fileURLToPath() leaks → use cli.cjs's own __filename
+function fixFileURLs(c) {
+  return c.replace(
+    /[\w$]+\.fileURLToPath\("file:\/\/\/home\/runner\/work\/claude-cli-internal\/claude-cli-internal\/[^"]*"\)/g,
+    () => '__filename',
+  );
+}
 
-// (3) make the outer (function(...){...}) actually run
-code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirname)');
+if (isChunked) {
+  // ── v2.1.245+ ESM chunk graph path ──
+  const pathMap = JSON.parse(readFileSync(pathMapFile, 'utf8'));
+  // build the replace table: /$bunfs/root/X → <here>/<relative-on-disk>
+  const replaceTable = new Map();
+  for (const [bunPath, rel] of Object.entries(pathMap)) {
+    replaceTable.set(bunPath, join(here, rel));
+  }
 
-writeFileSync(dst, code);
-unlinkSync(src);
-console.log(`cli.original.cjs: ${code.length} bytes`);
+  function rewriteGraph(text) {
+    // Replace ".../$bunfs/root/X" string literals (double/single/backtick)
+    return text.replace(/["'\`]\/\$bunfs\/root\/[^"'\`]+["'\`]/g, (m) => {
+      const body = m.slice(1, -1);
+      const target = replaceTable.get(body);
+      return target ? `${m[0]}${target}${m[m.length - 1]}` : m;
+    });
+  }
+
+  // entry → cli.original.cjs (ESM, no IIFE wrap)
+  code = stripPragma(code);
+  code = rewriteGraph(code);
+  code = fixFileURLs(code);
+  writeFileSync(dst, code);
+  unlinkSync(src);
+
+  // rewrite every chunk/asset file in bunfs/ in place
+  const bunfsDir = join(here, 'bunfs');
+  let n = 0;
+  for (const f of readdirSync(bunfsDir)) {
+    if (!f.endsWith('.js') && !f.endsWith('.mjs')) continue;
+    const fp = join(bunfsDir, f);
+    let fc = readFileSync(fp, 'utf8');
+    fc = stripPragma(fc);
+    fc = rewriteGraph(fc);
+    fc = fixFileURLs(fc);
+    writeFileSync(fp, fc);
+    n++;
+  }
+  console.log(`cli.original.cjs: ${code.length} bytes (chunked, rewrote ${n} graph files)`);
+} else {
+  // ── Legacy single-bundle path ──
+  code = stripPragma(code);
+
+  // (1) bunfs .node module paths → runtime vendor lookup
+  code = code.replace(
+    /require\(['"](\/\$bunfs\/root\/([\w-]+)\.node)['"]\)/g,
+    (m, _full, name) =>
+      `require(require('path').join(__dirname,'vendor',${JSON.stringify(name)},\`\${process.arch==='arm64'?'arm64':'x64'}-\${process.platform==='darwin'?'darwin':process.platform==='linux'?'linux':'win32'}\`,${JSON.stringify(name + '.node')}))`,
+  );
+
+  code = fixFileURLs(code);
+
+  // (3) make the outer (function(...){...}) actually run
+  code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirname)');
+
+  writeFileSync(dst, code);
+  unlinkSync(src);
+  console.log(`cli.original.cjs: ${code.length} bytes`);
+}
 POSTPROC_EOF
 node "$CLAWGOD_DIR/post-process.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
 [ -f "$CLAWGOD_DIR/cli.original.cjs" ] || { err "Post-process failed"; exit 1; }
@@ -730,6 +837,8 @@ if (!nativeBin || !existsSync(nativeBin)) {
 }
 
 rmSync(join(here, 'vendor'), { recursive: true, force: true });
+rmSync(join(here, 'bunfs'), { recursive: true, force: true });
+rmSync(join(here, 'pathmap.json'), { force: true });
 rmSync(join(here, 'cli.original.js'), { force: true });
 
 const runtime = process.execPath;
@@ -1276,7 +1385,7 @@ cat > "$CLAWGOD_DIR/patch.mjs" << 'PATCHER_EOF'
 /**
  * ClawGod Universal Patcher — 正则模式匹配, 跨版本兼容
  */
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -1311,10 +1420,26 @@ const patches = [
   },
   {
     name: 'GrowthBook env overrides',
-    pattern: /function ([\w$]+)\(\)\{if\(!([\w$]+)\)\2=!0;return ([\w$]+)\}/g,
+    pattern: /function ([\w$]+)\(\)\{if\(!([\w$]+)\)=!0;return ([\w$]+)\}/g,
     replacer: (m, fn, flag, val) =>
       `function ${fn}(){if(!${flag}){${flag}=!0;try{let e=process.env.CLAUDE_INTERNAL_FC_OVERRIDES;if(e)${val}=JSON.parse(e)}catch(e){}}return ${val}}`,
     unique: true,  // must match exactly 1
+  },
+  {
+    // v2.1.245+ moved env-override parsing into a GrowthBook class method and
+    // introduced a dead-code bug: the lazy parse short-circuits on the second
+    // return, so features.json (CLAUDE_INTERNAL_FC_OVERRIDES) never reaches the
+    // feature store — tengu_prompt_cache_1h_config & friends silently lose effect.
+    //
+    // v2.1.246 shape (chunk graph, _668.js):
+    //   getEnvironmentOverrides(){if(this.environmentOverridesParsed)return this.environmentOverrides;return this.environmentOverridesParsed=!0,this.environmentOverrides;let e=this.deps.readEnvironmentOverrides();if(!e)return this.environmentOverrides;try{this.environmentOverrides=Ce(e),p(`GrowthBook: Using env var overrides for ${...}`)}catch{p(`GrowthBook: Failed to parse CLAUDE_INTERNAL_FC_OVERRIDES: ${e}`,...)}return this.environmentOverrides}
+    // Patch removes the short-circuit second return so the body reaches the
+    // env-var read. Cross-version: match the lazy-parse idiom (flag=!0,value).
+    name: 'GrowthBook env overrides (graph dead-code fix)',
+    pattern: /return this\.environmentOverridesParsed=!0,this\.environmentOverrides;(?=let e=this\.deps\.readEnvironmentOverrides\(\);)/g,
+    replacer: () => '',
+    sentinel: 'environmentOverridesParsed=!0,this.environmentOverrides',
+    optional: true,
   },
   {
     name: 'GrowthBook config overrides',
@@ -1332,6 +1457,18 @@ const patches = [
     name: 'Agent Teams always enabled',
     pattern: /function ([\w$]+)\(\)\{if\(![\w$]+\(process\.env\.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS\)&&![\w$]+\(\)\)return!1;if\(![\w$]+\("tengu_amber_flint",!0\)\)return!1;return!0\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
+  },
+  {
+    // v2.1.245+ Agent Teams gate became an exported module in its own chunk
+    // with differently-minified identifiers. Shape (v2.1.246,_445.js):
+    //   function i(){return process.argv.includes("--agent-teams")}
+    //   function s(){if(!e.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS&&!i())return!1;if(!t("tengu_amber_flint",!0))return!1;return!0}
+    // Match the flag-gate by the tengu_amber_flint + return!1 shape, tolerant
+    // of the identifier set and the argv helper.
+    name: 'Agent Teams always enabled (graph)',
+    pattern: /function ([\w$]+)\(\)\{if\(![\w$]+\.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS&&![\w$]+\(\)\)return!1;if\(![\w$]+\("tengu_amber_flint",!0\)\)return!1;return!0\}/g,
+    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    optional: true,
   },
   {
     name: 'Computer Use subscription bypass',
@@ -1751,72 +1888,106 @@ const patches = [
 
 // ─── Main ─────────────────────────────────────────────────
 
+// cli.original path (legacy single-bundle) or graph dir (v2.1.245+)
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const verify = args.includes('--verify');
 const revert = args.includes('--revert');
 
+const GRAPH_DIR = join(__dirname, 'bunfs');
+const isGraph = existsSync(GRAPH_DIR);
+
 if (revert) {
+  if (isGraph) {
+    // graph: restore each file from its .bak (no-op if none) — full graph
+    // backup isn't taken for chunks; only the entry has a .bak. Re-extract
+    // instead: the safest revert for graph installs is to rerun extract.
+    console.log('⚠️  Graph install detected — run install.sh to re-extract clean source.');
+    process.exit(0);
+  }
   if (!existsSync(BACKUP)) { console.error('❌ No backup found'); process.exit(1); }
   copyFileSync(BACKUP, TARGET);
   console.log('✅ Reverted from backup');
   process.exit(0);
 }
 
-if (!existsSync(TARGET)) {
-  console.error('❌ Target not found:', TARGET);
-  process.exit(1);
+// ── Load target(s) ─────────────────────────────
+// isGraph: files = { 'cli.original.cjs': '...', 'bunfs/_444.js': '...', ... }
+// else:    files = { 'cli.original.cjs': '...' }
+let files = {};
+if (isGraph) {
+  files[TARGET] = readFileSync(TARGET, 'utf8');
+  for (const f of readdirSync(GRAPH_DIR)) {
+    if (!/\.js$/.test(f) && !/\.mjs$/.test(f)) continue;
+    files[join(GRAPH_DIR, f)] = readFileSync(join(GRAPH_DIR, f), 'utf8');
+  }
+} else {
+  if (!existsSync(TARGET)) {
+    console.error('❌ Target not found:', TARGET);
+    process.exit(1);
+  }
+  files[TARGET] = readFileSync(TARGET, 'utf8');
 }
 
-let code = readFileSync(TARGET, 'utf8');
-const origSize = code.length;
-
-// Extract version
-const verMatch = code.match(/Version:\s*([\d.]+)/);
-const version = verMatch ? verMatch[1] : 'unknown';
+// Extract version from entry content
+const version = (files[TARGET] || '').match(/Version:\s*([\d.]+)/)?.[1] || 'unknown';
+const isCJSBundle = !isGraph; // legacy
 
 console.log(`\n${'═'.repeat(55)}`);
 console.log(`  ClawGod (universal)`);
-console.log(`  Target: cli.original.cjs (v${version})`);
+console.log(`  Target: cli.original.cjs (v${version}) ${isGraph ? `[graph: ${Object.keys(files).length} files]` : ''}`);
 console.log(`  Mode: ${dryRun ? 'DRY RUN' : verify ? 'VERIFY' : 'APPLY'}`);
 console.log(`${'═'.repeat(55)}\n`);
+
+// unified search: gather all matches of a pattern across every loaded file.
+// validate() receives the full file text so surrounding-context patterns keep working.
+function collectMatches(p) {
+  const out = []; // { file, match, matches }
+  for (const [fname, content] of Object.entries(files)) {
+    const matches = [...content.matchAll(p.pattern)];
+    if (matches.length === 0) continue;
+    let rel = matches;
+    // per-file validate / selectIndex — but these were designed for a single
+    // bundle string. For graph, the pattern is applied per file, so each file
+    // is an independent unit. validate() sees that file's content.
+    if (p.validate) rel = matches.filter((m) => p.validate(m[0], content));
+    out.push({ file: fname, content, matches: rel });
+  }
+  return out;
+}
 
 let applied = 0, skipped = 0, failed = 0;
 
 for (const p of patches) {
-  const matches = [...code.matchAll(p.pattern)];
-  let relevant = matches;
+  const fileMatches = collectMatches(p);
 
-  // Filter by validation if provided
-  if (p.validate) {
-    relevant = matches.filter(m => p.validate(m[0], code));
-  }
+  /*
+   * Patch semantics per file:
+   *  - If a file contains match(es), apply replacement to that file.
+   *  - "unique" / "validate" / "selectIndex" still constrain within one file.
+   *  - The overall patch reports applied once if ANY file changed.
+   *  - The "already applied / sentinel / stale" logic: if NO file has any
+   *    match, fall through to the sentinel-based diagnostics (same as legacy).
+   */
+  let fileChangedCount = 0;
+  const relevantFiles = fileMatches.filter((fm) => fm.matches.length > 0);
 
-  // Select specific match index
-  if (p.selectIndex !== undefined) {
-    relevant = relevant.length > p.selectIndex ? [relevant[p.selectIndex]] : [];
-  }
+  // unique: if the aggregated count is >1 *across files* but the pattern
+  // should hit exactly once in the whole app, we only allow applying to a
+  // single file. Legacy enforced uniqueness over the whole bundle string;
+  // graph splits it per-file so each file normally has ≤1 match anyway.
+  let totalMatches = 0;
+  for (const fm of fileMatches) totalMatches += fm.matches.length;
 
-  // Uniqueness check — skip when 0 so the sentinel / already-applied
-  // fallthrough can handle it; only fail on >1 (ambiguous).
-  if (p.unique && relevant.length > 1) {
-    console.log(`  ⚠️  ${p.name} — ${relevant.length} matches, skipping (need 1)`);
-    failed++;
-    continue;
-  }
-
-  if (relevant.length === 0) {
+  if (relevantFiles.length === 0) {
     if (p.optional) {
       console.log(`  ⏭  ${p.name} (not present in this version)`);
       skipped++;
       continue;
     }
-    // If the patch declares a sentinel (a string that must NOT exist in a
-    // fully-patched file), use it to tell "already applied" apart from
-    // "regex is stale and silently missed the target".
     if (p.sentinel !== undefined) {
       const sentinels = Array.isArray(p.sentinel) ? p.sentinel : [p.sentinel];
-      const stillPresent = sentinels.filter((s) => code.includes(s));
+      const stillPresent = sentinels.filter((s) => Object.values(files).some((c) => c.includes(s)));
       if (stillPresent.length > 0) {
         console.log(`  ❌ ${p.name} — regex stale, sentinel still in source: ${stillPresent.map((s) => JSON.stringify(s)).join(', ')}`);
         failed++;
@@ -1832,32 +2003,41 @@ for (const p of patches) {
   }
 
   if (verify) {
-    console.log(`  ⬚  ${p.name} — ${relevant.length} match(es), not yet applied`);
+    console.log(`  ⬚  ${p.name} — ${totalMatches} match(es), not yet applied`);
     skipped++;
     continue;
   }
 
-  // Apply patch
-  let count = 0;
-  for (const m of relevant) {
-    const replacement = p.replacer(m[0], ...m.slice(1));
-    if (replacement !== m[0]) {
-      if (!dryRun) {
-        // Use function-form replace: String.prototype.replace with a string
-        // replacement interprets $$ as literal $, $1/$& as backreferences.
-        // Minified upstream identifiers like `a$$` would silently become `a$`
-        // and break every caller referencing the original name. Function form
-        // is opaque to the parser. (issue #86)
-        code = code.replace(m[0], () => replacement);
+  // Apply per file. For "unique" patches that would match in multiple files,
+  // only apply to the first (they are expected to be single-site).
+  const uniqueLimit = p.unique ? 1 : Infinity;
+  let appliedFiles = 0;
+  for (const fm of relevantFiles) {
+    if (appliedFiles >= uniqueLimit) break;
+    let changed = false;
+    let count = 0;
+    for (const m of fm.matches) {
+      const replacement = p.replacer(m[0], ...m.slice(1));
+      if (replacement !== m[0]) {
+        if (!dryRun) {
+          files[fm.file] = files[fm.file].replace(m[0], () => replacement);
+        } else {
+          // in dry-run mutate the local copy only for counting
+          const tmp = fm.content;
+          files[fm.file] = tmp.replace(m[0], () => replacement);
+        }
+        changed = true;
+        count++;
       }
-      count++;
     }
+    if (changed) appliedFiles++;
+    fileChangedCount += count;
   }
 
-  if (count > 0) {
-    console.log(`  ✅ ${p.name} (${count} replacement${count > 1 ? 's' : ''})`);
+  if (fileChangedCount > 0) {
+    console.log(`  ✅ ${p.name} (${fileChangedCount} replacement${fileChangedCount > 1 ? 's' : ''} in ${appliedFiles} file${appliedFiles > 1 ? 's' : ''})`);
     applied++;
-  } else {
+  } else if (relevantFiles.length > 0) {
     console.log(`  ⏭  ${p.name} (no change needed)`);
     skipped++;
   }
@@ -1867,16 +2047,20 @@ console.log(`\n${'─'.repeat(55)}`);
 console.log(`  Result: ${applied} applied, ${skipped} skipped, ${failed} failed`);
 
 if (!dryRun && !verify && applied > 0) {
+  // backup the entry (legacy semantics); graph writes all files in place
   if (!existsSync(BACKUP)) {
     copyFileSync(TARGET, BACKUP);
     console.log(`  📦 Backup: ${BACKUP}`);
   }
-  writeFileSync(TARGET, code, 'utf8');
-  const diff = code.length - origSize;
-  console.log(`  📝 Written: cli.original.cjs (${diff >= 0 ? '+' : ''}${diff} bytes)`);
+  for (const [fname, content] of Object.entries(files)) {
+    writeFileSync(fname, content, 'utf8');
+  }
+  const origSize = isGraph ? 0 : (readFileSync(BACKUP, 'utf8').length || 0);
+  console.log(`  📝 Written: ${Object.keys(files).length} file(s) ${isGraph ? '(graph)' : ''}`);
 }
 
 console.log(`${'═'.repeat(55)}\n`);
+
 PATCHER_EOF
 info "Patcher created (patch.mjs)"
 
