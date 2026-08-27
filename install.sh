@@ -604,18 +604,25 @@ function main() {
   const entryMod = modules.find((m) => m.entry);
   const entryText = entryMod ? entryMod.content.toString('utf8') : '';
   // v2.1.245+ splits the app into an ESM chunk graph: the entry is a small
-  // ~20KB ESM module static-importing sibling /$bunfs/root/_NNN.js chunks + a
-  // handful of boot modules, with lazy import() of chunk-*.js. The ~1400
-  // remaining js records and ~170 text/file assets must all be kept on disk
-  // as flat siblings, or the entry throws "Cannot find module
-  // '/$bunfs/root/_821.js'". Legacy (<v2.1.245) kept a single ~28MB CJS entry
-  // with no sibling js modules — that path stays unchanged (extract entry only).
+  // ~20KB ESM module static-importing sibling chunk modules + a handful of
+  // boot modules, with lazy import() of chunk-*.js. The ~1400 remaining js
+  // records and ~170 text/file assets must all be kept on disk as flat
+  // siblings, or the entry throws "Cannot find module".
+  // Bun mounts the app bundle at "/$bunfs/root" on POSIX builds and at
+  // "B:/~BUN/root" on single-drive Windows builds (both are virtual
+  // in-bundle roots, differ only by the drive-letter prefix).
+  const BUN_MOUNT_RE = /^(?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\//;
+  const bunSub = (name) => {
+    const n = name.replaceAll('\\', '/');
+    const mm = n.match(BUN_MOUNT_RE);
+    return mm ? n.slice(mm[0].length) : null;
+  };
   const isChunked = !!entryMod &&
     !entryText.includes('(function(exports, require, module') &&
-    (entryText.includes('import{') || entryText.includes('from"/$bunfs/root'));
+    (entryText.includes('import{') || BUN_MOUNT_RE.test(entryText));
 
   // When chunked, also extract every non-napi module to a flat dir so the
-  // ESM graph resolves. We flatten /$bunfs/root/sub/path → sub__path and keep
+  // ESM graph resolves. We flatten <mount>/sub/path → sub__path and keep
   // napi under vendor/. We postpone path rewriting to post-process.mjs
   // (which knows the final install dir).
   const platDir = `${section.arch}-${section.os}`;
@@ -639,10 +646,11 @@ function main() {
       console.log(`  napi     ${(m.content.length / 1024).toFixed(0).padStart(5)} KB → ${out}`);
       napiCount++;
       napiNames.add(m.name.replaceAll('\\', '/'));
-    } else if (isChunked && m.name.startsWith('/$bunfs/root/')) {
+    } else if (isChunked && bunSub(m.name)) {
       // js chunk / text asset / file asset: write to flat graph dir so Bun
-      // can resolve the rewritten /$bunfs/root/ specifiers.
-      const sub = m.name.replace(/^\/\$bunfs\/root\//, '').replaceAll('\\', '/');
+      // can resolve the rewritten /$bunfs/root/ (POSIX) or B:/~BUN/root/
+      // (Windows single-drive) specifiers.
+      const sub = bunSub(m.name);
       if (!sub) { dropped++; continue; }
       const flat = sub.replace(/\//g, '__');
       mkdirSync(graphDir, { recursive: true });
@@ -661,12 +669,13 @@ function main() {
   }
   if (isChunked) {
     // Write a path-map JSON so post-process.mjs can rewrite every
-    // /$bunfs/root/X string literal to the on-disk absolute path.
+    // /$bunfs/root/X or B:/~BUN/root/X string literal to the on-disk
+    // absolute path.
     const pathMap = {};
     for (const m of modules) {
-      if (!m.name.startsWith('/$bunfs/root/')) continue;
       const normName = m.name.replaceAll('\\', '/');
-      const sub = normName.replace(/^\/\$bunfs\/root\//, '');
+      if (!BUN_MOUNT_RE.test(normName)) continue;
+      const sub = normName.replace(BUN_MOUNT_RE, '');
       if (!sub) continue;
       if (m.loader === 'napi') {
         const base = napiBasename(m.name);
@@ -750,10 +759,12 @@ if (isChunked) {
   }
 
   function rewriteGraph(text) {
-    // Replace ".../$bunfs/root/X" string literals (double/single/backtick)
-    return text.replace(/["'\`]\/\$bunfs\/root\/[^"'\`]+["'\`]/g, (m) => {
+    // Replace string literals containing the virtual in-bundle root
+    // (POSIX "/$bunfs/root/..." or Windows single-drive "B:/~BUN/root/...")
+    // with the on-disk absolute path from the replace table.
+    return text.replace(/["'`](?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\/[^"'`]+["'`]/g, (m) => {
       const body = m.slice(1, -1);
-      const target = replaceTable.get(body);
+      const target = replaceTable.get(body) || replaceTable.get(body.replaceAll('\\','/'));
       return target ? `${m[0]}${target}${m[m.length - 1]}` : m;
     });
   }
