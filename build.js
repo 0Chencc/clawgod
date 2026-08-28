@@ -11,9 +11,17 @@ const { join } = require('node:path');
 const ROOT = __dirname;
 const SOURCE_ROOT = join(ROOT, 'src');
 const PLACEHOLDER_RE = /{{CLAWGOD:[^}]+}}/g;
-const UTF8_BOM = '\uFEFF';
 
 const identity = (content) => content;
+
+// Windows PowerShell 5.1 treats UTF-8 without a BOM as the active ANSI code
+// page, while `irm ... | iex` exposes a UTF-8 BOM as a literal U+FEFF token.
+// Keep the generated installer ASCII-only and encode Unicode in embedded
+// JavaScript/JSON as UTF-16 escape sequences, which both grammars understand.
+const escapeNonAscii = (content) => content.replace(
+  /[^\x00-\x7F]/g,
+  (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+);
 
 // PowerShell's single-quoted here-string cannot safely embed the annotated
 // proxy source used by install.sh. The existing Windows artifact intentionally
@@ -26,11 +34,14 @@ const compactProxyForPowerShell = (content) => content
   .filter((line) => !line.startsWith('// Allows Claude Code'))
   .join('\n');
 
+const compactAndEscapeProxyForPowerShell = (content) => escapeNonAscii(
+  compactProxyForPowerShell(content),
+);
+
 const TARGETS = [
   {
     name: 'install.sh',
     template: 'templates/install.sh',
-    bom: false,
     mode: 0o755,
     sources: {
       'extract-natives.mjs': ['shared/extract-natives.mjs', identity],
@@ -45,18 +56,18 @@ const TARGETS = [
   {
     name: 'install.ps1',
     template: 'templates/install.ps1',
-    bom: true,
+    asciiOnly: true,
     sources: {
-      'npm-fetch.mjs': ['windows/npm-fetch.mjs', identity],
-      'extract-natives.mjs': ['shared/extract-natives.mjs', identity],
-      'post-process.mjs': ['shared/post-process.mjs', identity],
-      'repatch.mjs': ['shared/repatch.mjs', identity],
-      'openai-proxy.cjs': ['shared/openai-proxy.cjs', compactProxyForPowerShell],
-      'cli.cjs': ['windows/cli.cjs', identity],
-      'patch.mjs': ['shared/patch.mjs', identity],
-      'features.json': ['shared/features.json', identity],
-      'lean-remove.cjs': ['windows/lean-remove.cjs', identity],
-      'lean-apply.cjs': ['windows/lean-apply.cjs', identity],
+      'npm-fetch.mjs': ['windows/npm-fetch.mjs', escapeNonAscii],
+      'extract-natives.mjs': ['shared/extract-natives.mjs', escapeNonAscii],
+      'post-process.mjs': ['shared/post-process.mjs', escapeNonAscii],
+      'repatch.mjs': ['shared/repatch.mjs', escapeNonAscii],
+      'openai-proxy.cjs': ['shared/openai-proxy.cjs', compactAndEscapeProxyForPowerShell],
+      'cli.cjs': ['windows/cli.cjs', escapeNonAscii],
+      'patch.mjs': ['shared/patch.mjs', escapeNonAscii],
+      'features.json': ['shared/features.json', escapeNonAscii],
+      'lean-remove.cjs': ['windows/lean-remove.cjs', escapeNonAscii],
+      'lean-apply.cjs': ['windows/lean-apply.cjs', escapeNonAscii],
     },
   },
 ];
@@ -90,7 +101,14 @@ function render(target) {
   if (unresolved) {
     throw new Error(`${target.template}: unresolved placeholders: ${[...new Set(unresolved)].join(', ')}`);
   }
-  return target.bom ? UTF8_BOM + output : output;
+  if (target.asciiOnly) {
+    const nonAsciiIndex = output.search(/[^\x00-\x7F]/);
+    if (nonAsciiIndex !== -1) {
+      const codePoint = output.codePointAt(nonAsciiIndex).toString(16).toUpperCase();
+      throw new Error(`${target.template}: non-ASCII U+${codePoint} at character ${nonAsciiIndex}`);
+    }
+  }
+  return output;
 }
 
 function firstDifference(actual, expected) {

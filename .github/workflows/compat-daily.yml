@@ -381,27 +381,36 @@ jobs:
         run: node build.js --check
 
       - name: Verify Windows installer encoding
-        # Windows PowerShell 5.1 uses the active ANSI code page for UTF-8 files
-        # without a BOM. Keep the BOM so non-ASCII patcher source survives both
-        # direct execution and the documented `irm ... | iex` install path.
+        # The documented `irm ... | iex` path passes a decoded string to the
+        # parser. A BOM then becomes a literal U+FEFF before #Requires. ASCII
+        # also avoids the Windows PowerShell 5.1 active-code-page fallback.
         shell: powershell
         run: |
           $bytes = [System.IO.File]::ReadAllBytes("$env:GITHUB_WORKSPACE\install.ps1")
-          $hasUtf8Bom = $bytes.Length -ge 3 -and
-            $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
-          if (-not $hasUtf8Bom) {
-            Write-Error 'install.ps1 must be UTF-8 with BOM for Windows PowerShell 5.1'
+          $nonAscii = $bytes | Where-Object { $_ -gt 0x7F } | Select-Object -First 1
+          if ($null -ne $nonAscii) {
+            Write-Error 'install.ps1 must be BOM-free ASCII for Windows PowerShell 5.1 and irm | iex'
+          }
+          $content = [System.Text.Encoding]::ASCII.GetString($bytes)
+          if (-not $content.StartsWith('#Requires')) {
+            Write-Error 'install.ps1 must start directly with #Requires'
           }
 
-      - name: Run install.ps1 (npm-fallback path)
-        # Use Windows PowerShell 5.1 to match the Win10 installation path.
+      - name: Run install.ps1 through Invoke-Expression (npm-fallback path)
+        # Use Windows PowerShell 5.1 and evaluate the installer as a decoded
+        # string, matching the documented `irm ... | iex` parser path.
         # Tee the complete output so a missing/failed patch run cannot be
         # mistaken for a successful install.
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $log = Join-Path $env:RUNNER_TEMP 'install-windows.log'
-          & "$env:GITHUB_WORKSPACE\install.ps1" *>&1 |
+          $installerPath = "$env:GITHUB_WORKSPACE\install.ps1"
+          $installer = [System.IO.File]::ReadAllText(
+            $installerPath,
+            [System.Text.Encoding]::ASCII
+          )
+          Invoke-Expression $installer *>&1 |
             Tee-Object -FilePath $log
 
       - name: Verify install artifacts
