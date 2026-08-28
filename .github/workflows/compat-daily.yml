@@ -11,13 +11,17 @@ on:
   push:
     branches: [main]
     paths:
+      - build.js
       - install.sh
       - install.ps1
+      - src/**
       - .github/workflows/compat-daily.yml
   pull_request:
     paths:
+      - build.js
       - install.sh
       - install.ps1
+      - src/**
       - .github/workflows/compat-daily.yml
 
 permissions:
@@ -32,6 +36,29 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  build-sources:
+    name: Generated installers are current
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify generated installers
+        run: node build.js --check
+
+      - name: Check embedded JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in src/shared/*.mjs src/shared/*.cjs src/unix/*.cjs src/windows/*.mjs src/windows/*.cjs; do
+            node --check "$file"
+          done
+
   smoke:
     # Linux remains the badge-publishing compatibility baseline. Windows has a
     # separate job below because its PE extraction and path semantics differ.
@@ -348,6 +375,10 @@ jobs:
           node --version
           bun --version
           rg --version | Select-Object -First 1
+
+      - name: Verify generated installers on Windows
+        shell: powershell
+        run: node build.js --check
 
       - name: Verify Windows installer encoding
         # Windows PowerShell 5.1 uses the active ANSI code page for UTF-8 files

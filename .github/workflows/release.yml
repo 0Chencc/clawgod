@@ -23,6 +23,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify generated installers
+        run: node build.js --check
+
       - name: Resolve versions
         id: versions
         run: |
