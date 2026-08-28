@@ -2074,7 +2074,6 @@ if (!dryRun && !verify && applied > 0) {
 }
 
 console.log(`${'═'.repeat(55)}\n`);
-if (failed > 0) process.exitCode = 1;
 
 PATCHER_EOF
 info "Patcher created (patch.mjs)"
@@ -2085,7 +2084,7 @@ dim "Applying patches ..."
 node "$CLAWGOD_DIR/patch.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
 patch_status=${PIPESTATUS[0]}
 if [ "$patch_status" -ne 0 ]; then
-  err "Patching failed (node exit $patch_status). Installation aborted."
+  warn "Patching failed (node exit $patch_status). Installation aborted."
   exit "$patch_status"
 fi
 

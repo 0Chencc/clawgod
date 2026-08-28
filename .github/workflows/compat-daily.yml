@@ -418,8 +418,18 @@ jobs:
           if (-not (Test-Path $launcher)) {
             Write-Error "Launcher missing: $launcher"
           }
-          $output = & $launcher --version 2>&1 | Out-String
-          $exitCode = $LASTEXITCODE
+          # cli.cjs may print a successful update notice to stderr. Windows
+          # PowerShell wraps native stderr as ErrorRecord objects, so capture
+          # it without letting ErrorActionPreference abort before we can check
+          # the real native exit code.
+          $previousErrorAction = $ErrorActionPreference
+          try {
+            $ErrorActionPreference = 'Continue'
+            $output = & $launcher --version 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $previousErrorAction
+          }
           Write-Host $output
           if ($exitCode -ne 0) {
             Write-Error "clawgod --version exited $exitCode"

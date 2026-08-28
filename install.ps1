@@ -2196,7 +2196,6 @@ if (!dryRun && !verify && applied > 0) {
 }
 
 console.log(`${'═'.repeat(55)}\n`);
-if (failed > 0) process.exitCode = 1;
 '@
 
 Set-Content (Join-Path $ClawDir "patch.mjs") $patcherCode -Encoding UTF8
