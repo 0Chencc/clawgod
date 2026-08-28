@@ -1,0 +1,7 @@
+# Installer sources and generated release artifacts must be byte-reproducible
+# on every developer platform. PowerShell's UTF-8 BOM is added by build.js;
+# line-ending conversion must not rewrite either generated artifact.
+build.js text eol=lf
+install.sh text eol=lf
+install.ps1 text eol=lf
+src/** text eol=lf
