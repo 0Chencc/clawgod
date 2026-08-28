@@ -184,4 +184,10 @@ GPL-3.0 — Not affiliated with Anthropic. Use at your own risk.
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=0Chencc/clawgod&type=date&legend=top-left)](https://www.star-history.com/?repos=0Chencc%2Fclawgod&type=date&legend=top-left)
+<a href="https://www.star-history.com/?repos=0chencc%2Fclawgod&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=0chencc/clawgod&type=date&theme=dark&legend=top-left&sealed_token=ntGY6im49ymMeD9BXSi0OmH_kyhnnTL9pGyfm2rLYBTlzEcTeQf4o6RA6HqXhGVzdD6xXlk20KCFAyk4gWIpEda3TVEm4re4eJ0xoosRcUdYMui5B7Hp6e3YBUAr2tWmCZu2ZkRWVCOEdCOldK9S_h7Jn7NIjGEEgWywl2ZZOq7xpUpT4IkkXKKxGNJi" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=0chencc/clawgod&type=date&legend=top-left&sealed_token=ntGY6im49ymMeD9BXSi0OmH_kyhnnTL9pGyfm2rLYBTlzEcTeQf4o6RA6HqXhGVzdD6xXlk20KCFAyk4gWIpEda3TVEm4re4eJ0xoosRcUdYMui5B7Hp6e3YBUAr2tWmCZu2ZkRWVCOEdCOldK9S_h7Jn7NIjGEEgWywl2ZZOq7xpUpT4IkkXKKxGNJi" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=0chencc/clawgod&type=date&legend=top-left&sealed_token=ntGY6im49ymMeD9BXSi0OmH_kyhnnTL9pGyfm2rLYBTlzEcTeQf4o6RA6HqXhGVzdD6xXlk20KCFAyk4gWIpEda3TVEm4re4eJ0xoosRcUdYMui5B7Hp6e3YBUAr2tWmCZu2ZkRWVCOEdCOldK9S_h7Jn7NIjGEEgWywl2ZZOq7xpUpT4IkkXKKxGNJi" />
+ </picture>
+</a>
