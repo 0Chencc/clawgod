@@ -1,8 +1,8 @@
 name: Compat Daily
 
-# Runs install.sh end-to-end on every supported platform against the current
-# latest Claude Code from npm. Catches the kind of regression we hit when
-# Anthropic bumps the embedded Bun runtime ahead of Bun's stable release.
+# Runs the Linux and Windows installers end-to-end against the current latest
+# Claude Code from npm. Catches upstream compatibility changes as well as
+# platform-specific extraction, path-rewriting, and launcher regressions.
 
 on:
   schedule:
@@ -12,10 +12,12 @@ on:
     branches: [main]
     paths:
       - install.sh
+      - install.ps1
       - .github/workflows/compat-daily.yml
   pull_request:
     paths:
       - install.sh
+      - install.ps1
       - .github/workflows/compat-daily.yml
 
 permissions:
@@ -31,10 +33,8 @@ env:
 
 jobs:
   smoke:
-    # Single Linux runner — a Linux failure almost always means cross-platform
-    # breakage upstream. macOS / Windows runners are 10x / 2x more expensive
-    # than Linux on shared-tier accounting, so we don't burn them on a daily
-    # signal.
+    # Linux remains the badge-publishing compatibility baseline. Windows has a
+    # separate job below because its PE extraction and path semantics differ.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -291,6 +291,176 @@ jobs:
                 labels: ['compat-broken', 'bug'],
                 body: [
                   `Daily compatibility run failed on \`ubuntu-latest\`.`,
+                  ``,
+                  `- Claude binary: \`${claudeVersion}\``,
+                  `- Run: ${runUrl}`,
+                  ``,
+                  `Auto-opened by \`.github/workflows/compat-daily.yml\`.`,
+                ].join('\n'),
+              });
+            }
+
+  windows-smoke:
+    name: Windows smoke (PowerShell 5.1)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}\.npm-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up Bun (canary)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\.npm-cache
+          key: npm-claude-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            npm-claude-${{ runner.os }}-
+
+      - name: Install ripgrep
+        shell: powershell
+        run: |
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            choco install ripgrep --yes --no-progress
+          }
+          rg --version | Select-Object -First 1
+
+      - name: Add ClawGod launcher directory to PATH
+        shell: powershell
+        run: |
+          "$env:USERPROFILE\.local\bin" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Print runtime versions
+        shell: powershell
+        run: |
+          Write-Host "PowerShell $($PSVersionTable.PSVersion)"
+          node --version
+          bun --version
+          rg --version | Select-Object -First 1
+
+      - name: Verify Windows installer encoding
+        # Windows PowerShell 5.1 uses the active ANSI code page for UTF-8 files
+        # without a BOM. Keep the BOM so non-ASCII patcher source survives both
+        # direct execution and the documented `irm ... | iex` install path.
+        shell: powershell
+        run: |
+          $bytes = [System.IO.File]::ReadAllBytes("$env:GITHUB_WORKSPACE\install.ps1")
+          $hasUtf8Bom = $bytes.Length -ge 3 -and
+            $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+          if (-not $hasUtf8Bom) {
+            Write-Error 'install.ps1 must be UTF-8 with BOM for Windows PowerShell 5.1'
+          }
+
+      - name: Run install.ps1 (npm-fallback path)
+        # Use Windows PowerShell 5.1 to match the Win10 installation path.
+        # Tee the complete output so a missing/failed patch run cannot be
+        # mistaken for a successful install.
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'install-windows.log'
+          & "$env:GITHUB_WORKSPACE\install.ps1" *>&1 |
+            Tee-Object -FilePath $log
+
+      - name: Verify install artifacts
+        shell: powershell
+        run: |
+          $clawDir = Join-Path $env:USERPROFILE '.clawgod'
+          Get-ChildItem -Force $clawDir
+          $required = @(
+            'cli.cjs',
+            'cli.original.cjs',
+            'patch.mjs',
+            'extract-natives.mjs',
+            'post-process.mjs',
+            '.source-version'
+          )
+          foreach ($name in $required) {
+            $path = Join-Path $clawDir $name
+            if (-not (Test-Path $path)) {
+              Write-Error "Missing install artifact: $path"
+            }
+          }
+          Write-Host "Source: $((Get-Content (Join-Path $clawDir '.source-version') -Raw).Trim())"
+
+      - name: Assert all patches applied
+        shell: powershell
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'install-windows.log'
+          $summary = Select-String -Path $log `
+            -Pattern 'Result: [0-9]+ applied, [0-9]+ skipped, [0-9]+ failed' |
+            Select-Object -Last 1
+          if (-not $summary) {
+            Write-Error 'patch.mjs result line missing from install.ps1 output'
+          }
+          Write-Host "Patch summary: $($summary.Line)"
+          if ($summary.Line -notmatch 'skipped, 0 failed') {
+            Write-Error "patch.mjs reported failed patches: $($summary.Line)"
+          }
+
+      - name: Smoke test - clawgod --version
+        # Use the unambiguous clawgod.cmd entry point. This exercises the full
+        # launcher -> Bun -> cli.cjs -> chunk-graph path on Windows.
+        shell: powershell
+        run: |
+          $launcher = Join-Path $env:USERPROFILE '.local\bin\clawgod.cmd'
+          if (-not (Test-Path $launcher)) {
+            Write-Error "Launcher missing: $launcher"
+          }
+          $output = & $launcher --version 2>&1 | Out-String
+          $exitCode = $LASTEXITCODE
+          Write-Host $output
+          if ($exitCode -ne 0) {
+            Write-Error "clawgod --version exited $exitCode"
+          }
+
+      - name: Open or update issue on scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const stamp = path.join(process.env.USERPROFILE, '.clawgod', '.source-version');
+            const claudeVersion = fs.existsSync(stamp)
+              ? fs.readFileSync(stamp, 'utf8').trim()
+              : 'unknown';
+            const title = `compat-daily/windows: broke (claude ${claudeVersion})`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'compat-broken',
+              per_page: 100,
+            });
+            const dup = open.find(i => i.title === title);
+            if (dup) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: dup.number,
+                body: `Re-failed ${new Date().toISOString().slice(0,10)} - ${runUrl}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                labels: ['compat-broken', 'bug'],
+                body: [
+                  `Daily compatibility run failed on \`windows-latest\`.`,
                   ``,
                   `- Claude binary: \`${claudeVersion}\``,
                   `- Run: ${runUrl}`,

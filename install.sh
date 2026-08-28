@@ -765,7 +765,10 @@ if (isChunked) {
     return text.replace(/["'`](?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\/[^"'`]+["'`]/g, (m) => {
       const body = m.slice(1, -1);
       const target = replaceTable.get(body) || replaceTable.get(body.replaceAll('\\','/'));
-      return target ? `${m[0]}${target}${m[m.length - 1]}` : m;
+      // JSON.stringify emits a valid JS string literal. This is essential on
+      // Windows, where path.join() returns backslashes that would otherwise be
+      // interpreted as escapes (for example, \b in "\bunfs").
+      return target ? JSON.stringify(target) : m;
     });
   }
 
@@ -2071,6 +2074,7 @@ if (!dryRun && !verify && applied > 0) {
 }
 
 console.log(`${'═'.repeat(55)}\n`);
+if (failed > 0) process.exitCode = 1;
 
 PATCHER_EOF
 info "Patcher created (patch.mjs)"
@@ -2079,6 +2083,11 @@ info "Patcher created (patch.mjs)"
 
 dim "Applying patches ..."
 node "$CLAWGOD_DIR/patch.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
+patch_status=${PIPESTATUS[0]}
+if [ "$patch_status" -ne 0 ]; then
+  err "Patching failed (node exit $patch_status). Installation aborted."
+  exit "$patch_status"
+fi
 
 # ─── Create default configs ───────────────────────────
 

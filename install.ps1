@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     ClawGod Installer for Windows
@@ -912,7 +912,10 @@ if (isChunked) {
     return text.replace(/["'`](?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\/[^"'`]+["'`]/g, (m) => {
       const body = m.slice(1, -1);
       const target = replaceTable.get(body) || replaceTable.get(body.replaceAll('\\','/'));
-      return target ? `${m[0]}${target}${m[m.length - 1]}` : m;
+      // JSON.stringify emits a valid JS string literal. This is essential on
+      // Windows, where path.join() returns backslashes that would otherwise be
+      // interpreted as escapes (for example, \b in "\bunfs").
+      return target ? JSON.stringify(target) : m;
     });
   }
 
@@ -2193,6 +2196,7 @@ if (!dryRun && !verify && applied > 0) {
 }
 
 console.log(`${'═'.repeat(55)}\n`);
+if (failed > 0) process.exitCode = 1;
 '@
 
 Set-Content (Join-Path $ClawDir "patch.mjs") $patcherCode -Encoding UTF8
@@ -2202,6 +2206,10 @@ Write-OK "Patcher created (patch.mjs)"
 
 Write-Dim "Applying patches ..."
 node (Join-Path $ClawDir "patch.mjs")
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Patching failed (node exit $LASTEXITCODE). Installation aborted."
+    exit $LASTEXITCODE
+}
 
 # ─── Create default configs ───────────────────────────
 
@@ -2310,8 +2318,10 @@ try {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $sanityOut = (& $BunBin $sanityCli --version 2>&1 | Out-String)
+    $sanityExitCode = $LASTEXITCODE
 } catch {
     $sanityOut = "$_"
+    $sanityExitCode = 1
 } finally {
     $ErrorActionPreference = $prevEAP
 }
@@ -2336,6 +2346,12 @@ if ($sanityOut -match "Expected CommonJS module to have a function wrapper") {
     Write-Err ""
     Write-Err "  Then re-run .\install.ps1 — this sanity check will pass."
     exit 1
+}
+if ($sanityExitCode -ne 0) {
+    Write-Host ""
+    Write-Err "Patched Claude failed its startup check (exit $sanityExitCode):"
+    Write-Err "$sanityOut"
+    exit $sanityExitCode
 }
 Write-OK "Bun loads cli.original.cjs"
 
