@@ -884,7 +884,7 @@ info "Re-patch helper installed (repatch.mjs)"
 cat > "$CLAWGOD_DIR/openai-proxy.cjs" << 'PROXY_EOF'
 'use strict';
 // Anthropic Messages API <-> OpenAI Chat Completions API translation proxy
-// Allows Claude Code to use xAI/Grok and other OpenAI-compatible APIs
+// Allows Claude Code to use xAI/Grok, OrcaRouter, and other OpenAI-compatible APIs
 
 function translateSystem(system) {
   if (!system) return [];
@@ -1205,8 +1205,8 @@ if (existsSync(configFile)) {
   writeFileSync(configFile, JSON.stringify(defaultConfig, null, 2) + '\n');
 }
 
-// OpenAI-compatible provider proxy (grok, openai-compat, etc.)
-const _proxyTypes = { grok: 1, 'openai-compat': 1 };
+// OpenAI-compatible provider proxy (grok, orcarouter, openai-compat, etc.)
+const _proxyTypes = { grok: 1, orcarouter: 1, 'openai-compat': 1 };
 if (_proxyTypes[config.type]) {
   let _proxyKey = config.apiKey || '';
   if (!_proxyKey && config.type === 'grok') {
@@ -1216,11 +1216,14 @@ if (_proxyTypes[config.type]) {
     } catch {}
     if (!_proxyKey) _proxyKey = process.env.GROK_API_KEY || '';
   }
+  if (!_proxyKey && config.type === 'orcarouter') {
+    _proxyKey = process.env.ORCAROUTER_API_KEY || '';
+  }
   if (_proxyKey) {
     const { startProxy } = require('./openai-proxy.cjs');
     const _proxy = startProxy({
       apiKey: _proxyKey,
-      baseURL: config.baseURL || (config.type === 'grok' ? 'https://api.x.ai/v1' : ''),
+      baseURL: config.baseURL || (config.type === 'grok' ? 'https://api.x.ai/v1' : config.type === 'orcarouter' ? 'https://api.orcarouter.ai/v1' : ''),
       model: config.model || '',
     });
     process.env.ANTHROPIC_API_KEY = 'proxy-passthrough';
