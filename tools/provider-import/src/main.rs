@@ -369,6 +369,111 @@ fn cmd_openai_compat(args: &[String]) {
     eprintln!("\n  Done. Run `claude` to start.\n");
 }
 
+fn cmd_orcarouter(args: &[String]) {
+    eprintln!("\n  ── OrcaRouter Import ──\n");
+
+    let mut key = None;
+    let mut model_override = None;
+    let mut small_model_override = None;
+    let mut base_url = "https://api.orcarouter.ai/v1".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--key" | "-k" => {
+                i += 1;
+                key = args.get(i).cloned();
+            }
+            "--model" | "-m" => {
+                i += 1;
+                model_override = args.get(i).cloned();
+            }
+            "--small-model" => {
+                i += 1;
+                small_model_override = args.get(i).cloned();
+            }
+            "--base-url" => {
+                i += 1;
+                if let Some(u) = args.get(i) {
+                    base_url = u.clone();
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Detect key (ORCAROUTER_API_KEY env, or prompt)
+    let api_key = match key {
+        Some(k) => {
+            eprintln!("  Using provided key");
+            k
+        }
+        None => {
+            if let Ok(k) = env::var("ORCAROUTER_API_KEY") {
+                if !k.is_empty() {
+                    eprintln!("  Found key in ORCAROUTER_API_KEY environment variable");
+                    k
+                } else {
+                    let k = prompt_key();
+                    if k.is_empty() {
+                        eprintln!("  Aborted.");
+                        process::exit(1);
+                    }
+                    k
+                }
+            } else {
+                let k = prompt_key();
+                if k.is_empty() {
+                    eprintln!("  Aborted.");
+                    process::exit(1);
+                }
+                k
+            }
+        }
+    };
+
+    // Validate
+    eprintln!("\n  Verifying key with {}...", base_url);
+    let result = validate_key(&api_key, &base_url);
+
+    if !result.valid {
+        eprintln!("  FAILED: {}", result.error.unwrap_or_default());
+        process::exit(1);
+    }
+
+    eprintln!("  Key valid.");
+
+    // Model selection
+    let default_model = "orcarouter/auto";
+    let default_small = "orcarouter/fusion-flash";
+
+    let model = match model_override {
+        Some(m) => m,
+        None => select_model(&result.models, default_model),
+    };
+
+    let small_model = match small_model_override {
+        Some(m) => m,
+        None => {
+            let candidates: Vec<&str> = vec!["orcarouter/fusion-flash", "orcarouter/auto"];
+            let auto = result
+                .models
+                .iter()
+                .find(|m| candidates.contains(&m.as_str()))
+                .map(|s| s.as_str())
+                .unwrap_or(default_small);
+            auto.to_string()
+        }
+    };
+
+    // Write
+    eprintln!("\n  model: {}", model);
+    eprintln!("  smallModel: {}", small_model);
+    write_provider("orcarouter", &api_key, &base_url, &model, &small_model);
+    eprintln!("\n  Done. Run `claude` to start.\n");
+}
+
 fn cmd_status() {
     eprintln!("\n  ── Provider Status ──\n");
 
@@ -386,7 +491,7 @@ fn cmd_status() {
             eprintln!("  baseURL:    {}", url);
             eprintln!("  apiKey:     {}", if has_key { "(set)" } else { "(empty — using OAuth)" });
 
-            if has_key && (ptype == "grok" || ptype == "openai-compat") {
+            if has_key && (ptype == "grok" || ptype == "orcarouter" || ptype == "openai-compat") {
                 let key = config["apiKey"].as_str().unwrap();
                 eprintln!("\n  Verifying...");
                 let result = validate_key(key, url);
@@ -432,6 +537,7 @@ fn print_usage() {
 
   Usage:
     clawgod-import grok [options]          Import from grok-cli / xAI
+    clawgod-import orcarouter [options]    Import from OrcaRouter
     clawgod-import openai-compat [options] Import any OpenAI-compatible API
     clawgod-import status                  Show current provider config
     clawgod-import reset                   Reset to default (Anthropic)
@@ -442,6 +548,12 @@ fn print_usage() {
     --small-model <MODEL>     Small/fast model (default: grok-3-mini)
     --base-url <URL>          API base URL (default: https://api.x.ai/v1)
 
+  Options (orcarouter):
+    -k, --key <KEY>           API key (defaults to ORCAROUTER_API_KEY env)
+    -m, --model <MODEL>       Model name (default: orcarouter/auto)
+    --small-model <MODEL>     Small/fast model (default: orcarouter/fusion-flash)
+    --base-url <URL>          API base URL (default: https://api.orcarouter.ai/v1)
+
   Options (openai-compat):
     -k, --key <KEY>           API key
     -u, --base-url <URL>      API base URL (required)
@@ -451,6 +563,7 @@ fn print_usage() {
   Examples:
     clawgod-import grok                           # auto-detect grok-cli key
     clawgod-import grok -k xai-abc123             # manual key
+    clawgod-import orcarouter                     # use ORCAROUTER_API_KEY env
     clawgod-import openai-compat -k sk-xxx \
       -u https://api.deepseek.com/v1 -m deepseek-chat
 "#
@@ -462,6 +575,7 @@ fn main() {
 
     match args.get(1).map(|s| s.as_str()) {
         Some("grok") => cmd_grok(&args[2..]),
+        Some("orcarouter") => cmd_orcarouter(&args[2..]),
         Some("openai-compat") | Some("openai") => cmd_openai_compat(&args[2..]),
         Some("status") => cmd_status(),
         Some("reset") => cmd_reset(),

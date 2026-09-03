@@ -1,6 +1,6 @@
 'use strict';
 // Anthropic Messages API <-> OpenAI Chat Completions API translation proxy
-// Allows Claude Code to use xAI/Grok and other OpenAI-compatible APIs
+// Allows Claude Code to use xAI/Grok, OrcaRouter, and other OpenAI-compatible APIs
 
 function translateSystem(system) {
   if (!system) return [];
