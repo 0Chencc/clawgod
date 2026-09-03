@@ -47,6 +47,8 @@ const FEATURES = {
                       patchIds: ['voice-mode'] },
   'auto-mode':      { desc: 'Auto-mode model selection on third-party APIs',
                       patchIds: ['auto-mode-helper-gate', 'auto-mode-inline-gate'] },
+  'classifier-tuning': { desc: 'Auto-mode classifier overrides (timeout/model/retries env vars)',
+                      patchIds: ['classifier-timeout', 'classifier-model', 'classifier-retries'] },
   'theme':          { desc: 'Green brand/logo color scheme',
                       patchIds: [
                         'theme-logo-rgb', 'theme-logo-ansi',
@@ -227,6 +229,61 @@ const patches = [
     name: 'Voice Mode enable (bypass GrowthBook kill)',
     pattern: /function ([\w$]+)\(\)\{return![\w$]+\("tengu_amber_quartz_disabled",!1\)\}/g,
     replacer: (m, fn) => `function ${fn}(){return ${gate('voice-mode')}?!0:(${m.slice(`function ${fn}(){return`.length, -1)})}`,
+  },
+  {
+    // Auto-mode classifier stage1 (xml_s1) deadline formula (v2.1.251+):
+    //   function d7t(e){let n=Math.max(0,Math.ceil((e-50000)/50000));return Math.min(YY,eQe+n*1e4)}
+    // eQe=60000 base, YY=120000 cap (identifiers drift). Patch:
+    // CLAWGOD_CLASSIFIER_TIMEOUT_MS is a floor — result becomes
+    // max(original formula, override). Original token scaling is kept, but
+    // the override is never shrunk below the formula and defeats the 120s
+    // cap when larger. Env read at call time so settings.json `env`
+    // (applied post-init by applyConfigEnvironmentVariables) also reaches
+    // it. Unset → _ctMin=0, max(original,0) ≡ original.
+    id: 'classifier-timeout',
+    toggleable: true,
+    name: 'Auto-mode classifier timeout override (CLAWGOD_CLASSIFIER_TIMEOUT_MS)',
+    pattern: /function ([\w$]+)\(([\w$]+)\)\{let ([\w$]+)=Math\.max\(0,Math\.ceil\(\(\2-50000\)\/50000\)\);return Math\.min\(([\w$]+),([\w$]+)\+\3\*1e4\)\}/g,
+    replacer: (m, fn, arg, step, cap, base) =>
+      `function ${fn}(${arg}){let _ctMin=(${gate('classifier-timeout')}?Number(process.env.CLAWGOD_CLASSIFIER_TIMEOUT_MS):0)||0;let ${step}=Math.max(0,Math.ceil((${arg}-50000)/50000));return Math.max(Math.min(${cap},${base}+${step}*1e4),_ctMin)}`,
+    unique: true,
+    optional: true,  // formula introduced in v2.1.251; older bundles predate it
+  },
+  {
+    // Auto-mode classifier model resolution. v2.1.220+:
+    //   function X(){let e=at(),n=Ih(),r=usr(n?.modelByMainModel,{vet:...})??avt(n?.model,"model");
+    //     if(r)return{value:r,src:"gb"}; ... return{value:...,src:"default"}}
+    // Returns {value,src}. GB-configured models go through a policy vet
+    // (Z8t) that drops unknown model names, so third-party gateway models
+    // cannot ride the GB override path. Patch: CLAWGOD_CLASSIFIER_MODEL
+    // short-circuits the whole chain (returns before GB config / probe /
+    // main-model mapping). Unset → original behavior.
+    id: 'classifier-model',
+    toggleable: true,
+    name: 'Auto-mode classifier model override (CLAWGOD_CLASSIFIER_MODEL)',
+    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+\(.*?\),[\w$]+=[\w$]+\([\w$]+\?\.modelByMainModel,\{vet:/g,
+    replacer: (m, fn) =>
+      `function ${fn}(){let _cm=process.env.CLAWGOD_CLASSIFIER_MODEL?.trim();if(_cm&&${gate('classifier-model')})return{value:_cm,src:"default"};` + m.slice(m.indexOf('{') + 1),
+    unique: true,
+    optional: true,  // v2.1.220+
+  },
+  {
+    // Auto-mode classifier maxRetries default (v2.1.220+):
+    //   function X(){let n=Ih()?.maxRetries;return typeof n==="number"&&
+    //     Number.isInteger(n)&&n>=0?{value:n,src:"gb"}:{value:s4,src:"default"}}
+    // s4 = the maxRetries constant (4) declared near the timing constants;
+    // it also feeds stage1 ceilingMs = max(F,(s4+1)*base). Patch:
+    // CLAWGOD_CLASSIFIER_RETRIES overrides the default before the GB
+    // lookup (same integer ≥0 validation; blank/invalid falls through,
+    // matching unset).
+    id: 'classifier-retries',
+    toggleable: true,
+    name: 'Auto-mode classifier retries override (CLAWGOD_CLASSIFIER_RETRIES)',
+    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\([^)]*\)\?\.maxRetries;return typeof [\w$]+==="number"&&Number\.isInteger\([\w$]+\)&&[\w$]+>=0\?{value:[\w$]+,src:"gb"}:{value:([\w$]+),src:"default"\}\}/g,
+    replacer: (m, fn) =>
+      `function ${fn}(){let _cr=process.env.CLAWGOD_CLASSIFIER_RETRIES?.trim();if(${gate('classifier-retries')}&&_cr!==undefined&&_cr!==""&&Number.isInteger(+_cr)&&+_cr>=0)return{value:+_cr,src:"default"};` + m.slice(m.indexOf('{') + 1),
+    unique: true,
+    optional: true,  // v2.1.220+; ≤v2.1.143 uses a plain constant
   },
   {
     // v2.1.158+: provider gate refactored into helper function:

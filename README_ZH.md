@@ -50,6 +50,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **Agent Teams** | 多智能体协作，无需额外参数 |
 | **Computer Use** | 无需 Max/Pro 订阅即可使用屏幕控制（macOS） |
 | **Auto-mode** | 解锁第三方 API 用户的 auto-mode（移除 firstParty 限制） |
+| **Classifier 调优** | Auto-mode 分类器可调：超时 / 模型 / 重试次数（`CLAWGOD_CLASSIFIER_TIMEOUT_MS`、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`） |
 | **Ultraplan** | 通过 Claude Code Remote 进行多智能体规划 |
 | **Ultrareview** | 通过 Claude Code Remote 自动化 Bug 查找 |
 
@@ -133,6 +134,7 @@ claude.orig         # 原版未修改版本（自动备份）
 | `ultrareview` | Ultrareview 命令 |
 | `voice-mode` | Voice Mode |
 | `auto-mode` | 第三方 API 的 auto-mode 模型选择 |
+| `classifier-tuning` | Auto-mode 分类器覆盖：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline 下限；未设置=按上下文 60-120s，需 v2.1.251+）、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`（未设置=4） |
 | `theme` | 绿色品牌/Logo 配色 |
 | `geo-neutralize` | 中和 system prompt 中的地区/代理隐写 |
 | `cyber-risk` | 移除 system prompt 中的 CYBER_RISK_INSTRUCTION |
