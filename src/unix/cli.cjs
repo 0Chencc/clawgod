@@ -233,7 +233,7 @@ try {
   }
 } catch {}
 
-// Patch feature gates (~/.clawgod/patches.json + CLAWGOD_FEATURES env) —
+// Patch feature gates (~/.clawgod/patches.json + CLAWGOD_FEATURE_* env) —
 // must run before the patched cli loads so gated patches see
 // globalThis.__clawgodPatches.
 require('./feature-gates.cjs');

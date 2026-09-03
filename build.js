@@ -43,7 +43,7 @@ const compactAndEscapeProxyForPowerShell = (content) => escapeNonAscii(
 // is the single source of truth (FEATURES in patch.mjs); the wrapper gets a
 // machine-generated META constant (patch id → owning feature ids) that its
 // startup block uses to compute per-patch gates from patches.json +
-// CLAWGOD_FEATURES. Marker line in the wrapper sources marks the weave point.
+// CLAWGOD_FEATURE_* env overrides. Marker line marks the weave point.
 const FEATURES_META_MARKER = '// {{CLAWGOD:FEATURES_META}}';
 
 function featuresMeta() {
