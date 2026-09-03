@@ -117,6 +117,37 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 - **`apiKey` を設定**：ClawGod が `ANTHROPIC_API_KEY` として注入し、`~/.claude/settings.json` から隔離します。Anthropic / DeepSeek など OpenAI 互換ゲートウェイでも動作。`baseURL` が Anthropic 以外を指す場合、ゲートウェイ認証用に `ANTHROPIC_AUTH_TOKEN` も自動設定されます。
 - **`apiKey` 未設定**：OAuth パス。一度 `claude auth login` を実行すれば、`~/.claude` 配下の subagents / skills / MCP はそのまま使えます。
 
+### 機能トグル
+
+`~/.clawgod/patches.json`（初回インストール時に自動生成）で機能を恒久的にオフにできます。設定はアップデート・再インストール後も保持されます。記載のない key はデフォルトでオンです。
+
+```json
+{ "theme": false, "geo-neutralize": false }
+```
+
+| Feature id | 対象 |
+|------------|------|
+| `agent-teams` | Agent Teams 常時有効 |
+| `computer-use` | Computer Use アンロック |
+| `ultraplan` | Ultraplan コマンド |
+| `ultrareview` | Ultrareview コマンド |
+| `voice-mode` | Voice Mode |
+| `auto-mode` | サードパーティ API での auto-mode モデル選択 |
+| `theme` | 緑色ブランド/ロゴ配色 |
+| `geo-neutralize` | system prompt の地域/プロキシステガノグラフィ中和 |
+| `cyber-risk` | system prompt から CYBER_RISK_INSTRUCTION を削除 |
+| `url-restriction` | URL 生成制限を削除 |
+| `cautious-actions` | "Executing actions with care" セクションを削除 |
+| `not-logged-in` | "Not logged in" 通知を削除 |
+| `message-filter` | 非 ant ユーザ向けメッセージ/添付フィルタを回避 |
+
+単一起動のみの指定は環境変数で — feature id を大文字化、ハイフンはアンダースコアに：
+
+```bash
+CLAWGOD_FEATURE_THEME=false claude          # この起動のみ緑テーマをオフ
+CLAWGOD_FEATURE_GEO_NEUTRALIZE=true claude  # patches.json でオフにした機能を一時的に戻す
+```
+
 ## 仕組み
 
 `@anthropic-ai/claude-code` v2.1.113 以降、npm パッケージは `cli.js` を同梱せず、プラットフォーム固有の Bun standalone バイナリへ転送する thin loader だけになりました。ClawGod は次のように対応しています：

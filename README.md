@@ -117,6 +117,37 @@ claude.orig         # Original unpatched version (auto-backed-up)
 - **`apiKey` set** → ClawGod injects it as `ANTHROPIC_API_KEY` and isolates from `~/.claude/settings.json`. Works with Anthropic, DeepSeek, and OpenAI-compatible gateways. A non-Anthropic `baseURL` also populates `ANTHROPIC_AUTH_TOKEN` for gateway auth.
 - **`apiKey` empty** → OAuth path. Run `claude auth login` once; `~/.claude` keeps hosting your subagents, skills, and MCP settings.
 
+### Feature Toggles
+
+`~/.clawgod/patches.json` (auto-created empty) switches features off persistently — your choices survive updates and reinstalls. Absent key = on.
+
+```json
+{ "theme": false, "geo-neutralize": false }
+```
+
+| Feature id | Controls |
+|------------|----------|
+| `agent-teams` | Agent Teams always enabled |
+| `computer-use` | Computer Use unlock |
+| `ultraplan` | Ultraplan slash command |
+| `ultrareview` | Ultrareview slash command |
+| `voice-mode` | Voice Mode |
+| `auto-mode` | Auto-mode model selection on third-party APIs |
+| `theme` | Green brand/logo color scheme |
+| `geo-neutralize` | Geo/proxy steganography neutralization in system prompt |
+| `cyber-risk` | Removes CYBER_RISK_INSTRUCTION from system prompt |
+| `url-restriction` | Removes URL generation restriction from system prompt |
+| `cautious-actions` | Removes "Executing actions with care" section from system prompt |
+| `not-logged-in` | Removes "Not logged in" notice |
+| `message-filter` | Bypasses non-ant message/attachment filters |
+
+For a single launch, set an env var instead — feature id upper-cased, dashes to underscores:
+
+```bash
+CLAWGOD_FEATURE_THEME=false claude     # green theme off, this run only
+CLAWGOD_FEATURE_GEO_NEUTRALIZE=true claude  # temporarily re-enable one disabled in patches.json
+```
+
 ## How it works
 
 Since `@anthropic-ai/claude-code` v2.1.113, the npm package no longer ships `cli.js` — it's a thin loader that dispatches to platform-specific Bun standalone binaries. ClawGod adapts:

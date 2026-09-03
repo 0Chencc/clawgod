@@ -117,6 +117,37 @@ claude.orig         # 原版未修改版本（自动备份）
 - **填写 `apiKey`**：ClawGod 注入 `ANTHROPIC_API_KEY` 并与 `~/.claude/settings.json` 隔离。可用于 Anthropic 官方、DeepSeek，以及任何 OpenAI-compatible 网关；`baseURL` 指向非 Anthropic 域名时，还会自动注入 `ANTHROPIC_AUTH_TOKEN` 以适配网关鉴权。
 - **留空 `apiKey`**：走 OAuth 路径，执行一次 `claude auth login`，`~/.claude` 下的 subagents / skills / MCP 配置继续有效。
 
+### 功能开关
+
+`~/.clawgod/patches.json`（首次安装自动创建）可持久关闭指定功能，配置在更新和重装后保留。未列出的 key 默认开启。
+
+```json
+{ "theme": false, "geo-neutralize": false }
+```
+
+| Feature id | 控制内容 |
+|------------|----------|
+| `agent-teams` | Agent Teams 恒开 |
+| `computer-use` | Computer Use 解锁 |
+| `ultraplan` | Ultraplan 命令 |
+| `ultrareview` | Ultrareview 命令 |
+| `voice-mode` | Voice Mode |
+| `auto-mode` | 第三方 API 的 auto-mode 模型选择 |
+| `theme` | 绿色品牌/Logo 配色 |
+| `geo-neutralize` | 中和 system prompt 中的地区/代理隐写 |
+| `cyber-risk` | 移除 system prompt 中的 CYBER_RISK_INSTRUCTION |
+| `url-restriction` | 移除 URL 生成限制 |
+| `cautious-actions` | 移除 "Executing actions with care" 段落 |
+| `not-logged-in` | 移除 "Not logged in" 提示 |
+| `message-filter` | 绕过非 ant 用户的消息/附件过滤 |
+
+仅对单次启动生效时用环境变量——feature id 大写、连字符转下划线：
+
+```bash
+CLAWGOD_FEATURE_THEME=false claude        # 本次运行关闭绿色主题
+CLAWGOD_FEATURE_GEO_NEUTRALIZE=true claude # 临时恢复 patches.json 里关闭的功能
+```
+
 ## 工作原理
 
 从 `@anthropic-ai/claude-code` v2.1.113 起，npm 包不再带 `cli.js`——它只是个 thin loader 转发到平台特定的 Bun standalone 二进制。ClawGod 这样适配：
