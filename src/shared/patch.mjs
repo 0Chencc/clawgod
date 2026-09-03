@@ -10,10 +10,74 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGET = join(__dirname, 'cli.original.cjs');
 const BACKUP = TARGET + '.bak';
 
+// ─── Feature registry (toggle units) ─────────────────────
+// A feature is the user-facing unit toggled via ~/.clawgod/patches.json
+// ({"<featureId>": false}) or per-launch CLAWGOD_FEATURE_<NAME> env overrides
+// ("feature=false,other=true"). One feature is usually realized by
+// SEVERAL cooperating patches (Computer Use = subscription + default +
+// gate); cross-version regex variants are separate patch ids under the
+// same feature. A patch id listed in two features applies while ANY of
+// them is enabled — disabling one feature never breaks the other.
+//
+// Patch classification (validated below, mismatch fails the run):
+//   toggleable: true  → gated by feature toggles; its id MUST be
+//                       referenced by at least one FEATURES entry
+//   no toggleable     → core, always applied, NOT referenceable
+//
+// The patcher itself NEVER reads patches.json — every patch bakes in
+// unconditionally. Feature config is loaded at claude launch (wrapper
+// reads patches.json + CLAWGOD_FEATURE_* env) and decides the ON/OFF of each
+// baked-in gate via globalThis.__clawgodPatches (patch id → bool, computed
+// by feature-gates.cjs before cli.original.cjs loads). Every toggleable
+// replacer below therefore emits a runtime check of its own patch id:
+//   globalThis.__clawgodPatches?.["<patchId>"] !== false
+// Absent table (old wrapper, or gates failed to load) → undefined !== false
+// → gate passes → same behavior as before toggles existed.
+
+const FEATURES = {
+  'agent-teams':    { desc: 'Agent Teams always enabled',
+                      patchIds: ['agent-teams', 'agent-teams-graph'] },
+  'computer-use':   { desc: 'Computer Use unlock',
+                      patchIds: ['computer-use-sub', 'computer-use-default', 'computer-use-gate'] },
+  'ultraplan':      { desc: 'Ultraplan slash command',
+                      patchIds: ['ultraplan'] },
+  'ultrareview':    { desc: 'Ultrareview slash command',
+                      patchIds: ['ultrareview-gate', 'ultrareview-direct'] },
+  'voice-mode':     { desc: 'Voice Mode',
+                      patchIds: ['voice-mode'] },
+  'auto-mode':      { desc: 'Auto-mode model selection on third-party APIs',
+                      patchIds: ['auto-mode-helper-gate', 'auto-mode-inline-gate'] },
+  'theme':          { desc: 'Green brand/logo color scheme',
+                      patchIds: [
+                        'theme-logo-rgb', 'theme-logo-ansi',
+                        'theme-claude-rgb-dark', 'theme-claude-rgb-light', 'theme-claude-ansi',
+                        'theme-shimmer-rgb', 'theme-shimmer-rgb-light', 'theme-shimmer-ansi',
+                        'theme-hex',
+                        'theme-brief-rgb-dark', 'theme-brief-rgb-light', 'theme-brief-ansi',
+                      ] },
+  'geo-neutralize': { desc: 'Neutralize geo/proxy steganography in system prompt',
+                      patchIds: ['geo-stego-date', 'geo-detect-probe', 'geo-apostrophe-stego'] },
+  'cyber-risk':     { desc: 'Remove CYBER_RISK_INSTRUCTION from system prompt',
+                      patchIds: ['remove-cyber-risk'] },
+  'url-restriction':{ desc: 'Remove URL generation restriction from system prompt',
+                      patchIds: ['remove-url-restriction'] },
+  'cautious-actions':{ desc: 'Remove "Executing actions with care" section from system prompt',
+                      patchIds: ['remove-cautious-actions'] },
+  'not-logged-in':  { desc: 'Remove "Not logged in" notice',
+                      patchIds: ['remove-not-logged-in'] },
+  'message-filter': { desc: 'Bypass non-ant message/attachment filters',
+                      patchIds: ['attachment-filter-bypass', 'message-filter-legacy', 'message-filter-s8'] },
+};
+
+// Runtime gate expression baked into every toggleable replacer. Evaluates
+// to true unless feature-gates.cjs explicitly computed false for this id.
+const gate = (id) => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
+
 // ─── Regex-based patches (version-agnostic) ──────────────
 
 const patches = [
   {
+    id: 'user-type-ant',
     name: 'USER_TYPE → ant',
     pattern: /function ([\w$]+)\(\)\{return"external"\}/g,
     replacer: (m, fn) => `function ${fn}(){return"ant"}`,
@@ -31,11 +95,13 @@ const patches = [
     //   function fv(){return Bun.isStandaloneExecutable===!0}        ≤v2.1.235
     //   function kw(){return typeof Bun<"u"&&Bun.isStandaloneExecutable===!0}  v2.1.236+
     // Match both via an optional `typeof Bun<"u"&&` prefix.
+    id: 'bun-standalone-executable',
     name: 'Bun.isStandaloneExecutable → true',
     pattern: /function ([\w$]+)\(\)\{return (?:typeof Bun<"u"&&)?Bun\.isStandaloneExecutable===!0\}/g,
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
+    id: 'growthbook-env-overrides',
     name: 'GrowthBook env overrides',
     pattern: /function ([\w$]+)\(\)\{if\(!([\w$]+)\)=!0;return ([\w$]+)\}/g,
     replacer: (m, fn, flag, val) =>
@@ -52,6 +118,7 @@ const patches = [
     //   getEnvironmentOverrides(){if(this.environmentOverridesParsed)return this.environmentOverrides;return this.environmentOverridesParsed=!0,this.environmentOverrides;let e=this.deps.readEnvironmentOverrides();if(!e)return this.environmentOverrides;try{this.environmentOverrides=Ce(e),p(`GrowthBook: Using env var overrides for ${...}`)}catch{p(`GrowthBook: Failed to parse CLAUDE_INTERNAL_FC_OVERRIDES: ${e}`,...)}return this.environmentOverrides}
     // Patch removes the short-circuit second return so the body reaches the
     // env-var read. Cross-version: match the lazy-parse idiom (flag=!0,value).
+    id: 'growthbook-env-overrides-graph',
     name: 'GrowthBook env overrides (graph dead-code fix)',
     pattern: /return this\.environmentOverridesParsed=!0,this\.environmentOverrides;(?=let e=this\.deps\.readEnvironmentOverrides\(\);)/g,
     replacer: () => '',
@@ -59,6 +126,7 @@ const patches = [
     optional: true,
   },
   {
+    id: 'growthbook-config-overrides',
     name: 'GrowthBook config overrides',
     pattern: /function ([\w$]+)\(\)\{return\}(function)/g,
     replacer: (m, fn, next) =>
@@ -71,9 +139,11 @@ const patches = [
     },
   },
   {
+    id: 'agent-teams',
+    toggleable: true,
     name: 'Agent Teams always enabled',
     pattern: /function ([\w$]+)\(\)\{if\(![\w$]+\(process\.env\.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS\)&&![\w$]+\(\)\)return!1;if\(![\w$]+\("tengu_amber_flint",!0\)\)return!1;return!0\}/g,
-    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    replacer: (m, fn) => `function ${fn}(){if(${gate('agent-teams')})return!0;` + m.slice(`function ${fn}(){`.length, -1) + `}`,
   },
   {
     // v2.1.245+ Agent Teams gate became an exported module in its own chunk
@@ -82,20 +152,26 @@ const patches = [
     //   function s(){if(!e.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS&&!i())return!1;if(!t("tengu_amber_flint",!0))return!1;return!0}
     // Match the flag-gate by the tengu_amber_flint + return!1 shape, tolerant
     // of the identifier set and the argv helper.
+    id: 'agent-teams-graph',
+    toggleable: true,
     name: 'Agent Teams always enabled (graph)',
     pattern: /function ([\w$]+)\(\)\{if\(![\w$]+\.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS&&![\w$]+\(\)\)return!1;if\(![\w$]+\("tengu_amber_flint",!0\)\)return!1;return!0\}/g,
-    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    replacer: (m, fn) => `function ${fn}(){if(${gate('agent-teams-graph')})return!0;` + m.slice(`function ${fn}(){`.length, -1) + `}`,
     optional: true,
   },
   {
+    id: 'computer-use-sub',
+    toggleable: true,
     name: 'Computer Use subscription bypass',
     pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\);return [\w$]+==="max"\|\|[\w$]+==="pro"\}/g,
-    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    replacer: (m, fn) => `function ${fn}(){if(${gate('computer-use-sub')})return!0;` + m.slice(`function ${fn}(){`.length, -1) + `}`,
   },
   {
+    id: 'computer-use-default',
+    toggleable: true,
     name: 'Computer Use default enabled',
     pattern: /([\w$]+=)\{enabled:!1,pixelValidation/g,
-    replacer: (m, prefix) => `${prefix}{enabled:!0,pixelValidation`,
+    replacer: (m, prefix) => `${prefix}{enabled:${gate('computer-use-default')}?!0:!1,pixelValidation`,
   },
   {
     // v2.1.92+ shape: name:"ultraplan",get description(){...},argumentHint:"<prompt>",isEnabled:()=>fnRef()
@@ -103,9 +179,11 @@ const patches = [
     // The middle metadata block changed from a literal description to a getter,
     // and the gate switched from a literal !1 to a GrowthBook-flag-check function call.
     // Match both.
+    id: 'ultraplan',
+    toggleable: true,
     name: 'Ultraplan enable',
-    pattern: /(name:"ultraplan",[\s\S]{1,500}?argumentHint:"<prompt>",isEnabled:\(\)=>)(?:!1|[\w$]+\(\))/g,
-    replacer: (m, prefix) => `${prefix}!0`,
+    pattern: /(name:"ultraplan",[\s\S]{1,500}?argumentHint:"<prompt>",isEnabled:\(\)=>)(!1|[\w$]+\(\))/g,
+    replacer: (m, prefix, orig) => `${prefix}(${gate('ultraplan')}?!0:${orig})`,
     sentinel: 'name:"ultraplan"',
   },
   {
@@ -118,29 +196,37 @@ const patches = [
     //   function rQt(){return Fot()?.enabled===!0&&ru()&&!J6()}
     //   Patch rQt to always return true so ultrareview is unlocked.
     //   Also match the old direct-literal form for <=2.1.213 compat.
+    id: 'ultrareview-gate',
+    toggleable: true,
     name: 'Ultrareview enable (rQt gate)',
     pattern: /function ([\w$]+)\(\)\{return ([\w$]+)\(\)\?\.enabled===!0&&[\w$]+\(\)&&![\w$]+\(\)\}/g,
-    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    replacer: (m, fn) => `function ${fn}(){return ${gate('ultrareview-gate')}?!0:(${m.slice(`function ${fn}(){return `.length, -1)})}`,
     optional: true,
   },
   {
+    id: 'ultrareview-direct',
+    toggleable: true,
     name: 'Ultrareview enable (direct literal, <=2.1.213)',
     pattern: /function ([\w$]+)\(\)\{return ([\w$]+)\("tengu_review_bughunter_config",null\)(\?\.enabled===!0)?\}/g,
-    replacer: (m, fn, getter, gate) =>
-      gate
-        ? `function ${fn}(){return!0}`
-        : `function ${fn}(){let _r=${getter}("tengu_review_bughunter_config",null);return _r?{..._r,enabled:!0}:{enabled:!0}}`,
+    replacer: (m, fn, getter, hasGate) =>
+      hasGate
+        ? `function ${fn}(){if(${gate('ultrareview-direct')})return!0;` + m.slice(`function ${fn}(){`.length, -1) + `}`
+        : `function ${fn}(){let _r=${getter}("tengu_review_bughunter_config",null);return ${gate('ultrareview-direct')}?_r?{..._r,enabled:!0}:{enabled:!0}:_r}`,
     optional: true,
   },
   {
+    id: 'computer-use-gate',
+    toggleable: true,
     name: 'Computer Use gate bypass',
     pattern: /function ([\w$]+)\(\)\{return [\w$]+\(\)&&[\w$]+\(\)\.enabled\}/g,
-    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    replacer: (m, fn) => `function ${fn}(){return ${gate('computer-use-gate')}?!0:(${m.slice(`function ${fn}(){return `.length, -1)})}`,
   },
   {
+    id: 'voice-mode',
+    toggleable: true,
     name: 'Voice Mode enable (bypass GrowthBook kill)',
     pattern: /function ([\w$]+)\(\)\{return![\w$]+\("tengu_amber_quartz_disabled",!1\)\}/g,
-    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    replacer: (m, fn) => `function ${fn}(){return ${gate('voice-mode')}?!0:(${m.slice(`function ${fn}(){return`.length, -1)})}`,
   },
   {
     // v2.1.158+: provider gate refactored into helper function:
@@ -150,9 +236,11 @@ const patches = [
     //   (the next 300 chars must contain !=="firstParty") and not unrelated
     //   if(!fn(x))return!1; patterns elsewhere.
     //   Not present in ≤v2.1.149 (provider gate was inline).
+    id: 'auto-mode-helper-gate',
+    toggleable: true,
     name: 'Auto-mode unlock for third-party API (provider helper gate)',
     pattern: /if\(!([\w$]+)\(([\w$]+)\)\)return!1;(?=(?:(?!function\s).){0,300}!=="firstParty")/g,
-    replacer: () => '',
+    replacer: (m) => `if(globalThis.__clawgodPatches?.[${JSON.stringify('auto-mode-helper-gate')}]===!1&&` + m.slice(3, -10) + `)return!1;`,
     optional: true,
   },
   {
@@ -161,9 +249,11 @@ const patches = [
     // v2.1.214+: if(r!=="firstParty"&&!d6(r)&&(t==="claude-opus-4-6"||…))return!1;
     //   "anthropicAws" replaced by helper function !fn(var).
     //   Match both: \1!=="anthropicAws" OR !fn(\1).
+    id: 'auto-mode-inline-gate',
+    toggleable: true,
     name: 'Auto-mode unlock for third-party API (inline gate)',
     pattern: /if\(([\w$]+)!=="firstParty"&&(?:\1!=="anthropicAws"|![\w$]+\(\1\))[^;]*\)return!1;/g,
-    replacer: () => '',
+    replacer: (m) => `if(globalThis.__clawgodPatches?.[${JSON.stringify('auto-mode-inline-gate')}]===!1&&` + m.slice(3, -10) + `)return!1;`,
     sentinel: '!=="firstParty"&&',
   },
   {
@@ -193,6 +283,7 @@ const patches = [
     //   .action(n(async(u)=>{…}))          v2.1.238+
     // Match any one-letter minified helper via `identifier(` rather than
     // hardcoding a name, so a future rename keeps matching.
+    id: 'update-redirect',
     name: "Redirect `claude update` to clawgod self-update",
     pattern: /(\.command\("update"\)\.alias\("upgrade"\)\.description\("[^"]+"\))(\.action\((?:[A-Za-z_$][\w$]*\()?async\([^)]*\)=>\{)/g,
     replacer: (m, chain, action) => {
@@ -231,64 +322,89 @@ const patches = [
   // ── 绿色主题 (patch 标识) ──
 
   {
+    id: 'theme-logo-rgb',
+    toggleable: true,
     name: 'Logo + brand color → green (RGB dark)',
-    pattern: /clawd_body:"rgb\(215,119,87\)"/g,
-    replacer: () => 'clawd_body:"rgb(34,197,94)"',
+    pattern: /(clawd_body:)"rgb\(215,119,87\)"/g,
+    replacer: (m, key) => `${key}${gate('theme-logo-rgb')}?"rgb(34,197,94)":"rgb(215,119,87)"`,
   },
   {
+    id: 'theme-logo-ansi',
+    toggleable: true,
     name: 'Logo + brand color → green (ANSI)',
-    pattern: /clawd_body:"ansi:redBright"/g,
-    replacer: () => 'clawd_body:"ansi:greenBright"',
+    pattern: /(clawd_body:)"ansi:redBright"/g,
+    replacer: (m, key) => `${key}${gate('theme-logo-ansi')}?"ansi:greenBright":"ansi:redBright"`,
   },
   {
+    id: 'theme-claude-rgb-dark',
+    toggleable: true,
     name: 'Theme claude color → green (dark)',
-    pattern: /claude:"rgb\(215,119,87\)"/g,
-    replacer: () => 'claude:"rgb(34,197,94)"',
+    pattern: /(claude:)"rgb\(215,119,87\)"/g,
+    replacer: (m, key) => `${key}${gate('theme-claude-rgb-dark')}?"rgb(34,197,94)":"rgb(215,119,87)"`,
   },
   {
+    id: 'theme-claude-rgb-light',
+    toggleable: true,
     name: 'Theme claude color → green (light)',
-    pattern: /claude:"rgb\(255,153,51\)"/g,
-    replacer: () => 'claude:"rgb(22,163,74)"',
+    pattern: /(claude:)"rgb\(255,153,51\)"/g,
+    replacer: (m, key) => `${key}${gate('theme-claude-rgb-light')}?"rgb(22,163,74)":"rgb(255,153,51)"`,
   },
   {
+    id: 'theme-shimmer-rgb',
+    toggleable: true,
     name: 'Shimmer → green',
-    pattern: /claudeShimmer:"rgb\(2[34]5,1[45]9,1[12]7\)"/g,
-    replacer: () => 'claudeShimmer:"rgb(74,222,128)"',
+    pattern: /(claudeShimmer:)"rgb\(2[34]5,1[45]9,1[12]7\)"/g,
+    replacer: (m, key) => `${key}${gate('theme-shimmer-rgb')}?"rgb(74,222,128)":${m.slice(key.length)}`,
   },
   {
+    id: 'theme-shimmer-rgb-light',
+    toggleable: true,
     name: 'Shimmer light → green',
-    pattern: /claudeShimmer:"rgb\(255,183,101\)"/g,
-    replacer: () => 'claudeShimmer:"rgb(34,197,94)"',
+    pattern: /(claudeShimmer:)"rgb\(255,183,101\)"/g,
+    replacer: (m, key) => `${key}${gate('theme-shimmer-rgb-light')}?"rgb(34,197,94)":"rgb(255,183,101)"`,
   },
   {
+    id: 'theme-hex',
+    toggleable: true,
     name: 'Hex brand color → green',
-    pattern: /#da7756/g,
-    replacer: () => '#22c55e',
+    pattern: /"#da7756"/g,
+    // OFF branch single-quoted so a re-run of the patcher cannot match it again
+    replacer: () => `${gate('theme-hex')}?"#22c55e":'#da7756'`,
   },
   {
+    id: 'theme-claude-ansi',
+    toggleable: true,
     name: 'Theme claude color → green (ANSI)',
-    pattern: /claude:"ansi:redBright"/g,
-    replacer: () => 'claude:"ansi:greenBright"',
+    pattern: /(claude:)"ansi:redBright"/g,
+    replacer: (m, key) => `${key}${gate('theme-claude-ansi')}?"ansi:greenBright":"ansi:redBright"`,
   },
   {
+    id: 'theme-shimmer-ansi',
+    toggleable: true,
     name: 'Shimmer → green (ANSI)',
-    pattern: /claudeShimmer:"ansi:yellowBright"/g,
-    replacer: () => 'claudeShimmer:"ansi:greenBright"',
+    pattern: /(claudeShimmer:)"ansi:yellowBright"/g,
+    replacer: (m, key) => `${key}${gate('theme-shimmer-ansi')}?"ansi:greenBright":"ansi:yellowBright"`,
   },
   {
+    id: 'theme-brief-rgb-dark',
+    toggleable: true,
     name: 'Brief label claude color → green (RGB dark)',
-    pattern: /briefLabelClaude:"rgb\(215,119,87\)"/g,
-    replacer: () => 'briefLabelClaude:"rgb(34,197,94)"',
+    pattern: /(briefLabelClaude:)"rgb\(215,119,87\)"/g,
+    replacer: (m, key) => `${key}${gate('theme-brief-rgb-dark')}?"rgb(34,197,94)":"rgb(215,119,87)"`,
   },
   {
+    id: 'theme-brief-rgb-light',
+    toggleable: true,
     name: 'Brief label claude color → green (RGB light)',
-    pattern: /briefLabelClaude:"rgb\(255,153,51\)"/g,
-    replacer: () => 'briefLabelClaude:"rgb(22,163,74)"',
+    pattern: /(briefLabelClaude:)"rgb\(255,153,51\)"/g,
+    replacer: (m, key) => `${key}${gate('theme-brief-rgb-light')}?"rgb(22,163,74)":"rgb(255,153,51)"`,
   },
   {
+    id: 'theme-brief-ansi',
+    toggleable: true,
     name: 'Brief label claude color → green (ANSI)',
-    pattern: /briefLabelClaude:"ansi:redBright"/g,
-    replacer: () => 'briefLabelClaude:"ansi:greenBright"',
+    pattern: /(briefLabelClaude:)"ansi:redBright"/g,
+    replacer: (m, key) => `${key}${gate('theme-brief-ansi')}?"ansi:greenBright":"ansi:redBright"`,
   },
 
   // ── macOS Cmd+V 图片粘贴修复 ──
@@ -308,6 +424,7 @@ const patches = [
     //
     // Patched:
     //   if(L.length===0&&R.length>0){at("input_image_drag","read_failed");if(d&&D.length===0){m();return}D.push(...R)}
+    id: 'macos-cmdv-image-paste',
     name: 'macOS Cmd+V image paste fallback to clipboard read',
     pattern: /if\(([\w$]+)\.length===0&&([\w$]+)\.length>0\)([\w$]+)\("input_image_drag","read_failed"\),([\w$]+)\.push\(\.\.\.\2\)/g,
     replacer: (m, L, R, at, D) =>
@@ -332,6 +449,7 @@ const patches = [
     // Patch: replace ct("true") with ct(process.env.EMBEDDED_SEARCH_TOOLS)
     // so the guard reads the actual env var (unset → falsy → return false →
     // Glob/Grep tools available).
+    id: 'restore-search-tools',
     name: 'Restore Glob/Grep tools (un-inline EMBEDDED_SEARCH_TOOLS)',
     pattern: /function ([\w$]+)\(\)\{if\(!([\w$]+)\("true"\)\)return!1;if\([\w$]+\(\)\)return!1;return process\.env\.CLAUDE_CODE_ENTRYPOINT!=="local-agent"\}/g,
     replacer: (m, fn, envCheck) =>
@@ -354,6 +472,8 @@ const patches = [
     //
     // Patch: replace entire function body to always use ASCII apostrophe
     // and pass through the date string unmodified.
+    id: 'geo-stego-date',
+    toggleable: true,
     name: 'Neutralize geo-steganography in date string (qla)',
     pattern: /function ([\w$]+)\([\w$]+\)\{let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+\([\w$]+\?\.[\w$]+\?\?!1,[\w$]+\?\.[\w$]+\?\?!1\),[\w$]+=[\w$]+\?\.[\w$]+\?[\w$]+\.replaceAll\("-","\/"\):[\w$]+;return`Today\$\{[\w$]+\}s date is \$\{[\w$]+\}\.`\}/g,
     replacer: (m) => {
@@ -361,7 +481,7 @@ const patches = [
       const fnMatch = m.match(/^function ([\w$]+)\(([\w$]+)\)/);
       if (!fnMatch) return m;
       const [, fn, param] = fnMatch;
-      return `function ${fn}(${param}){return\`Today's date is \${${param}}.\`}`;
+      return `function ${fn}(${param}){if(${gate('geo-stego-date')})return\`Today's date is \${${param}}.\`;` + m.slice(fnMatch[0].length, -1) + `}`;
     },
     sentinel: 'replaceAll("-","/")',
   },
@@ -377,11 +497,13 @@ const patches = [
     //     return{known:edp().some(...),labKw:tdp().some(...),cnTZ:n,host:e}}
     //
     // Patch: always return null (same as firstParty path), disabling all detection.
+    id: 'geo-detect-probe',
+    toggleable: true,
     name: 'Neutralize geo-detection probe (rdp)',
     pattern: /function ([\w$]+)\(\)\{if\([\w$]+\(\)\)return null;let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+\(\),[\w$]+=[\w$]+==="Asia\/Shanghai"\|\|[\w$]+==="Asia\/Urumqi"[\s\S]*?\}\}/g,
     replacer: (m) => {
       const fn = m.match(/^function ([\w$]+)/)[1];
-      return `function ${fn}(){return null}`;
+      return `function ${fn}(){if(${gate('geo-detect-probe')})return null;` + m.slice(`function ${fn}(){`.length, -1) + `}`;
     },
     sentinel: 'Asia/Shanghai',
   },
@@ -402,6 +524,8 @@ const patches = [
     // the bundle depending on bundler version. Match both forms.
     // Defense-in-depth — qla patch above already bypasses the call to odp,
     // but if qla's shape changes this keeps odp harmless.
+    id: 'geo-apostrophe-stego',
+    toggleable: true,
     name: 'Neutralize apostrophe steganography (odp)',
     pattern: new RegExp(
       'function ([\\w$]+)\\(([\\w$]+),([\\w$]+)\\)\\{' +
@@ -412,8 +536,8 @@ const patches = [
       'g'
     ),
     replacer: (m) => {
-      const fn = m.match(/^function ([\w$]+)/)[1];
-      return `function ${fn}(e,t){return"'"}`;
+      const [_, fn, params] = m.match(/^function ([\w$]+)\(([^)]*)\)/);
+      return `function ${fn}(${params}){if(${gate('geo-apostrophe-stego')})return"'";` + m.slice(m.indexOf('{') + 1, -1) + `}`;
     },
     optional: true,  // defense-in-depth; rdp→null already neutralizes the stego channel
   },
@@ -421,29 +545,44 @@ const patches = [
   // ── 限制移除 ──
 
   {
+    id: 'remove-cyber-risk',
+    toggleable: true,
     name: 'Remove CYBER_RISK_INSTRUCTION',
-    pattern: /([\w$]+)="IMPORTANT: Assist with authorized security testing[^"]*"/g,
-    replacer: (m, varName) => `${varName}=""`,
+    pattern: /([\w$]+)="(IMPORTANT: Assist with authorized security testing[^"]*)"/g,
+    replacer: (m, varName, orig) => `${varName}=${gate('remove-cyber-risk')}?"":${JSON.stringify(orig)}`,
     sentinel: 'Assist with authorized security testing',
   },
   {
+    id: 'remove-url-restriction',
+    toggleable: true,
     name: 'Remove URL generation restriction',
-    pattern: /\n\$\{[\w$]+\}\nIMPORTANT: You must NEVER generate or guess URLs[^.]*\. You may use URLs provided by the user in their messages or local files\./g,
-    replacer: () => '',
+    pattern: /(\n\$\{[\w$]+\})(\nIMPORTANT: You must NEVER generate or guess URLs[^.]*\. You may use URLs provided by the user in their messages or local files\.)/g,
+    // Gate the whole original region (incl. the live \n${var} prefix) inside a nested
+    // template: OFF renders it byte-identically (var stays interpolated), ON drops
+    // the entire span like the old delete-only patch did.
+    // ON drops the whole region (old delete behavior); OFF renders it back with the
+    // live ${var} interpolation preserved and the sentence emitted as an escaped
+    // single-quoted string so a re-run of the patcher cannot match it again.
+    replacer: (m, prefix, sentence) => `\${${gate('remove-url-restriction')}?"":\`${prefix}\`+'${sentence.replace('\n', '\\n')}'}`,
     sentinel: 'IMPORTANT: You must NEVER generate or guess URLs',
   },
   {
+    id: 'remove-cautious-actions',
+    toggleable: true,
     name: 'Remove cautious actions section',
     // v2.1.88-~v2.1.122: function GSY(){return`# Executing actions...`}
     // v2.1.123+: function _j3(H){if(LE8(H)==="compact")return`# Executing...short`;return`# Executing...long`}
     pattern: /function ([\w$]+)\(([\w$]*)\)\{(?:if\([\s\S]{1,200}?\)return`# Executing actions with care\n\n[\s\S]*?`;)?return`# Executing actions with care\n\n[\s\S]*?`\}/g,
-    replacer: (m, fn, arg) => `function ${fn}(${arg}){return\`\`}`,
+    replacer: (m, fn, arg) => `function ${fn}(${arg}){if(${gate('remove-cautious-actions')})return\`\`;` + m.slice(`function ${fn}(${arg}){`.length, -1) + `}`,
     sentinel: '# Executing actions with care',
   },
   {
+    id: 'remove-not-logged-in',
+    toggleable: true,
     name: 'Remove "Not logged in" notice',
-    pattern: /Not logged in\. Run [\w ]+ to authenticate\./g,
-    replacer: () => '',
+    pattern: /"(Not logged in\. Run [\w ]+ to authenticate\.)"/g,
+    // OFF branch single-quoted so a re-run of the patcher cannot match it again
+    replacer: (m, orig) => `(${gate('remove-not-logged-in')}?"":'${orig}')`,
     optional: true,
   },
 
@@ -454,24 +593,37 @@ const patches = [
     // v2.1.92+        : fn()!=="ant"&&paY.has(q.attachment.type) — paY is an empty Set
     //                    in v2.1.110, so this filter is effectively a no-op; patch anyway
     //                    to guard against paY being populated in future versions.
+    id: 'attachment-filter-bypass',
+    toggleable: true,
     name: 'Attachment filter bypass',
     pattern: /([\w$]+)\(\)!=="ant"(&&[\w$]+\.has\([\w$]+\.attachment\.type\)|\)\{if\([\w$]+\.attachment\.type==="hook_additional_context")/g,
-    replacer: (m) => m.replace(/([\w$]+)\(\)!=="ant"/, 'false'),
+    // alt1 (infix): X()!=="ant"&&Set.has(...)  -> (G?!1:X()!=="ant")&&Set.has(...)
+    // alt2 (guard): X()!=="ant"){if(...)        -> (G?!1:X()!=="ant")){if(...)
+    //   alt2's ')' closes the enclosing if( — the paren-wrapped replacement
+    //   needs its own closer, hence the doubled ')' in that branch.
+    replacer: (m) => m.replace(/([\w$]+)\(\)!=="ant"(&&|\))/, (cm, f, sep) =>
+      sep === '&&'
+        ? `(${gate('attachment-filter-bypass')}?!1:${f}()!=="ant")&&`
+        : `(${gate('attachment-filter-bypass')}?!1:${f}()!=="ant"))`),
     optional: true,  // filter may be removed entirely in future versions
   },
   {
     // Legacy (≤v2.1.91) ternary form: fn()!=="ant"?tRY(_,sRY(K)):K
+    id: 'message-filter-legacy',
+    toggleable: true,
     name: 'Message list filter bypass (legacy ternary)',
     pattern: /([\w$]+)\(\)!=="ant"\?([\w$]+)\(([\w$]+),([\w$]+)\(([\w$]+)\)\):([\w$]+)/g,
-    replacer: (m, fn, tRY, underscore, sRY, K, fallback) => fallback,
+    replacer: (m, fn, tRY, underscore, sRY, K, fallback) => m.replace(/^([\w$]+)\(\)!=="ant"\?/, (g, f) => `(${gate('message-filter-legacy')}?!1:${f}()!=="ant")?`),
     optional: true,  // removed in v2.1.92+
   },
   {
     // v2.1.92+ (s_8): if(fn()==="ant")return _;let z=...;return FaY(_,z)
     // Flip the guard so non-ant users also return the pre-filtered list.
+    id: 'message-filter-s8',
+    toggleable: true,
     name: 'Message list filter bypass (s_8 form)',
     pattern: /if\(([\w$]+)\(\)==="ant"\)return ([\w$]+);let ([\w$]+)=([\w$]+) instanceof Set\?\4:([\w$]+)\(\4\);return ([\w$]+)\(\2,\3\)/g,
-    replacer: (m, fn, ret) => `return ${ret}`,
+    replacer: (m, fn, ret) => m.replace(/if\(([\w$]+)\(\)==="ant"\)/, (g, f) => `if(${gate('message-filter-s8')}||${f}()==="ant")`),
     optional: true,  // legacy versions had a ternary instead
   },
   {
@@ -495,6 +647,7 @@ const patches = [
     // bare "claude.exe":"claude" string also appears in u18() (basename
     // helper) but never inside a path.join(), so this regex hits exactly the
     // shell-integration generator and nothing else.
+    id: 'shell-integration-orig',
     name: 'Shell integration → claude.orig (multitool dispatch fix)',
     pattern: /([\w$]+\.join\([\w$]+\(\),[\w$]+\?)"claude\.exe":"claude"(\))/g,
     replacer: (m, prefix, suffix) => `${prefix}"claude.orig.exe":"claude.orig"${suffix}`,
@@ -510,6 +663,67 @@ const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const verify = args.includes('--verify');
 const revert = args.includes('--revert');
+const dumpFeatures = args.includes('--dump-features');
+
+// Build-time export: `patch.mjs --dump-features` prints the inverted
+// registry (patch id → owning feature ids) as JSON and exits. build.js
+// consumes this to weave the META constant into the wrapper sources, so
+// FEATURES stays the single source of truth (no hand-maintained copy).
+// Runs BEFORE any file is touched — safe to invoke anywhere.
+if (dumpFeatures) {
+  const meta = {};
+  for (const [fid, def] of Object.entries(FEATURES)) {
+    for (const pid of def.patchIds) {
+      (meta[pid] ??= []).push(fid);
+    }
+  }
+  console.log(JSON.stringify(meta));
+  process.exit(0);
+}
+
+// ── Registry self-check (authoring guardrail, fails fast) ──
+// Enforces the classification contract on the static data above, so a
+// metadata mistake cannot ship silently:
+//   1. every patch has a unique id
+//   2. FEATURES only references existing ids, and only toggleable ones
+//      (a core patch being referenced is a contradiction — core is not
+//      toggleable by definition)
+//   3. a toggleable patch must be referenced by at least one feature
+//      (otherwise the id was mistyped, or the author forgot to register it
+//      and the toggle would silently never map to anything)
+// Any violation aborts the patcher before a single file is touched — the
+// same code path runs in install.sh / install.ps1 and CI, so authoring
+// errors surface at build time, not as a user's broken toggle.
+(function validateRegistry() {
+  const errs = [];
+  const byId = new Map();
+  for (const p of patches) {
+    if (!p.id) errs.push(`patch without id: ${p.name}`);
+    else if (byId.has(p.id)) errs.push(`duplicate patch id: ${p.id}`);
+    else byId.set(p.id, p);
+  }
+  for (const [fid, def] of Object.entries(FEATURES)) {
+    for (const pid of def.patchIds) {
+      const p = byId.get(pid);
+      if (!p) { errs.push(`feature '${fid}' references unknown patch id '${pid}'`); continue; }
+      if (!p.toggleable) errs.push(`feature '${fid}' references non-toggleable patch '${pid}'`);
+    }
+  }
+  for (const p of patches) {
+    const referenced = Object.values(FEATURES).some((f) => f.patchIds.includes(p.id));
+    if (p.toggleable && !referenced) errs.push(`toggleable patch '${p.id}' is referenced by no feature`);
+  }
+  if (errs.length > 0) {
+    console.error('❌ Feature registry invalid:');
+    for (const e of errs) console.error('   -', e);
+    process.exit(1);
+  }
+})();
+
+// The patcher itself is unconditionally stateless w.r.t. feature config:
+// every patch always bakes in. Whether a toggleable patch's effect is ON
+// is decided at claude launch (wrapper loads patches.json +
+// CLAWGOD_FEATURE_* env) — never here.
 
 const GRAPH_DIR = join(__dirname, 'bunfs');
 const isGraph = existsSync(GRAPH_DIR);

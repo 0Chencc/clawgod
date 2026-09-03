@@ -70,7 +70,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -336,6 +336,13 @@ cat > "$CLAWGOD_DIR/openai-proxy.cjs" << 'PROXY_EOF'
 PROXY_EOF
 info "OpenAI-compatible proxy created (openai-proxy.cjs)"
 
+# ─── Write patch feature gates ────────────────────────────────
+
+cat > "$CLAWGOD_DIR/feature-gates.cjs" << 'GATES_EOF'
+{{CLAWGOD:feature-gates.cjs}}
+GATES_EOF
+info "Patch feature gates created (feature-gates.cjs)"
+
 # ─── Write wrapper (cli.cjs, runs under Bun) ──────────────────
 
 cat > "$CLAWGOD_DIR/cli.cjs" << 'WRAPPER_EOF'
@@ -370,6 +377,13 @@ if [ ! -f "$CLAWGOD_DIR/features.json" ]; then
 {{CLAWGOD:features.json}}
 FEATURES_EOF
   info "Default features.json created"
+fi
+
+# Patch feature toggles (user-editable): {"<feature>": false}, absent = on.
+# Written only when missing — the user's choices survive updates/uninstalls.
+if [ ! -f "$CLAWGOD_DIR/patches.json" ]; then
+  printf '{}\n' > "$CLAWGOD_DIR/patches.json"
+  info "Default patches.json created (all features on)"
 fi
 
 # ─── Lean mode: optimize ~/.claude/settings.json ─────

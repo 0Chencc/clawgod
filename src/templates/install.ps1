@@ -73,7 +73,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -432,6 +432,13 @@ if (-not $ProxySource) {
 $ProxySource | Set-Content (Join-Path $ClawDir "openai-proxy.cjs") -Encoding UTF8
 Write-OK "OpenAI-compatible proxy created (openai-proxy.cjs)"
 
+# --- Write patch feature gates -----------------------------------------
+
+@'
+{{CLAWGOD:feature-gates.cjs}}
+'@ | Set-Content (Join-Path $ClawDir "feature-gates.cjs") -Encoding UTF8
+Write-OK "Patch feature gates created (feature-gates.cjs)"
+
 # --- Write wrapper (cli.cjs, runs under Bun) --------------------------
 
 @'
@@ -468,6 +475,14 @@ if (-not (Test-Path $featuresFile)) {
 '@
     [System.IO.File]::WriteAllText($featuresFile, $featuresJson, (New-Object System.Text.UTF8Encoding $false))
     Write-OK "Default features.json created"
+}
+
+# Patch feature toggles (user-editable): {"<feature>": false}, absent = on.
+# Written only when missing -- the user's choices survive updates/uninstalls.
+$patchesFile = Join-Path $ClawDir "patches.json"
+if (-not (Test-Path $patchesFile)) {
+    [System.IO.File]::WriteAllText($patchesFile, "{}`r`n", (New-Object System.Text.UTF8Encoding $false))
+    Write-OK "Default patches.json created (all features on)"
 }
 
 # --- Lean mode: optimize ~/.claude/settings.json ----------------------

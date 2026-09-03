@@ -7,6 +7,7 @@ const {
   writeFileSync,
 } = require('node:fs');
 const { join } = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const ROOT = __dirname;
 const SOURCE_ROOT = join(ROOT, 'src');
@@ -38,6 +39,32 @@ const compactAndEscapeProxyForPowerShell = (content) => escapeNonAscii(
   compactProxyForPowerShell(content),
 );
 
+// Feature registry compiled into the wrappers. `patch.mjs --dump-features`
+// is the single source of truth (FEATURES in patch.mjs); the wrapper gets a
+// machine-generated META constant (patch id → owning feature ids) that its
+// startup block uses to compute per-patch gates from patches.json +
+// CLAWGOD_FEATURE_* env overrides. Marker line marks the weave point.
+const FEATURES_META_MARKER = '// {{CLAWGOD:FEATURES_META}}';
+
+function featuresMeta() {
+  const result = spawnSync(process.execPath, [join(SOURCE_ROOT, 'shared/patch.mjs'), '--dump-features'], {
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    throw new Error(`patch.mjs --dump-features failed: ${result.stderr}`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+function weaveFeaturesMeta(content) {
+  if (!content.includes(FEATURES_META_MARKER)) {
+    throw new Error(`wrapper source missing ${FEATURES_META_MARKER} marker`);
+  }
+  const meta = featuresMeta();
+  const rendered = `const CLAWGOD_FEATURES_META = ${JSON.stringify(meta, null, 2)};`;
+  return content.replace(FEATURES_META_MARKER, () => rendered);
+}
+
 const TARGETS = [
   {
     name: 'install.sh',
@@ -49,6 +76,7 @@ const TARGETS = [
       'repatch.mjs': ['shared/repatch.mjs', identity],
       'openai-proxy.cjs': ['shared/openai-proxy.cjs', identity],
       'cli.cjs': ['unix/cli.cjs', identity],
+      'feature-gates.cjs': ['shared/feature-gates.cjs', weaveFeaturesMeta],
       'patch.mjs': ['shared/patch.mjs', identity],
       'features.json': ['shared/features.json', identity],
     },
@@ -64,6 +92,7 @@ const TARGETS = [
       'repatch.mjs': ['shared/repatch.mjs', escapeNonAscii],
       'openai-proxy.cjs': ['shared/openai-proxy.cjs', compactAndEscapeProxyForPowerShell],
       'cli.cjs': ['windows/cli.cjs', escapeNonAscii],
+      'feature-gates.cjs': ['shared/feature-gates.cjs', (content) => escapeNonAscii(weaveFeaturesMeta(content))],
       'patch.mjs': ['shared/patch.mjs', escapeNonAscii],
       'features.json': ['shared/features.json', escapeNonAscii],
       'lean-remove.cjs': ['windows/lean-remove.cjs', escapeNonAscii],
