@@ -14,10 +14,12 @@ when either generated installer is missing or differs from its sources.
 
 ## Layout
 
-- `shared/` contains payloads embedded identically in both installers.
-  `feature-gates.cjs` carries a `{{CLAWGOD:FEATURES_META}}` marker that
-  build.js replaces with the inverted FEATURES registry from patch.mjs.
-- `unix/` and `windows/` contain genuinely platform-specific payloads.
+- `shared/` contains payloads embedded identically in both installers,
+  including `cli.cjs` (the launcher/patcher bootstrap shared by Unix and
+  Windows). `feature-gates.cjs` carries a `{{CLAWGOD:FEATURES_META}}` marker
+  that build.js replaces with the inverted FEATURES registry from patch.mjs.
+- `windows/` contains genuinely platform-specific payloads (the PowerShell
+  build applies `escapeNonAscii` per file in build.js).
 - `templates/` contain the shell around those payloads and use
   `{{CLAWGOD:<installed-name>}}` placeholders.
 
