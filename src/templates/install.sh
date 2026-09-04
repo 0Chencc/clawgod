@@ -352,6 +352,13 @@ chmod +x "$CLAWGOD_DIR/cli.cjs"
 echo "$CLAWGOD_SELF_VERSION" > "$CLAWGOD_DIR/.clawgod-version"
 info "Wrapper created (cli.cjs)"
 
+# ─── Write classifier runtime helper ────────────────────
+
+cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
+{{CLAWGOD:runtime-helpers.cjs}}
+CFG_EOF
+info "Classifier runtime helpers created (runtime-helpers.cjs)"
+
 # ─── Write universal patcher ───────────────────────────
 
 cat > "$CLAWGOD_DIR/patch.mjs" << 'PATCHER_EOF'

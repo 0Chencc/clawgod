@@ -51,6 +51,9 @@ jobs:
       - name: Verify generated installers
         run: node build.js --check
 
+      - name: Run patch semantic tests
+        run: node src/shared/patch.test.mjs
+
       - name: Check embedded JavaScript syntax
         shell: bash
         run: |

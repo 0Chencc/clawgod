@@ -1552,11 +1552,53 @@ try {
 // globalThis.__clawgodPatches.
 require('./feature-gates.cjs');
 
+// Runtime helpers shared by injected patches (globalThis.__clawgodHelpers,
+// see runtime-helpers.cjs). cli.original.cjs is a separate module scope, so
+// the patched bundle reaches helpers through globalThis only.
+require('./runtime-helpers.cjs');
+
 require('./cli.original.cjs');
 WRAPPER_EOF
 chmod +x "$CLAWGOD_DIR/cli.cjs"
 echo "$CLAWGOD_SELF_VERSION" > "$CLAWGOD_DIR/.clawgod-version"
 info "Wrapper created (cli.cjs)"
+
+# ─── Write classifier runtime helper ────────────────────
+
+cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
+'use strict';
+// Runtime helpers shared by injected patches, exposed on
+// globalThis.__clawgodHelpers. The patched cli.original.cjs lives in its own
+// module scope, so it reaches these helpers only through globalThis.
+//
+// cli.cjs requires this module once at launch; after that, adding a new
+// helper means editing this single file — no build.js / cli.cjs / template
+// changes. (feature-gates.cjs is a future merge target here.)
+//
+// These are value parsers only: the injected patch code owns its own gating
+// (globalThis.__clawgodPatches?.[...]) and env reads, and feeds the raw
+// value in here for parsing/validation.
+
+// Parses a CLAWGOD_CLASSIFIER_TIMEOUT_MS value to a finite number, or null
+// when it cannot be parsed (missing/blank/non-numeric/Infinity/overflow). The
+// caller decides the fallback: the injected patch code checks for null
+// explicitly and keeps the original formula, while any real number — a
+// legitimate "0" included — is applied as a floor. Returning null (not 0)
+// keeps "0" as a real override and never conflates it with a parse failure.
+function classifierTimeoutFloor(envValue) {
+  if (typeof envValue === 'string' && envValue.trim() === '') return null;
+  const value = Number(envValue);
+  return Number.isFinite(value) ? value : null;
+}
+
+// The runtime container (globalThis.__clawgodHelpers) IS the module's own
+// exports, so a new helper only needs an export line here to be reachable
+// from the patched bundle — no separate registration object. We expose
+// module.exports, not module (the latter carries id/filename/paths metadata).
+module.exports.classifierTimeoutFloor = classifierTimeoutFloor;
+globalThis.__clawgodHelpers = module.exports;
+CFG_EOF
+info "Classifier runtime helpers created (runtime-helpers.cjs)"
 
 # ─── Write universal patcher ───────────────────────────
 
@@ -1800,15 +1842,25 @@ const patches = [
     // CLAWGOD_CLASSIFIER_TIMEOUT_MS is a floor — result becomes
     // max(original formula, override). Original token scaling is kept, but
     // the override is never shrunk below the formula and defeats the 120s
-    // cap when larger. Env read at call time so settings.json `env`
-    // (applied post-init by applyConfigEnvironmentVariables) also reaches
-    // it. Unset → _ctMin=0, max(original,0) ≡ original.
+    // cap when larger. The floor is read in the injected code: it is gated by
+    // this patch's own gate and reads the env at call time (so settings.json
+    // `env`, applied post-init by applyConfigEnvironmentVariables, also
+    // reaches it), then feeds the raw value to the pure value parser
+    // globalThis.__clawgodHelpers.classifierTimeoutFloor (runtime-helpers.cjs).
+    // The helper returns the finite number or null for
+    // missing/blank/non-numeric/Infinity. The injected code checks for null
+    // explicitly: null (or gate off) keeps the original formula, while any
+    // real number — including a legitimate "0" — flows into Math.max as a
+    // real floor. No 0 sentinel: 0 is never used to mean "no override".
+    // __clawgodHelpers is guaranteed to be set (cli.cjs requires
+    // runtime-helpers.cjs at launch), so we access it directly — no optional
+    // chaining.
     id: 'classifier-timeout',
     toggleable: true,
     name: 'Auto-mode classifier timeout override (CLAWGOD_CLASSIFIER_TIMEOUT_MS)',
     pattern: /function ([\w$]+)\(([\w$]+)\)\{let ([\w$]+)=Math\.max\(0,Math\.ceil\(\(\2-50000\)\/50000\)\);return Math\.min\(([\w$]+),([\w$]+)\+\3\*1e4\)\}/g,
     replacer: (m, fn, arg, step, cap, base) =>
-      `function ${fn}(${arg}){let _ctMin=(${gate('classifier-timeout')}?Number(process.env.CLAWGOD_CLASSIFIER_TIMEOUT_MS):0)||0;let ${step}=Math.max(0,Math.ceil((${arg}-50000)/50000));return Math.max(Math.min(${cap},${base}+${step}*1e4),_ctMin)}`,
+      `function ${fn}(${arg}){let _ct=${gate('classifier-timeout')}?globalThis.__clawgodHelpers.classifierTimeoutFloor(process.env.CLAWGOD_CLASSIFIER_TIMEOUT_MS):null;let ${step}=Math.max(0,Math.ceil((${arg}-50000)/50000));let _r=Math.min(${cap},${base}+${step}*1e4);return _ct===null?_r:Math.max(_r,_ct)}`,
     unique: true,
     optional: true,  // formula introduced in v2.1.251; older bundles predate it
   },

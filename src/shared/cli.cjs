@@ -238,4 +238,9 @@ try {
 // globalThis.__clawgodPatches.
 require('./feature-gates.cjs');
 
+// Runtime helpers shared by injected patches (globalThis.__clawgodHelpers,
+// see runtime-helpers.cjs). cli.original.cjs is a separate module scope, so
+// the patched bundle reaches helpers through globalThis only.
+require('./runtime-helpers.cjs');
+
 require('./cli.original.cjs');

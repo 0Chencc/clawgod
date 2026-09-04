@@ -12,6 +12,18 @@ The build must remain byte-for-byte reproducible. CI runs `--check` and fails
 when either generated installer is missing or differs from its sources.
 `.gitattributes` pins the complete build graph to LF on every platform.
 
+## Testing
+
+`src/shared/patch.test.mjs` holds unit tests for the classifier-timeout
+helper in `runtime-helpers.cjs` (a pure function, so no Claude bundle
+needed). Run locally with Node:
+
+```bash
+node src/shared/patch.test.mjs
+```
+
+CI runs it in the `build-sources` job (`compat-daily.yml`).
+
 ## Layout
 
 - `shared/` contains payloads embedded identically in both installers,

@@ -237,15 +237,25 @@ const patches = [
     // CLAWGOD_CLASSIFIER_TIMEOUT_MS is a floor — result becomes
     // max(original formula, override). Original token scaling is kept, but
     // the override is never shrunk below the formula and defeats the 120s
-    // cap when larger. Env read at call time so settings.json `env`
-    // (applied post-init by applyConfigEnvironmentVariables) also reaches
-    // it. Unset → _ctMin=0, max(original,0) ≡ original.
+    // cap when larger. The floor is read in the injected code: it is gated by
+    // this patch's own gate and reads the env at call time (so settings.json
+    // `env`, applied post-init by applyConfigEnvironmentVariables, also
+    // reaches it), then feeds the raw value to the pure value parser
+    // globalThis.__clawgodHelpers.classifierTimeoutFloor (runtime-helpers.cjs).
+    // The helper returns the finite number or null for
+    // missing/blank/non-numeric/Infinity. The injected code checks for null
+    // explicitly: null (or gate off) keeps the original formula, while any
+    // real number — including a legitimate "0" — flows into Math.max as a
+    // real floor. No 0 sentinel: 0 is never used to mean "no override".
+    // __clawgodHelpers is guaranteed to be set (cli.cjs requires
+    // runtime-helpers.cjs at launch), so we access it directly — no optional
+    // chaining.
     id: 'classifier-timeout',
     toggleable: true,
     name: 'Auto-mode classifier timeout override (CLAWGOD_CLASSIFIER_TIMEOUT_MS)',
     pattern: /function ([\w$]+)\(([\w$]+)\)\{let ([\w$]+)=Math\.max\(0,Math\.ceil\(\(\2-50000\)\/50000\)\);return Math\.min\(([\w$]+),([\w$]+)\+\3\*1e4\)\}/g,
     replacer: (m, fn, arg, step, cap, base) =>
-      `function ${fn}(${arg}){let _ctMin=(${gate('classifier-timeout')}?Number(process.env.CLAWGOD_CLASSIFIER_TIMEOUT_MS):0)||0;let ${step}=Math.max(0,Math.ceil((${arg}-50000)/50000));return Math.max(Math.min(${cap},${base}+${step}*1e4),_ctMin)}`,
+      `function ${fn}(${arg}){let _ct=${gate('classifier-timeout')}?globalThis.__clawgodHelpers.classifierTimeoutFloor(process.env.CLAWGOD_CLASSIFIER_TIMEOUT_MS):null;let ${step}=Math.max(0,Math.ceil((${arg}-50000)/50000));let _r=Math.min(${cap},${base}+${step}*1e4);return _ct===null?_r:Math.max(_r,_ct)}`,
     unique: true,
     optional: true,  // formula introduced in v2.1.251; older bundles predate it
   },
