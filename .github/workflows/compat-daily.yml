@@ -1,6 +1,6 @@
 name: Compat Daily
 
-# Runs the Linux and Windows installers end-to-end against the current latest
+# Runs the Linux, macOS, and Windows installers end-to-end against the current latest
 # Claude Code from npm. Catches upstream compatibility changes as well as
 # platform-specific extraction, path-rewriting, and launcher regressions.
 
@@ -63,10 +63,27 @@ jobs:
           done
 
   smoke:
-    # Linux remains the badge-publishing compatibility baseline. Windows has a
-    # separate job below because its PE extraction and path semantics differ.
-    runs-on: ubuntu-latest
+    # Share Unix installer checks across Linux x64 and macOS ARM64. Linux
+    # remains the badge-publishing baseline; Windows uses a separate job below.
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux smoke (x64)
+            os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+          - name: macOS smoke (ARM64)
+            os: macos-26
+            platform: macos
+            arch: arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      SMOKE_PLATFORM: ${{ matrix.platform }}
+      SMOKE_RUNNER: ${{ matrix.os }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
 
@@ -87,7 +104,7 @@ jobs:
           bun-version: canary
 
       - name: Cache ~/.npm (claude-code-<plat> tarball)
-        # install.sh runs `npm pack @anthropic-ai/claude-code-linux-x64@latest`,
+        # install.sh runs `npm pack` for the detected OS and architecture,
         # which lands the ~80 MB tarball in ~/.npm/_cacache. Reusing the cache
         # lets npm short-circuit the download when @latest hasn't bumped since
         # the last run; it still re-validates registry metadata, so we never
@@ -95,14 +112,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-claude-${{ runner.os }}-${{ github.run_id }}
+          key: npm-claude-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: |
-            npm-claude-${{ runner.os }}-
+            npm-claude-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Install ripgrep
+      - name: Install ripgrep (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo apt-get update -qq && sudo apt-get install -y ripgrep
+          rg --version | head -1
+
+      - name: Install ripgrep (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            brew install ripgrep
+          fi
           rg --version | head -1
 
       - name: Add ~/.local/bin to PATH (clawgod launcher install target)
@@ -115,6 +142,10 @@ jobs:
           bun --version
           node --version
           uname -a
+          [[ "$(uname -m)" == "$EXPECTED_ARCH" ]] || { echo "::error::unexpected runner architecture"; exit 1; }
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            sw_vers
+          fi
 
       - name: Run install.sh (npm-fallback path)
         # No official Claude binary pre-installed → install.sh exercises
@@ -260,7 +291,7 @@ jobs:
         # `badges` branch (force-pushed; that branch holds nothing else and is
         # never read as source). README links to it via shields.io endpoint.
         # PRs from forks can't push, so skip them.
-        if: success() && github.event_name != 'pull_request'
+        if: success() && matrix.platform == 'linux' && github.event_name != 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -296,7 +327,10 @@ jobs:
             const claudeVersion = fs.existsSync(stamp)
               ? fs.readFileSync(stamp, 'utf8').trim()
               : 'unknown';
-            const title = `compat-daily: broke (claude ${claudeVersion})`;
+            const prefix = process.env.SMOKE_PLATFORM === 'linux'
+              ? 'compat-daily'
+              : `compat-daily/${process.env.SMOKE_PLATFORM}`;
+            const title = `${prefix}: broke (claude ${claudeVersion})`;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const { data: open } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -320,7 +354,7 @@ jobs:
                 title,
                 labels: ['compat-broken', 'bug'],
                 body: [
-                  `Daily compatibility run failed on \`ubuntu-latest\`.`,
+                  `Daily compatibility run failed on \`${process.env.SMOKE_RUNNER}\`.`,
                   ``,
                   `- Claude binary: \`${claudeVersion}\``,
                   `- Run: ${runUrl}`,
