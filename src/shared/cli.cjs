@@ -6,11 +6,19 @@ const { spawnSync } = require('child_process');
 
 const clawgodDir = join(homedir(), '.clawgod');
 
-// Note: drift detection removed — see install.sh wrapper for full notes.
-// `versions/` either doesn't exist (Windows) or doesn't grow on healthy
-// clawgod installs (we patch out `claude update`), so the check could only
-// retract a fresh install.ps1 / install.sh upgrade. `claude update` →
-// install.sh redirect is the single source of truth for version upgrades.
+// Note: there used to be a "drift detection" block here that scanned
+// ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
+// Removed because:
+//   1. Windows users don't have a `versions/` directory at all (Anthropic's
+//      Windows install doesn't follow that convention).
+//   2. We patch out `claude update` (it would otherwise overwrite the bun
+//      runtime under our launcher), so `versions/` no longer auto-grows
+//      on a healthy clawgod install.
+// In practice the block was reading a directory that never changes, but
+// could *retract* a fresher version that install.sh just pulled from npm
+// registry — putting users into a re-patch loop. Upgrades now go through
+// the patched `claude update` → install.sh redirect, which always pulls
+// the latest from npm.
 
 // One-time migration: earlier wrapper versions set CLAUDE_CONFIG_DIR=~/.clawgod,
 // which made Claude Code read/write ~/.clawgod/.claude.json instead of the
@@ -71,7 +79,7 @@ if (_proxyTypes[config.type]) {
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= '1';
     process.on('exit', function () { try { _proxy.stop(); } catch {} });
     process.stderr.write('[clawgod] OpenAI-compat proxy on port ' + _proxy.port + ' (type: ' + config.type + ')\n');
-    config = { ...defaultConfig };
+    config = { ...defaultConfig };  // prevent fallthrough to apiKey/baseURL injection below
   } else {
     process.stderr.write('[clawgod] Warning: type=' + config.type + ' but no API key found\n');
   }
@@ -101,6 +109,9 @@ if (hasProviderApiKey) {
 // Users can force re-enable with CLAUDE_CODE_ATTRIBUTION_HEADER=1 if needed.
 if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
   process.env.CLAUDE_CODE_ATTRIBUTION_HEADER ??= '0';
+  // Third-party proxies (headroom, etc.) often require remote control.
+  // Lean mode sets disableRemoteControl:true in settings.json — undo it
+  // when the user is routing through a non-Anthropic endpoint.
   try {
     const _rcSettings = join(homedir(), '.claude', 'settings.json');
     if (existsSync(_rcSettings)) {
@@ -118,6 +129,8 @@ if (config.timeoutMs) {
 }
 process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
 process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
+// Use system ripgrep (extracted vendor rg path was build-time-baked; system
+// rg is the most reliable fallback under Bun runtime).
 process.env.USE_BUILTIN_RIPGREP ??= '1';
 
 const featuresFile = join(providerDir, 'features.json');
@@ -133,7 +146,7 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 // locate the native binary for shell wrappers (find→bfs, grep→ugrep, rg) and
 // subprocess spawning. Under Bun, process.execPath returns the Bun runtime
 // path, not the Claude native binary. The launcher script sets
-// CLAUDE_CODE_EXECPATH to claude.orig (the real binary) before exec'ing
+// CLAUDE_CODE_EXECPATH to claude.orig (the real ELF binary) before exec'ing
 // Bun, so we use that as the source of truth.  See issue #100.
 const _realExecPath = process.env.CLAUDE_CODE_EXECPATH || process.execPath;
 if (_realExecPath !== process.execPath) {
@@ -176,11 +189,13 @@ if (process.argv.includes('--lean-off') || process.argv.includes('--lean-on') ||
       try { _s = JSON.parse(readFileSync(_leanSettings, 'utf8')); } catch {}
       let _ch = false;
       for (const _k of _flags) { if (!(_k in _s)) { _s[_k] = true; _ch = true; } }
+      // If downgrading from max to on, remove max-only keys
       if (!_isMax) { for (const _k of _maxFlags) { if (_k in _s) { delete _s[_k]; _ch = true; } } }
       if (!_s.permissions) _s.permissions = {};
       if (!Array.isArray(_s.permissions.deny)) _s.permissions.deny = [];
       const _ex = new Set(_s.permissions.deny);
       for (const _t of _deny) { if (!_ex.has(_t)) { _s.permissions.deny.push(_t); _ch = true; } }
+      // If downgrading from max to on, remove max-only deny entries
       if (!_isMax) {
         const _maxSet = new Set(_maxDeny);
         const _before = _s.permissions.deny.length;
@@ -222,5 +237,10 @@ try {
 // must run before the patched cli loads so gated patches see
 // globalThis.__clawgodPatches.
 require('./feature-gates.cjs');
+
+// Runtime helpers shared by injected patches (globalThis.__clawgodHelpers,
+// see runtime-helpers.cjs). cli.original.cjs is a separate module scope, so
+// the patched bundle reaches helpers through globalThis only.
+require('./runtime-helpers.cjs');
 
 require('./cli.original.cjs');

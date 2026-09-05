@@ -1198,6 +1198,15 @@ const CLAWGOD_FEATURES_META = {
   "auto-mode-inline-gate": [
     "auto-mode"
   ],
+  "classifier-timeout": [
+    "classifier-tuning"
+  ],
+  "classifier-model": [
+    "classifier-tuning"
+  ],
+  "classifier-retries": [
+    "classifier-tuning"
+  ],
   "theme-logo-rgb": [
     "theme"
   ],
@@ -1543,11 +1552,53 @@ try {
 // globalThis.__clawgodPatches.
 require('./feature-gates.cjs');
 
+// Runtime helpers shared by injected patches (globalThis.__clawgodHelpers,
+// see runtime-helpers.cjs). cli.original.cjs is a separate module scope, so
+// the patched bundle reaches helpers through globalThis only.
+require('./runtime-helpers.cjs');
+
 require('./cli.original.cjs');
 WRAPPER_EOF
 chmod +x "$CLAWGOD_DIR/cli.cjs"
 echo "$CLAWGOD_SELF_VERSION" > "$CLAWGOD_DIR/.clawgod-version"
 info "Wrapper created (cli.cjs)"
+
+# ─── Write classifier runtime helper ────────────────────
+
+cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
+'use strict';
+// Runtime helpers shared by injected patches, exposed on
+// globalThis.__clawgodHelpers. The patched cli.original.cjs lives in its own
+// module scope, so it reaches these helpers only through globalThis.
+//
+// cli.cjs requires this module once at launch; after that, adding a new
+// helper means editing this single file — no build.js / cli.cjs / template
+// changes. (feature-gates.cjs is a future merge target here.)
+//
+// These are value parsers only: the injected patch code owns its own gating
+// (globalThis.__clawgodPatches?.[...]) and env reads, and feeds the raw
+// value in here for parsing/validation.
+
+// Parses a CLAWGOD_CLASSIFIER_TIMEOUT_MS value to a finite number, or null
+// when it cannot be parsed (missing/blank/non-numeric/Infinity/overflow). The
+// caller decides the fallback: the injected patch code checks for null
+// explicitly and keeps the original formula, while any real number — a
+// legitimate "0" included — is applied as a floor. Returning null (not 0)
+// keeps "0" as a real override and never conflates it with a parse failure.
+function classifierTimeoutFloor(envValue) {
+  if (typeof envValue === 'string' && envValue.trim() === '') return null;
+  const value = Number(envValue);
+  return Number.isFinite(value) ? value : null;
+}
+
+// The runtime container (globalThis.__clawgodHelpers) IS the module's own
+// exports, so a new helper only needs an export line here to be reachable
+// from the patched bundle — no separate registration object. We expose
+// module.exports, not module (the latter carries id/filename/paths metadata).
+module.exports.classifierTimeoutFloor = classifierTimeoutFloor;
+globalThis.__clawgodHelpers = module.exports;
+CFG_EOF
+info "Classifier runtime helpers created (runtime-helpers.cjs)"
 
 # ─── Write universal patcher ───────────────────────────
 
@@ -1601,6 +1652,8 @@ const FEATURES = {
                       patchIds: ['voice-mode'] },
   'auto-mode':      { desc: 'Auto-mode model selection on third-party APIs',
                       patchIds: ['auto-mode-helper-gate', 'auto-mode-inline-gate'] },
+  'classifier-tuning': { desc: 'Auto-mode classifier overrides (timeout/model/retries env vars)',
+                      patchIds: ['classifier-timeout', 'classifier-model', 'classifier-retries'] },
   'theme':          { desc: 'Green brand/logo color scheme',
                       patchIds: [
                         'theme-logo-rgb', 'theme-logo-ansi',
@@ -1781,6 +1834,71 @@ const patches = [
     name: 'Voice Mode enable (bypass GrowthBook kill)',
     pattern: /function ([\w$]+)\(\)\{return![\w$]+\("tengu_amber_quartz_disabled",!1\)\}/g,
     replacer: (m, fn) => `function ${fn}(){return ${gate('voice-mode')}?!0:(${m.slice(`function ${fn}(){return`.length, -1)})}`,
+  },
+  {
+    // Auto-mode classifier stage1 (xml_s1) deadline formula (v2.1.251+):
+    //   function d7t(e){let n=Math.max(0,Math.ceil((e-50000)/50000));return Math.min(YY,eQe+n*1e4)}
+    // eQe=60000 base, YY=120000 cap (identifiers drift). Patch:
+    // CLAWGOD_CLASSIFIER_TIMEOUT_MS is a floor — result becomes
+    // max(original formula, override). Original token scaling is kept, but
+    // the override is never shrunk below the formula and defeats the 120s
+    // cap when larger. The floor is read in the injected code: it is gated by
+    // this patch's own gate and reads the env at call time (so settings.json
+    // `env`, applied post-init by applyConfigEnvironmentVariables, also
+    // reaches it), then feeds the raw value to the pure value parser
+    // globalThis.__clawgodHelpers.classifierTimeoutFloor (runtime-helpers.cjs).
+    // The helper returns the finite number or null for
+    // missing/blank/non-numeric/Infinity. The injected code checks for null
+    // explicitly: null (or gate off) keeps the original formula, while any
+    // real number — including a legitimate "0" — flows into Math.max as a
+    // real floor. No 0 sentinel: 0 is never used to mean "no override".
+    // __clawgodHelpers is guaranteed to be set (cli.cjs requires
+    // runtime-helpers.cjs at launch), so we access it directly — no optional
+    // chaining.
+    id: 'classifier-timeout',
+    toggleable: true,
+    name: 'Auto-mode classifier timeout override (CLAWGOD_CLASSIFIER_TIMEOUT_MS)',
+    pattern: /function ([\w$]+)\(([\w$]+)\)\{let ([\w$]+)=Math\.max\(0,Math\.ceil\(\(\2-50000\)\/50000\)\);return Math\.min\(([\w$]+),([\w$]+)\+\3\*1e4\)\}/g,
+    replacer: (m, fn, arg, step, cap, base) =>
+      `function ${fn}(${arg}){let _ct=${gate('classifier-timeout')}?globalThis.__clawgodHelpers.classifierTimeoutFloor(process.env.CLAWGOD_CLASSIFIER_TIMEOUT_MS):null;let ${step}=Math.max(0,Math.ceil((${arg}-50000)/50000));let _r=Math.min(${cap},${base}+${step}*1e4);return _ct===null?_r:Math.max(_r,_ct)}`,
+    unique: true,
+    optional: true,  // formula introduced in v2.1.251; older bundles predate it
+  },
+  {
+    // Auto-mode classifier model resolution. v2.1.220+:
+    //   function X(){let e=at(),n=Ih(),r=usr(n?.modelByMainModel,{vet:...})??avt(n?.model,"model");
+    //     if(r)return{value:r,src:"gb"}; ... return{value:...,src:"default"}}
+    // Returns {value,src}. GB-configured models go through a policy vet
+    // (Z8t) that drops unknown model names, so third-party gateway models
+    // cannot ride the GB override path. Patch: CLAWGOD_CLASSIFIER_MODEL
+    // short-circuits the whole chain (returns before GB config / probe /
+    // main-model mapping). Unset → original behavior.
+    id: 'classifier-model',
+    toggleable: true,
+    name: 'Auto-mode classifier model override (CLAWGOD_CLASSIFIER_MODEL)',
+    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+\(.*?\),[\w$]+=[\w$]+\([\w$]+\?\.modelByMainModel,\{vet:/g,
+    replacer: (m, fn) =>
+      `function ${fn}(){let _cm=process.env.CLAWGOD_CLASSIFIER_MODEL?.trim();if(_cm&&${gate('classifier-model')})return{value:_cm,src:"default"};` + m.slice(m.indexOf('{') + 1),
+    unique: true,
+    optional: true,  // v2.1.220+
+  },
+  {
+    // Auto-mode classifier maxRetries default (v2.1.220+):
+    //   function X(){let n=Ih()?.maxRetries;return typeof n==="number"&&
+    //     Number.isInteger(n)&&n>=0?{value:n,src:"gb"}:{value:s4,src:"default"}}
+    // s4 = the maxRetries constant (4) declared near the timing constants;
+    // it also feeds stage1 ceilingMs = max(F,(s4+1)*base). Patch:
+    // CLAWGOD_CLASSIFIER_RETRIES overrides the default before the GB
+    // lookup (same integer ≥0 validation; blank/invalid falls through,
+    // matching unset).
+    id: 'classifier-retries',
+    toggleable: true,
+    name: 'Auto-mode classifier retries override (CLAWGOD_CLASSIFIER_RETRIES)',
+    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\([^)]*\)\?\.maxRetries;return typeof [\w$]+==="number"&&Number\.isInteger\([\w$]+\)&&[\w$]+>=0\?{value:[\w$]+,src:"gb"}:{value:([\w$]+),src:"default"\}\}/g,
+    replacer: (m, fn) =>
+      `function ${fn}(){let _cr=process.env.CLAWGOD_CLASSIFIER_RETRIES?.trim();if(${gate('classifier-retries')}&&_cr!==undefined&&_cr!==""&&Number.isInteger(+_cr)&&+_cr>=0)return{value:+_cr,src:"default"};` + m.slice(m.indexOf('{') + 1),
+    unique: true,
+    optional: true,  // v2.1.220+; ≤v2.1.143 uses a plain constant
   },
   {
     // v2.1.158+: provider gate refactored into helper function:

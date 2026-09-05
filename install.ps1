@@ -1335,6 +1335,15 @@ const CLAWGOD_FEATURES_META = {
   "auto-mode-inline-gate": [
     "auto-mode"
   ],
+  "classifier-timeout": [
+    "classifier-tuning"
+  ],
+  "classifier-model": [
+    "classifier-tuning"
+  ],
+  "classifier-retries": [
+    "classifier-tuning"
+  ],
   "theme-logo-rgb": [
     "theme"
   ],
@@ -1448,11 +1457,19 @@ const { spawnSync } = require('child_process');
 
 const clawgodDir = join(homedir(), '.clawgod');
 
-// Note: drift detection removed \u2014 see install.sh wrapper for full notes.
-// `versions/` either doesn't exist (Windows) or doesn't grow on healthy
-// clawgod installs (we patch out `claude update`), so the check could only
-// retract a fresh install.ps1 / install.sh upgrade. `claude update` \u2192
-// install.sh redirect is the single source of truth for version upgrades.
+// Note: there used to be a "drift detection" block here that scanned
+// ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
+// Removed because:
+//   1. Windows users don't have a `versions/` directory at all (Anthropic's
+//      Windows install doesn't follow that convention).
+//   2. We patch out `claude update` (it would otherwise overwrite the bun
+//      runtime under our launcher), so `versions/` no longer auto-grows
+//      on a healthy clawgod install.
+// In practice the block was reading a directory that never changes, but
+// could *retract* a fresher version that install.sh just pulled from npm
+// registry \u2014 putting users into a re-patch loop. Upgrades now go through
+// the patched `claude update` \u2192 install.sh redirect, which always pulls
+// the latest from npm.
 
 // One-time migration: earlier wrapper versions set CLAUDE_CONFIG_DIR=~/.clawgod,
 // which made Claude Code read/write ~/.clawgod/.claude.json instead of the
@@ -1513,7 +1530,7 @@ if (_proxyTypes[config.type]) {
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= '1';
     process.on('exit', function () { try { _proxy.stop(); } catch {} });
     process.stderr.write('[clawgod] OpenAI-compat proxy on port ' + _proxy.port + ' (type: ' + config.type + ')\n');
-    config = { ...defaultConfig };
+    config = { ...defaultConfig };  // prevent fallthrough to apiKey/baseURL injection below
   } else {
     process.stderr.write('[clawgod] Warning: type=' + config.type + ' but no API key found\n');
   }
@@ -1543,6 +1560,9 @@ if (hasProviderApiKey) {
 // Users can force re-enable with CLAUDE_CODE_ATTRIBUTION_HEADER=1 if needed.
 if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
   process.env.CLAUDE_CODE_ATTRIBUTION_HEADER ??= '0';
+  // Third-party proxies (headroom, etc.) often require remote control.
+  // Lean mode sets disableRemoteControl:true in settings.json \u2014 undo it
+  // when the user is routing through a non-Anthropic endpoint.
   try {
     const _rcSettings = join(homedir(), '.claude', 'settings.json');
     if (existsSync(_rcSettings)) {
@@ -1560,6 +1580,8 @@ if (config.timeoutMs) {
 }
 process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
 process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
+// Use system ripgrep (extracted vendor rg path was build-time-baked; system
+// rg is the most reliable fallback under Bun runtime).
 process.env.USE_BUILTIN_RIPGREP ??= '1';
 
 const featuresFile = join(providerDir, 'features.json');
@@ -1575,7 +1597,7 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 // locate the native binary for shell wrappers (find\u2192bfs, grep\u2192ugrep, rg) and
 // subprocess spawning. Under Bun, process.execPath returns the Bun runtime
 // path, not the Claude native binary. The launcher script sets
-// CLAUDE_CODE_EXECPATH to claude.orig (the real binary) before exec'ing
+// CLAUDE_CODE_EXECPATH to claude.orig (the real ELF binary) before exec'ing
 // Bun, so we use that as the source of truth.  See issue #100.
 const _realExecPath = process.env.CLAUDE_CODE_EXECPATH || process.execPath;
 if (_realExecPath !== process.execPath) {
@@ -1618,11 +1640,13 @@ if (process.argv.includes('--lean-off') || process.argv.includes('--lean-on') ||
       try { _s = JSON.parse(readFileSync(_leanSettings, 'utf8')); } catch {}
       let _ch = false;
       for (const _k of _flags) { if (!(_k in _s)) { _s[_k] = true; _ch = true; } }
+      // If downgrading from max to on, remove max-only keys
       if (!_isMax) { for (const _k of _maxFlags) { if (_k in _s) { delete _s[_k]; _ch = true; } } }
       if (!_s.permissions) _s.permissions = {};
       if (!Array.isArray(_s.permissions.deny)) _s.permissions.deny = [];
       const _ex = new Set(_s.permissions.deny);
       for (const _t of _deny) { if (!_ex.has(_t)) { _s.permissions.deny.push(_t); _ch = true; } }
+      // If downgrading from max to on, remove max-only deny entries
       if (!_isMax) {
         const _maxSet = new Set(_maxDeny);
         const _before = _s.permissions.deny.length;
@@ -1665,10 +1689,52 @@ try {
 // globalThis.__clawgodPatches.
 require('./feature-gates.cjs');
 
+// Runtime helpers shared by injected patches (globalThis.__clawgodHelpers,
+// see runtime-helpers.cjs). cli.original.cjs is a separate module scope, so
+// the patched bundle reaches helpers through globalThis only.
+require('./runtime-helpers.cjs');
+
 require('./cli.original.cjs');
 '@ | Set-Content (Join-Path $ClawDir "cli.cjs") -Encoding UTF8
 Set-Content (Join-Path $ClawDir ".clawgod-version") $ClawSelfVersion
 Write-OK "Wrapper created (cli.cjs)"
+
+# --- Write classifier runtime helper -----------------------------------
+
+@'
+'use strict';
+// Runtime helpers shared by injected patches, exposed on
+// globalThis.__clawgodHelpers. The patched cli.original.cjs lives in its own
+// module scope, so it reaches these helpers only through globalThis.
+//
+// cli.cjs requires this module once at launch; after that, adding a new
+// helper means editing this single file \u2014 no build.js / cli.cjs / template
+// changes. (feature-gates.cjs is a future merge target here.)
+//
+// These are value parsers only: the injected patch code owns its own gating
+// (globalThis.__clawgodPatches?.[...]) and env reads, and feeds the raw
+// value in here for parsing/validation.
+
+// Parses a CLAWGOD_CLASSIFIER_TIMEOUT_MS value to a finite number, or null
+// when it cannot be parsed (missing/blank/non-numeric/Infinity/overflow). The
+// caller decides the fallback: the injected patch code checks for null
+// explicitly and keeps the original formula, while any real number \u2014 a
+// legitimate "0" included \u2014 is applied as a floor. Returning null (not 0)
+// keeps "0" as a real override and never conflates it with a parse failure.
+function classifierTimeoutFloor(envValue) {
+  if (typeof envValue === 'string' && envValue.trim() === '') return null;
+  const value = Number(envValue);
+  return Number.isFinite(value) ? value : null;
+}
+
+// The runtime container (globalThis.__clawgodHelpers) IS the module's own
+// exports, so a new helper only needs an export line here to be reachable
+// from the patched bundle \u2014 no separate registration object. We expose
+// module.exports, not module (the latter carries id/filename/paths metadata).
+module.exports.classifierTimeoutFloor = classifierTimeoutFloor;
+globalThis.__clawgodHelpers = module.exports;
+'@ | Set-Content (Join-Path $ClawDir "runtime-helpers.cjs") -Encoding UTF8
+Write-OK "Classifier helper created (runtime-helpers.cjs)"
 
 # --- Write universal patcher ------------------------------------------
 # (Same Node.js patcher as bash version -- inline to avoid extra download)
@@ -1723,6 +1789,8 @@ const FEATURES = {
                       patchIds: ['voice-mode'] },
   'auto-mode':      { desc: 'Auto-mode model selection on third-party APIs',
                       patchIds: ['auto-mode-helper-gate', 'auto-mode-inline-gate'] },
+  'classifier-tuning': { desc: 'Auto-mode classifier overrides (timeout/model/retries env vars)',
+                      patchIds: ['classifier-timeout', 'classifier-model', 'classifier-retries'] },
   'theme':          { desc: 'Green brand/logo color scheme',
                       patchIds: [
                         'theme-logo-rgb', 'theme-logo-ansi',
@@ -1903,6 +1971,71 @@ const patches = [
     name: 'Voice Mode enable (bypass GrowthBook kill)',
     pattern: /function ([\w$]+)\(\)\{return![\w$]+\("tengu_amber_quartz_disabled",!1\)\}/g,
     replacer: (m, fn) => `function ${fn}(){return ${gate('voice-mode')}?!0:(${m.slice(`function ${fn}(){return`.length, -1)})}`,
+  },
+  {
+    // Auto-mode classifier stage1 (xml_s1) deadline formula (v2.1.251+):
+    //   function d7t(e){let n=Math.max(0,Math.ceil((e-50000)/50000));return Math.min(YY,eQe+n*1e4)}
+    // eQe=60000 base, YY=120000 cap (identifiers drift). Patch:
+    // CLAWGOD_CLASSIFIER_TIMEOUT_MS is a floor \u2014 result becomes
+    // max(original formula, override). Original token scaling is kept, but
+    // the override is never shrunk below the formula and defeats the 120s
+    // cap when larger. The floor is read in the injected code: it is gated by
+    // this patch's own gate and reads the env at call time (so settings.json
+    // `env`, applied post-init by applyConfigEnvironmentVariables, also
+    // reaches it), then feeds the raw value to the pure value parser
+    // globalThis.__clawgodHelpers.classifierTimeoutFloor (runtime-helpers.cjs).
+    // The helper returns the finite number or null for
+    // missing/blank/non-numeric/Infinity. The injected code checks for null
+    // explicitly: null (or gate off) keeps the original formula, while any
+    // real number \u2014 including a legitimate "0" \u2014 flows into Math.max as a
+    // real floor. No 0 sentinel: 0 is never used to mean "no override".
+    // __clawgodHelpers is guaranteed to be set (cli.cjs requires
+    // runtime-helpers.cjs at launch), so we access it directly \u2014 no optional
+    // chaining.
+    id: 'classifier-timeout',
+    toggleable: true,
+    name: 'Auto-mode classifier timeout override (CLAWGOD_CLASSIFIER_TIMEOUT_MS)',
+    pattern: /function ([\w$]+)\(([\w$]+)\)\{let ([\w$]+)=Math\.max\(0,Math\.ceil\(\(\2-50000\)\/50000\)\);return Math\.min\(([\w$]+),([\w$]+)\+\3\*1e4\)\}/g,
+    replacer: (m, fn, arg, step, cap, base) =>
+      `function ${fn}(${arg}){let _ct=${gate('classifier-timeout')}?globalThis.__clawgodHelpers.classifierTimeoutFloor(process.env.CLAWGOD_CLASSIFIER_TIMEOUT_MS):null;let ${step}=Math.max(0,Math.ceil((${arg}-50000)/50000));let _r=Math.min(${cap},${base}+${step}*1e4);return _ct===null?_r:Math.max(_r,_ct)}`,
+    unique: true,
+    optional: true,  // formula introduced in v2.1.251; older bundles predate it
+  },
+  {
+    // Auto-mode classifier model resolution. v2.1.220+:
+    //   function X(){let e=at(),n=Ih(),r=usr(n?.modelByMainModel,{vet:...})??avt(n?.model,"model");
+    //     if(r)return{value:r,src:"gb"}; ... return{value:...,src:"default"}}
+    // Returns {value,src}. GB-configured models go through a policy vet
+    // (Z8t) that drops unknown model names, so third-party gateway models
+    // cannot ride the GB override path. Patch: CLAWGOD_CLASSIFIER_MODEL
+    // short-circuits the whole chain (returns before GB config / probe /
+    // main-model mapping). Unset \u2192 original behavior.
+    id: 'classifier-model',
+    toggleable: true,
+    name: 'Auto-mode classifier model override (CLAWGOD_CLASSIFIER_MODEL)',
+    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+\(.*?\),[\w$]+=[\w$]+\([\w$]+\?\.modelByMainModel,\{vet:/g,
+    replacer: (m, fn) =>
+      `function ${fn}(){let _cm=process.env.CLAWGOD_CLASSIFIER_MODEL?.trim();if(_cm&&${gate('classifier-model')})return{value:_cm,src:"default"};` + m.slice(m.indexOf('{') + 1),
+    unique: true,
+    optional: true,  // v2.1.220+
+  },
+  {
+    // Auto-mode classifier maxRetries default (v2.1.220+):
+    //   function X(){let n=Ih()?.maxRetries;return typeof n==="number"&&
+    //     Number.isInteger(n)&&n>=0?{value:n,src:"gb"}:{value:s4,src:"default"}}
+    // s4 = the maxRetries constant (4) declared near the timing constants;
+    // it also feeds stage1 ceilingMs = max(F,(s4+1)*base). Patch:
+    // CLAWGOD_CLASSIFIER_RETRIES overrides the default before the GB
+    // lookup (same integer \u22650 validation; blank/invalid falls through,
+    // matching unset).
+    id: 'classifier-retries',
+    toggleable: true,
+    name: 'Auto-mode classifier retries override (CLAWGOD_CLASSIFIER_RETRIES)',
+    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\([^)]*\)\?\.maxRetries;return typeof [\w$]+==="number"&&Number\.isInteger\([\w$]+\)&&[\w$]+>=0\?{value:[\w$]+,src:"gb"}:{value:([\w$]+),src:"default"\}\}/g,
+    replacer: (m, fn) =>
+      `function ${fn}(){let _cr=process.env.CLAWGOD_CLASSIFIER_RETRIES?.trim();if(${gate('classifier-retries')}&&_cr!==undefined&&_cr!==""&&Number.isInteger(+_cr)&&+_cr>=0)return{value:+_cr,src:"default"};` + m.slice(m.indexOf('{') + 1),
+    unique: true,
+    optional: true,  // v2.1.220+; \u2264v2.1.143 uses a plain constant
   },
   {
     // v2.1.158+: provider gate refactored into helper function:

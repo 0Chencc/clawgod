@@ -51,11 +51,14 @@ jobs:
       - name: Verify generated installers
         run: node build.js --check
 
+      - name: Run patch semantic tests
+        run: node src/shared/patch.test.mjs
+
       - name: Check embedded JavaScript syntax
         shell: bash
         run: |
           set -euo pipefail
-          for file in src/shared/*.mjs src/shared/*.cjs src/unix/*.cjs src/windows/*.mjs src/windows/*.cjs; do
+          for file in src/shared/*.mjs src/shared/*.cjs src/windows/*.mjs src/windows/*.cjs; do
             node --check "$file"
           done
 

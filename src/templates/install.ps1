@@ -447,6 +447,13 @@ Write-OK "Patch feature gates created (feature-gates.cjs)"
 Set-Content (Join-Path $ClawDir ".clawgod-version") $ClawSelfVersion
 Write-OK "Wrapper created (cli.cjs)"
 
+# --- Write classifier runtime helper -----------------------------------
+
+@'
+{{CLAWGOD:runtime-helpers.cjs}}
+'@ | Set-Content (Join-Path $ClawDir "runtime-helpers.cjs") -Encoding UTF8
+Write-OK "Classifier helper created (runtime-helpers.cjs)"
+
 # --- Write universal patcher ------------------------------------------
 # (Same Node.js patcher as bash version -- inline to avoid extra download)
 
