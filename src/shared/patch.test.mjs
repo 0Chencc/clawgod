@@ -19,7 +19,7 @@ assert.equal(floor('5000'), 5000);
 assert.equal(floor('-100000'), -100000);
 // "0" is a legitimate override, not a failure
 assert.equal(floor('0'), 0);
-// parse failure → null (caller coalesces with ?? 0 to keep the formula)
+// parse failure → null (caller keeps the original formula)
 assert.equal(floor('Infinity'), null);
 assert.equal(floor('1e309'), null);
 assert.equal(floor('abc'), null);

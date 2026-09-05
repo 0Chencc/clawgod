@@ -73,7 +73,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -1597,7 +1597,7 @@ if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
 // locate the native binary for shell wrappers (find\u2192bfs, grep\u2192ugrep, rg) and
 // subprocess spawning. Under Bun, process.execPath returns the Bun runtime
 // path, not the Claude native binary. The launcher script sets
-// CLAUDE_CODE_EXECPATH to claude.orig (the real ELF binary) before exec'ing
+// CLAUDE_CODE_EXECPATH to claude.orig (the real native binary) before exec'ing
 // Bun, so we use that as the source of truth.  See issue #100.
 const _realExecPath = process.env.CLAUDE_CODE_EXECPATH || process.execPath;
 if (_realExecPath !== process.execPath) {
