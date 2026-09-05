@@ -10,7 +10,6 @@ permissions:
   contents: write
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -26,7 +25,7 @@ jobs:
             artifact: clawgod-import-linux-arm64
             cross: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-26-intel
             artifact: clawgod-import-darwin-x64
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -38,7 +37,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         run: |
@@ -69,7 +68,7 @@ jobs:
           cp "$src" "${{ matrix.artifact }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -80,7 +79,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
 
