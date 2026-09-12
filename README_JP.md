@@ -51,6 +51,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **Computer Use** | Max/Proサブスク不要で画面操作（macOS） |
 | **Auto-mode** | サードパーティ API ユーザー向け auto-mode のロック解除（firstParty 制限を撤去） |
 | **Classifier チューニング** | auto-mode 分類器の調整：タイムアウト / モデル / リトライ回数（`CLAWGOD_CLASSIFIER_TIMEOUT_MS`、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`） |
+| **Dangerous rm bypass** | `bypassPermissions` モードでは rm/rmdir などの危険操作の確認も他の操作と同様にスキップする；auto モードは引き続き分類器で判定 |
 | **Ultraplan** | Claude Code Remote 経由のマルチエージェント計画 |
 | **Ultrareview** | Claude Code Remote 経由の自動バグ検出 |
 
@@ -135,6 +136,7 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 | `voice-mode` | Voice Mode |
 | `auto-mode` | サードパーティ API での auto-mode モデル選択 |
 | `classifier-tuning` | auto-mode 分類器の上書き：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline の下限；未設定=コンテキストにより 60-120s、v2.1.251+ 必要）、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`（未設定=4） |
+| `dangerous-rm-bypass` | `bypassPermissions` モードでは rm/rmdir などの危険操作の確認も他の操作と同様にスキップされる；auto/default モードの挙動は不変（v2.1.251+ 必要） |
 | `theme` | 緑色ブランド/ロゴ配色 |
 | `geo-neutralize` | system prompt の地域/プロキシステガノグラフィ中和 |
 | `cyber-risk` | system prompt から CYBER_RISK_INSTRUCTION を削除 |

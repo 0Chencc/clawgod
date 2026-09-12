@@ -51,6 +51,7 @@ Green logo = patched. Orange logo = original.
 | **Computer Use** | Screen control without Max/Pro subscription (macOS) |
 | **Auto-mode** | Unlocks auto-mode for third-party API users (no firstParty gate) |
 | **Classifier tuning** | Tunable auto-mode classifier: timeout / model / retries (`CLAWGOD_CLASSIFIER_TIMEOUT_MS`, `CLAWGOD_CLASSIFIER_MODEL`, `CLAWGOD_CLASSIFIER_RETRIES`) |
+| **Dangerous rm bypass** | rm/rmdir "Dangerous operation" hard asks are skipped under `bypassPermissions` like other asks; auto mode still routes them through the classifier |
 | **Ultraplan** | Multi-agent planning via Claude Code Remote |
 | **Ultrareview** | Automated bug hunting via Claude Code Remote |
 
@@ -135,6 +136,7 @@ claude.orig         # Original unpatched version (auto-backed-up)
 | `voice-mode` | Voice Mode |
 | `auto-mode` | Auto-mode model selection on third-party APIs |
 | `classifier-tuning` | Auto-mode classifier overrides: `CLAWGOD_CLASSIFIER_TIMEOUT_MS` (min deadline; unset = 60-120s by context, v2.1.251+), `CLAWGOD_CLASSIFIER_MODEL`, `CLAWGOD_CLASSIFIER_RETRIES` (unset = 4) |
+| `dangerous-rm-bypass` | dangerous rm/rmdir confirmations are skipped under `bypassPermissions` like other asks; auto/default modes unchanged (v2.1.251+) |
 | `theme` | Green brand/logo color scheme |
 | `geo-neutralize` | Geo/proxy steganography neutralization in system prompt |
 | `cyber-risk` | Removes CYBER_RISK_INSTRUCTION from system prompt |
