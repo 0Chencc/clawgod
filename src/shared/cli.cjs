@@ -243,4 +243,11 @@ require('./feature-gates.cjs');
 // the patched bundle reaches helpers through globalThis only.
 require('./runtime-helpers.cjs');
 
+// Claude Code 2.1.271+ renders through Bun.ant.CellSegmenter, an
+// Anthropic-private Bun API that stock Bun does not ship. Without it the
+// renderer throws before the first frame and the TUI looks hung, so the shim
+// re-implements the API in JS. No-op when the real API exists or when the
+// bun-ant-shim feature is off (patches.json / CLAWGOD_FEATURE_BUN_ANT_SHIM).
+require('./bun-ant-shim.cjs');
+
 require('./cli.original.cjs');

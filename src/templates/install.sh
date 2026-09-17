@@ -70,7 +70,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -359,6 +359,15 @@ cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
 CFG_EOF
 info "Classifier runtime helpers created (runtime-helpers.cjs)"
 
+# ─── Write Bun.ant runtime shim ────────────────────────
+# Claude Code 2.1.271+ renders through Bun.ant.CellSegmenter, an
+# Anthropic-private Bun API that stock Bun does not ship. cli.cjs loads this
+# shim before the bundle; without it the TUI never paints.
+cat > "$CLAWGOD_DIR/bun-ant-shim.cjs" << 'BUNANT_EOF'
+{{CLAWGOD:bun-ant-shim.cjs}}
+BUNANT_EOF
+info "Bun.ant runtime shim created (bun-ant-shim.cjs)"
+
 # ─── Write universal patcher ───────────────────────────
 
 cat > "$CLAWGOD_DIR/patch.mjs" << 'PATCHER_EOF'
@@ -375,6 +384,17 @@ patch_status=${PIPESTATUS[0]}
 if [ "$patch_status" -ne 0 ]; then
   warn "Patching failed (node exit $patch_status). Installation aborted."
   exit "$patch_status"
+fi
+
+# ─── Report which renderer runtime this Claude Code build needs ────────
+# 2.1.271+ renders through Bun.ant.CellSegmenter, an Anthropic-private Bun
+# API; cli.cjs answers it with bun-ant-shim.cjs. Older builds use plain Bun
+# APIs and ignore the shim. Named explicitly so support threads can tell the
+# two paths apart at a glance.
+if grep -rqs "Bun\.ant\.CellSegmenter" "$CLAWGOD_DIR/bunfs" "$CLAWGOD_DIR/cli.original.cjs" 2>/dev/null; then
+  info "Renderer runtime: Bun.ant.CellSegmenter (Claude >= 2.1.271) — served by bun-ant-shim.cjs"
+else
+  info "Renderer runtime: stock Bun APIs (shim present but unused)"
 fi
 
 # ─── Create default configs ───────────────────────────
