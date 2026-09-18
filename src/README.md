@@ -24,7 +24,18 @@ No Claude bundle is needed. Run locally with Node:
 node src/shared/patch.test.mjs
 ```
 
-CI runs it in the `build-sources` job (`compat-daily.yml`).
+`src/shared/bun-ant-shim.test.mjs` tests the `Bun.ant.CellSegmenter`
+implementation in `bun-ant-shim.cjs`: escape scanning, grapheme widths, style
+runs, hyperlink runs, capacity reporting, and the cell/damage packing that the
+patched bundle reads back. It runs under plain Node as well, because the shim
+falls back to a local width table when `Bun.stringWidth` is unavailable:
+
+```bash
+node src/shared/bun-ant-shim.test.mjs
+```
+
+CI runs both in the `build-sources` job, then loads the shim under Bun in the
+smoke jobs (`compat-daily.yml`).
 
 ## Layout
 
@@ -32,6 +43,9 @@ CI runs it in the `build-sources` job (`compat-daily.yml`).
   including `cli.cjs` (the launcher/patcher bootstrap shared by Unix and
   Windows). `feature-gates.cjs` carries a `{{CLAWGOD:FEATURES_META}}` marker
   that build.js replaces with the inverted FEATURES registry from patch.mjs.
+  `bun-ant-shim.cjs` re-implements the `Bun.ant.CellSegmenter` API that Claude
+  Code 2.1.271+ renders through, since stock Bun has no `Bun.ant` namespace;
+  `cli.cjs` loads it before `cli.original.cjs`.
 - `windows/` contains genuinely platform-specific payloads (the PowerShell
   build applies `escapeNonAscii` per file in build.js).
 - `templates/` contain the shell around those payloads and use

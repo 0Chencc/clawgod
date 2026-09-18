@@ -13,6 +13,12 @@
 // exactly the pre-toggle behavior.
 // {{CLAWGOD:FEATURES_META}}
 
+// Features realized by the wrapper itself rather than by a baked patch id:
+// they read the same patches.json / CLAWGOD_FEATURE_* inputs, but their
+// consumer is cli.cjs (or a module it loads) instead of a runtime gate in
+// cli.original.cjs. Their gate lands in the same __clawgodPatches table.
+var CLAWGOD_RUNTIME_FEATURES = ['bun-ant-shim'];
+
 var clawgodDir = require('path').join(require('os').homedir(), '.clawgod');
 
 var _cfg = {};
@@ -24,10 +30,11 @@ for (var _name in process.env) {
   _cfg[_name.slice('CLAWGOD_FEATURE_'.length).toLowerCase().replace(/_/g, '-')] = _val === 'true';
 }
 
-// META keys are patch ids; a feature id is "known" when some patch lists it.
+// META keys are patch ids; a feature id is "known" when some patch lists it
+// or when the wrapper owns it (CLAWGOD_RUNTIME_FEATURES).
 // Unknown keys are residue (renamed/removed features).
 for (var _k in _cfg) {
-  var _known = false;
+  var _known = CLAWGOD_RUNTIME_FEATURES.indexOf(_k) >= 0;
   for (var _f in CLAWGOD_FEATURES_META) {
     if (CLAWGOD_FEATURES_META[_f].indexOf(_k) >= 0) { _known = true; break; }
   }
@@ -42,5 +49,8 @@ for (var _pid in CLAWGOD_FEATURES_META) {
     if (_cfg[_feats[_j]] !== false) { _on = true; break; }
   }
   _gate[_pid] = _on;
+}
+for (var _rfi = 0; _rfi < CLAWGOD_RUNTIME_FEATURES.length; _rfi++) {
+  _gate[CLAWGOD_RUNTIME_FEATURES[_rfi]] = _cfg[CLAWGOD_RUNTIME_FEATURES[_rfi]] !== false;
 }
 globalThis.__clawgodPatches = _gate;

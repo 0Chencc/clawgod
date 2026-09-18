@@ -73,7 +73,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -454,6 +454,16 @@ Write-OK "Wrapper created (cli.cjs)"
 '@ | Set-Content (Join-Path $ClawDir "runtime-helpers.cjs") -Encoding UTF8
 Write-OK "Classifier helper created (runtime-helpers.cjs)"
 
+# --- Write Bun.ant runtime shim ---------------------------------------
+# Claude Code 2.1.271+ renders through Bun.ant.CellSegmenter, an
+# Anthropic-private Bun API that stock Bun does not ship. cli.cjs loads this
+# shim before the bundle; without it the TUI never paints.
+
+@'
+{{CLAWGOD:bun-ant-shim.cjs}}
+'@ | Set-Content (Join-Path $ClawDir "bun-ant-shim.cjs") -Encoding UTF8
+Write-OK "Bun.ant runtime shim created (bun-ant-shim.cjs)"
+
 # --- Write universal patcher ------------------------------------------
 # (Same Node.js patcher as bash version -- inline to avoid extra download)
 
@@ -471,6 +481,30 @@ node (Join-Path $ClawDir "patch.mjs")
 if ($LASTEXITCODE -ne 0) {
     Write-Err "Patching failed (node exit $LASTEXITCODE). Installation aborted."
     exit $LASTEXITCODE
+}
+
+# --- Report which renderer runtime this Claude Code build needs -------
+# 2.1.271+ renders through Bun.ant.CellSegmenter, an Anthropic-private Bun
+# API; cli.cjs answers it with bun-ant-shim.cjs. Older builds use plain Bun
+# APIs and ignore the shim.
+$needsShim = $false
+$bunfsDir = Join-Path $ClawDir "bunfs"
+$targets = @()
+if (Test-Path $bunfsDir) {
+    $targets += Get-ChildItem -Path $bunfsDir -File -ErrorAction SilentlyContinue
+}
+$entry = Join-Path $ClawDir "cli.original.cjs"
+if (Test-Path $entry) { $targets += Get-Item $entry }
+# Scan every extracted chunk (`.js` and `.mjs`) plus the entry point, matching
+# the POSIX side, so the report fires when any of them references the API.
+$hit = $targets |
+    Select-String -Pattern 'Bun\.ant\.CellSegmenter' -List -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($hit) { $needsShim = $true }
+if ($needsShim) {
+    Write-Dim "Renderer runtime: Bun.ant.CellSegmenter (Claude >= 2.1.271) - served by bun-ant-shim.cjs"
+} else {
+    Write-Dim "Renderer runtime: stock Bun APIs (shim present but unused)"
 }
 
 # --- Create default configs -------------------------------------------

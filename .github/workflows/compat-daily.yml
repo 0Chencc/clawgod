@@ -49,6 +49,11 @@ jobs:
       - name: Run patch semantic tests
         run: node src/shared/patch.test.mjs
 
+      - name: Run Bun.ant shim tests
+        # Claude Code >= 2.1.271 renders through Bun.ant.CellSegmenter, which
+        # stock Bun lacks; the shim answers it. Pure JS, so it runs on Node.
+        run: node src/shared/bun-ant-shim.test.mjs
+
       - name: Check embedded JavaScript syntax
         shell: bash
         run: |
@@ -159,10 +164,58 @@ jobs:
         shell: bash
         run: |
           ls -la "$HOME/.clawgod/" || true
-          for f in cli.cjs cli.original.cjs patch.mjs extract-natives.mjs post-process.mjs feature-gates.cjs runtime-helpers.cjs .source-version; do
+          for f in cli.cjs cli.original.cjs patch.mjs extract-natives.mjs post-process.mjs feature-gates.cjs runtime-helpers.cjs bun-ant-shim.cjs .source-version; do
             test -e "$HOME/.clawgod/$f" || { echo "::error::missing ~/.clawgod/$f"; exit 1; }
           done
           echo "Source: $(cat "$HOME/.clawgod/.source-version")"
+
+      - name: Assert renderer runtime was reported
+        # install.sh names which runtime the TUI renderer needs, so a silent
+        # regression in the detection (or in the shim wiring) is visible.
+        shell: bash
+        run: |
+          grep -q 'Renderer runtime:' /tmp/install.log \
+            || { echo "::error::install.sh did not report the renderer runtime"; exit 1; }
+          grep 'Renderer runtime:' /tmp/install.log
+
+      - name: Verify Bun.ant shim provides the renderer API
+        # Claude Code >= 2.1.271 builds its Ink renderer on Bun.ant.CellSegmenter
+        # and throws on every frame without it, which shows up as a TUI that
+        # never paints. The shim must supply the API under the real Bun runtime
+        # and round-trip a line through segment/paint.
+        shell: bash
+        run: |
+          bun -e '
+            require(require("os").homedir() + "/.clawgod/bun-ant-shim.cjs");
+            if (typeof Bun.ant?.CellSegmenter !== "function") {
+              console.error("::error::bun-ant-shim did not install Bun.ant.CellSegmenter");
+              process.exit(1);
+            }
+            const seg = new Bun.ant.CellSegmenter({
+              ambiguousIsNarrow: true,
+              screen: { widthMask: 3, narrow: 0, wide: 1, spacerTail: 2, spacerHead: 3, emptyCharIndex: 0, spacerCharIndex: 1, emptyWord: 0, tabWidth: 8 },
+              tabWidth: 8,
+            });
+            const cells = new Int32Array(64);
+            const runs = new Int32Array(64);
+            if (seg.segment("ab", cells, runs, false) !== 2) {
+              console.error("::error::segment() mismatch");
+              process.exit(1);
+            }
+            const screen = new Int32Array(64);
+            const charMap = new Int32Array(seg.graphemes.length);
+            if (seg.paint(screen, 8, 0, 0, cells, 2, undefined, charMap, new Int32Array(2)) === 0) {
+              console.error("::error::paint() reported no damage");
+              process.exit(1);
+            }
+            console.log("bun-ant shim: OK");
+          '
+
+      - name: Run Bun.ant shim suite under Bun
+        # The Node build-sources job covers the fallback width path; this run
+        # exercises the production Bun.stringWidth branch of the shim.
+        shell: bash
+        run: bun src/shared/bun-ant-shim.test.mjs
 
       - name: Assert all patches applied (parse install log)
         # patch.mjs prints "Result: A applied, S skipped, F failed".
@@ -466,6 +519,7 @@ jobs:
             'post-process.mjs',
             'feature-gates.cjs',
             'runtime-helpers.cjs',
+            'bun-ant-shim.cjs',
             '.source-version'
           )
           foreach ($name in $required) {
@@ -475,6 +529,53 @@ jobs:
             }
           }
           Write-Host "Source: $((Get-Content (Join-Path $clawDir '.source-version') -Raw).Trim())"
+
+      - name: Assert renderer runtime was reported
+        shell: powershell
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'install-windows.log'
+          $line = Select-String -Path $log -Pattern 'Renderer runtime:' | Select-Object -Last 1
+          if (-not $line) {
+            Write-Error 'install.ps1 did not report the renderer runtime'
+          }
+          Write-Host $line.Line
+
+      - name: Verify Bun.ant shim provides the renderer API
+        # Claude Code >= 2.1.271 throws on every frame without
+        # Bun.ant.CellSegmenter; the shim must supply it under the real Bun.
+        shell: powershell
+        run: |
+          $check = Join-Path $env:RUNNER_TEMP 'bun-ant-shim-check.js'
+          $code = @'
+          require(require("os").homedir() + "/.clawgod/bun-ant-shim.cjs");
+          if (typeof Bun.ant?.CellSegmenter !== "function") {
+            console.error("bun-ant-shim did not install Bun.ant.CellSegmenter");
+            process.exit(1);
+          }
+          const seg = new Bun.ant.CellSegmenter({
+            ambiguousIsNarrow: true,
+            screen: { widthMask: 3, narrow: 0, wide: 1, spacerTail: 2, spacerHead: 3, emptyCharIndex: 0, spacerCharIndex: 1, emptyWord: 0, tabWidth: 8 },
+            tabWidth: 8,
+          });
+          const cells = new Int32Array(64);
+          const runs = new Int32Array(64);
+          if (seg.segment("ab", cells, runs, false) !== 2) {
+            console.error("segment() mismatch");
+            process.exit(1);
+          }
+          const screen = new Int32Array(64);
+          const charMap = new Int32Array(seg.graphemes.length);
+          if (seg.paint(screen, 8, 0, 0, cells, 2, undefined, charMap, new Int32Array(2)) === 0) {
+            console.error("paint() reported no damage");
+            process.exit(1);
+          }
+          console.log("bun-ant shim: OK");
+          '@
+          Set-Content -Path $check -Value $code -Encoding ASCII
+          bun $check
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'bun-ant shim check failed'
+          }
 
       - name: Assert all patches applied
         shell: powershell
