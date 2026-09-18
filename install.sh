@@ -1647,8 +1647,9 @@ cat > "$CLAWGOD_DIR/bun-ant-shim.cjs" << 'BUNANT_EOF'
  *       Negative return = required cell capacity (caller reallocates).
  *   .paint(targetCells, targetWidth, x, y, cells, count, _unused, charMap, words)
  *   .setCell(targetCells, targetWidth, x, y, charId, packedStyle)
- *       Both return end * 2^36 + first * 2^20 + (end - first), the column span
- *       the bundle decodes in I0() to update screen damage.
+ *       Both return end * 2^36 + first * 2^20 + end for a nonempty span.
+ *       I0() decodes the upper fields as damage bounds; j0()/xC() return the
+ *       low field as the absolute ending column for soft-wrap metadata.
  *
  * The `substitute` option (bidi control ranges) needs no handling: the controls
  * are zero width already, which is what the option asks for.
@@ -1673,7 +1674,6 @@ const TAB_FLAG = 256;
 const RUN_SHIFT = 10;
 const DAMAGE_SPAN = 1048576; // 2^20 — field holding the first column
 const DAMAGE_END = 68719476736; // 2^36 — field holding the end column
-const STYLE_TABLE_SOFT_LIMIT = 2048; // mirrors the bundle's vC guard
 
 // SGR attributes that occupy one style slot, as param -> [slot, closeParam].
 // The bundle's style pool only accepts single-parameter codes, so combined
@@ -1881,13 +1881,10 @@ class CellSegmenter {
     const key = codes.length + '|' + codes.join('\u0000') + '|' + closes.join('\u0000');
     let id = this._styleIndex.get(key);
     if (id === undefined) {
-      if (this.sgrKeys.length >= STYLE_TABLE_SOFT_LIMIT) {
-        // The bundle resets the segmenter when the style table grows past its
-        // own vC guard; drop our cache so ids never alias stale styles.
-        this.sgrKeys.length = 1;
-        this.sgrCloseKeys.length = 1;
-        this._styleIndex.clear();
-      }
+      // IDs must remain stable for this instance: the renderer caches their
+      // resolved styles, and the current segment() may already reference them.
+      // The caller owns capacity/generation checks and rebuilds the segmenter
+      // together with its caches; never truncate these tables independently.
       id = this.sgrKeys.length;
       this.sgrKeys.push(codes.join('\u0000'));
       this.sgrCloseKeys.push(closes.join('\u0000'));
@@ -1982,8 +1979,8 @@ class CellSegmenter {
       const run = packed >>> RUN_SHIFT;
       const word = (words ? words[run] : 0) | 0;
       const style = (word >>> STYLE_SHIFT) << STYLE_SHIFT;
-      const linkField = (word >>> LINK_SHIFT) & LINK_MASK;
-      const link = linkField === 0 ? 0 : linkField - 1;
+      // runWords() has already removed its cache's +1 sentinel offset.
+      const link = (word >>> LINK_SHIFT) & LINK_MASK;
       const styleBits = style | (link << LINK_SHIFT);
 
       if ((packed & TAB_FLAG) !== 0) {
@@ -2029,7 +2026,7 @@ class CellSegmenter {
 
 function packDamage(first, end) {
   if (end <= first) return 0;
-  return end * DAMAGE_END + first * DAMAGE_SPAN + (end - first);
+  return end * DAMAGE_END + first * DAMAGE_SPAN + end;
 }
 
 // ─── Installation ───────────────────────────────────────────

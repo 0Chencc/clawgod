@@ -219,6 +219,46 @@ test('segment mutates its output tables in place', () => {
   assert.deepEqual(graphemes.slice(0, 2), [' ', '']);
 });
 
+// The 2.1.274 renderer caches resolved styles by segmenter ID until it
+// rebuilds the segmenter or invalidates the whole cache on a generation change.
+function cachedStyle(segmenter, cache, id) {
+  if (!cache.has(id)) {
+    cache.set(id, [segmenter.sgrKeys[id].split('\u0000'), segmenter.sgrCloseKeys[id].split('\u0000')]);
+  }
+  return cache.get(id);
+}
+
+const colorCode = (i) => `\x1b[38;2;0;${i >>> 8};${i & 255}m`;
+
+test('segment preserves caller-cached style IDs beyond 2048 styles', () => {
+  const segmenter = new CellSegmenter(OPTIONS);
+  const cache = new Map();
+  const cells = makeCells();
+  const runs = makeRuns();
+  for (let i = 0; i < 2050; i++) {
+    segmenter.segment(`${colorCode(i)}X\x1b[0m`, cells, runs, false);
+    assert.deepEqual(cachedStyle(segmenter, cache, runs[0]), [[colorCode(i)], ['\x1b[39m']], `style ${i}`);
+  }
+  segmenter.segment(`${colorCode(0)}X\x1b[0m`, cells, runs, false);
+  assert.deepEqual(cachedStyle(segmenter, cache, runs[0]), [[colorCode(0)], ['\x1b[39m']]);
+  assert.equal(segmenter.sgrKeys.length, 2051, 'old IDs remain valid and reusable');
+});
+
+test('segment retains every style in a long multicolour line across capacity retry', () => {
+  const segmenter = new CellSegmenter(OPTIONS);
+  const count = 2048;
+  const text = Array.from({ length: count }, (_, i) => `${colorCode(i)}X`).join('') + '\x1b[0m';
+  assert.equal(segmenter.segment(text, makeCells(), makeRuns(), false), -count);
+  const cells = makeCells(count * 2);
+  const runs = makeRuns(count * 2);
+  assert.equal(segmenter.segment(text, cells, runs, false), count);
+  const cache = new Map();
+  for (let i = 0; i < count; i++) {
+    const styleId = runs[cellRun(cells[i * 2 + 1]) * 2];
+    assert.deepEqual(cachedStyle(segmenter, cache, styleId), [[colorCode(i)], ['\x1b[39m']], `cell ${i}`);
+  }
+});
+
 // ─── paint / setCell ────────────────────────────────────────
 
 function paintLine(segmenter, text, x, y, columns = 20) {
@@ -245,7 +285,20 @@ test('paint writes narrow glyphs and reports the damaged span', () => {
   assert.equal(screen[((1 * columns + 2) << 1) + 1] & 3, 0, 'narrow cell keeps kind 0');
   assert.equal(Math.floor(damage / DAMAGE_SPAN) % 65536, 2, 'damage starts at x');
   assert.equal(Math.floor(damage / DAMAGE_END), 5, 'damage ends after the last column');
-  assert.equal(damage % DAMAGE_SPAN, 3, 'damage width is the column count');
+  assert.equal(damage % DAMAGE_SPAN, 5, 'low field is the ending column, not the span');
+});
+
+test('paint returns an absolute ending column for indented soft wraps', () => {
+  const segmenter = new CellSegmenter(OPTIONS);
+  const start = 5;
+  const { damage } = paintLine(segmenter, 'abc', start, 0);
+  // The 2.1.274 layout consumes paint's low field as xC()'s return value,
+  // then packs it into the next row's softWrap entry via Qf(end, start).
+  const end = damage % DAMAGE_SPAN;
+  const softWrap = (end << 16) | start;
+  assert.equal(softWrap >>> 16, 8, 'previous row ends at column 8');
+  assert.equal(softWrap & 32767, 5, 'continuation starts at column 5');
+  assert.equal((softWrap >>> 16) - start, 3, 'selection retains all three columns');
 });
 
 test('paint emits a spacer cell for double-width glyphs', () => {
@@ -266,11 +319,11 @@ test('paint decodes the hyperlink id from the words field', () => {
   const charMap = new Int32Array(segmenter.graphemes.length);
   for (let i = 0; i < segmenter.graphemes.length; i++) charMap[i] = 100 + i;
 
-  // runWords() stores poolId + 1 in the word link field (0 means no link), and
-  // paint() writes poolId back into the screen cell's bits 2..16.
+  // runWords() caches poolId + 1 internally, but subtracts that sentinel
+  // offset before packing words. The word already contains the actual pool ID.
   const poolId = 7;
   const words = new Int32Array(4);
-  words[0] = (runs[0] << STYLE_SHIFT) | ((poolId + 1) << LINK_SHIFT);
+  words[0] = (runs[0] << STYLE_SHIFT) | (poolId << LINK_SHIFT);
   const screen = new Int32Array(40);
   segmenter.paint(screen, 20, 0, 0, lineCells, count, undefined, charMap, words);
   assert.equal((screen[1] >>> LINK_SHIFT) & LINK_MASK, poolId, 'screen stores the pool id');
@@ -280,6 +333,32 @@ test('paint decodes the hyperlink id from the words field', () => {
   const screen0 = new Int32Array(40);
   segmenter.paint(screen0, 20, 0, 0, lineCells, count, undefined, charMap, words0);
   assert.equal((screen0[1] >>> LINK_SHIFT) & LINK_MASK, 0, 'zero link field stays zero');
+});
+
+test('paint preserves the first and subsequent OSC-8 hyperlink targets', () => {
+  const segmenter = new CellSegmenter(OPTIONS);
+  const cells = makeCells();
+  const runs = makeRuns();
+  const count = segmenter.segment('\x1b[1m\x1b]8;;https://a.test\x07A\x1b]8;;https://b.test\x07B\x1b]8;;\x07C\x1b[0m', cells, runs, false);
+  const pool = ['', 'https://a.test', 'https://b.test'];
+  const charMap = Int32Array.from(segmenter.graphemes, (_, i) => i);
+  const words = new Int32Array(count);
+  const linkIds = new Map();
+  for (let run = 0; run < count; run++) {
+    const uriId = runs[run * 2 + 1];
+    let poolId = 0;
+    if (uriId !== 0) {
+      // Model the caller's cache sentinel and conversion to a packed word.
+      if (!linkIds.has(uriId)) linkIds.set(uriId, pool.indexOf(segmenter.uris[uriId]) + 1);
+      poolId = linkIds.get(uriId) - 1;
+    }
+    words[run] = (7 << STYLE_SHIFT) | (poolId << LINK_SHIFT);
+  }
+  const screen = new Int32Array(count * 2);
+  segmenter.paint(screen, count, 0, 0, cells, count, undefined, charMap, words);
+  const targets = Array.from({ length: count }, (_, i) => pool[(screen[i * 2 + 1] >>> LINK_SHIFT) & LINK_MASK]);
+  assert.deepEqual(targets, ['https://a.test', 'https://b.test', '']);
+  for (let i = 0; i < count; i++) assert.equal(screen[i * 2 + 1] >>> STYLE_SHIFT, 7, 'style bits survive');
 });
 
 test('paint expands tabs to the next tab stop', () => {
@@ -293,7 +372,7 @@ test('paint expands tabs to the next tab stop', () => {
 test('paint clips writes to the target width and stays damage-free when empty', () => {
   const segmenter = new CellSegmenter(OPTIONS);
   const narrow = paintLine(segmenter, 'abcdef', 2, 0, 4);
-  assert.equal(narrow.damage % DAMAGE_SPAN, 6, 'damage still counts the intended span');
+  assert.equal(narrow.damage % DAMAGE_SPAN, 8, 'low field keeps the intended ending column');
 
   const lineCells = makeCells();
   const count = segmenter.segment('\u0301', lineCells, makeRuns(), false);
@@ -315,7 +394,7 @@ test('setCell writes a single cell and reports a one-column damage rect', () => 
   assert.equal(screen[((1 * 10 + 3) << 1) + 1], packed);
   assert.equal(Math.floor(damage / DAMAGE_SPAN) % 65536, 3);
   assert.equal(Math.floor(damage / DAMAGE_END), 4);
-  assert.equal(damage % DAMAGE_SPAN, 1);
+  assert.equal(damage % DAMAGE_SPAN, 4);
   assert.equal(segmenter.setCell(screen, 10, 42, 0, 1, 1), 0, 'out-of-range writes report nothing');
 });
 
