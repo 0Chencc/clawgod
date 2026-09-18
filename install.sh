@@ -1592,9 +1592,8 @@ cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
 // helper means editing this single file — no build.js / cli.cjs / template
 // changes. (feature-gates.cjs is a future merge target here.)
 //
-// These are value parsers only: the injected patch code owns its own gating
-// (globalThis.__clawgodPatches?.[...]) and env reads, and feeds the raw
-// value in here for parsing/validation.
+// Helpers return values only: injected code owns gating, env reads, timers,
+// and mutation of the renderer's state.
 
 // Parses a CLAWGOD_CLASSIFIER_TIMEOUT_MS value to a finite number, or null
 // when it cannot be parsed (missing/blank/non-numeric/Infinity/overflow). The
@@ -1608,11 +1607,35 @@ function classifierTimeoutFloor(envValue) {
   return Number.isFinite(value) ? value : null;
 }
 
+// A DA1 reply can arrive in multiple stdin reads (issue #171). The renderer
+// normally flushes incomplete escapes after 50ms, which turns a split ESC [
+// into a key and lets the reply's suffix reach the text input. While a DA1
+// sentinel is outstanding, allow the same 2s inter-read budget upstream uses
+// for recognized control-sequence prefixes. This also covers 2.1.263, whose
+// longer-prefix handling predates that upstream fix.
+//
+// Do not filter input: ordinary keys, paste, and complete sequences still go
+// through the existing parser immediately. A lone Escape or Alt+[ during a
+// pending probe is delayed, then passed to the original parser on timeout.
+// With no outstanding probe, even those keys retain their usual timing.
+function terminalReplyDelay(querier, reader, now) {
+  const parse = reader?.parse;
+  if (parse?.mode !== 'NORMAL' || typeof parse.incomplete !== 'string') return 0;
+  if (!/^\x1b(?:\[(?:\?[\d;]*)?)?$/.test(parse.incomplete)) return 0;
+  // 2.1.263 writes queue entries immediately. 2.1.274 adds `written`, and
+  // may queue probes before stdin attaches; those cannot have replies yet.
+  if (!Array.isArray(querier?.queue) || !querier.queue.some((entry) =>
+    entry?.kind === 'barrier' || (entry?.kind === 'sentinel' && entry.written !== false))) return 0;
+  if (!Number.isFinite(now) || !Number.isFinite(reader.lastInputAt)) return 0;
+  return Math.max(0, 2000 - Math.max(0, now - reader.lastInputAt));
+}
+
 // The runtime container (globalThis.__clawgodHelpers) IS the module's own
 // exports, so a new helper only needs an export line here to be reachable
 // from the patched bundle — no separate registration object. We expose
 // module.exports, not module (the latter carries id/filename/paths metadata).
 module.exports.classifierTimeoutFloor = classifierTimeoutFloor;
+module.exports.terminalReplyDelay = terminalReplyDelay;
 globalThis.__clawgodHelpers = module.exports;
 CFG_EOF
 info "Classifier runtime helpers created (runtime-helpers.cjs)"
@@ -2137,6 +2160,19 @@ const gate = (id) => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`
 // ─── Regex-based patches (version-agnostic) ──────────────
 
 const patches = [
+  {
+    id: 'terminal-reply-fragments',
+    name: 'Preserve split terminal replies while a DA1 probe is pending',
+    // Extend only the incomplete-input timer, using the renderer's own query
+    // queue. Keep parsing/delivery unchanged, including when the helper is
+    // absent in an older wrapper. Anchoring the whole callback prefix avoids
+    // matching unrelated performance.now()/parser calls or patching twice.
+    pattern: /(flushIncomplete=\(\)=>\{if\(this\.incompleteEscapeTimer=null,![\w$]+\(this\.keyReader\)\)return;if\(this\.props\.stdin\.readableLength>0\)\{this\.incompleteEscapeTimer=setTimeout\(this\.flushIncomplete,[\w$]+\);return\}let ([\w$]+)=performance\.now\(\);)(this\.applyKeysRead\([\w$]+\(this\.keyReader,\2\),\2\)\})/g,
+    replacer: (m, prefix, now, suffix) => prefix +
+      `const _clawgodReplyDelay=globalThis.__clawgodHelpers?.terminalReplyDelay?.(this.querier,this.keyReader,${now})??0;` +
+      'if(_clawgodReplyDelay>0){this.incompleteEscapeTimer=setTimeout(this.flushIncomplete,_clawgodReplyDelay);return}' + suffix,
+    optional: true, // Older or future renderers may have a different input loop.
+  },
   {
     id: 'user-type-ant',
     name: 'USER_TYPE → ant',

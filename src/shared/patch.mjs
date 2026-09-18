@@ -79,6 +79,19 @@ const gate = (id) => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`
 
 const patches = [
   {
+    id: 'terminal-reply-fragments',
+    name: 'Preserve split terminal replies while a DA1 probe is pending',
+    // Extend only the incomplete-input timer, using the renderer's own query
+    // queue. Keep parsing/delivery unchanged, including when the helper is
+    // absent in an older wrapper. Anchoring the whole callback prefix avoids
+    // matching unrelated performance.now()/parser calls or patching twice.
+    pattern: /(flushIncomplete=\(\)=>\{if\(this\.incompleteEscapeTimer=null,![\w$]+\(this\.keyReader\)\)return;if\(this\.props\.stdin\.readableLength>0\)\{this\.incompleteEscapeTimer=setTimeout\(this\.flushIncomplete,[\w$]+\);return\}let ([\w$]+)=performance\.now\(\);)(this\.applyKeysRead\([\w$]+\(this\.keyReader,\2\),\2\)\})/g,
+    replacer: (m, prefix, now, suffix) => prefix +
+      `const _clawgodReplyDelay=globalThis.__clawgodHelpers?.terminalReplyDelay?.(this.querier,this.keyReader,${now})??0;` +
+      'if(_clawgodReplyDelay>0){this.incompleteEscapeTimer=setTimeout(this.flushIncomplete,_clawgodReplyDelay);return}' + suffix,
+    optional: true, // Older or future renderers may have a different input loop.
+  },
+  {
     id: 'user-type-ant',
     name: 'USER_TYPE → ant',
     pattern: /function ([\w$]+)\(\)\{return"external"\}/g,
