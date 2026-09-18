@@ -1,0 +1,36 @@
+name: Close inactive issues
+
+on:
+  schedule:
+    - cron: '35 7 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview eligible issues without closing them'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: close-inactive-issues
+  cancel-in-progress: false
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check inactivity policy tests
+        run: node .github/scripts/close-inactive-issues.test.cjs
+      - name: Close issues without a reply for at least 30 days
+        uses: actions/github-script@v8
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        with:
+          script: |
+            const closeInactiveIssues = require('./.github/scripts/close-inactive-issues.cjs');
+            await closeInactiveIssues({ github, context, core, dryRun: process.env.DRY_RUN === 'true' });

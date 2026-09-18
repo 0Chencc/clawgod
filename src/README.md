@@ -49,6 +49,14 @@ no outstanding probe, the original input timing is unchanged.
 CI runs all three suites in the `build-sources` job, then loads the shim under Bun in the
 smoke jobs (`compat-daily.yml`).
 
+`src/ci/tui-smoke.py` tests an installed CLI in a POSIX PTY or Windows ConPTY.
+It uses isolated configuration and a local mock API, types a prompt, and
+checks the rendered screen for the reply. Install its Python dependencies
+from `src/ci/tui-requirements.txt`. Windows CI runs it against both the latest
+Claude/Bun canary and Claude 2.1.272/Bun 1.4.2; the pinned case must also
+reproduce the missing CellSegmenter error with the shim disabled. Terminal
+logs, final screens and results are uploaded as CI artifacts.
+
 ## Layout
 
 - `shared/` contains payloads embedded identically in both installers,

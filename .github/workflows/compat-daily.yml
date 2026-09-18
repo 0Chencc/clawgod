@@ -16,6 +16,8 @@ on:
       - install.ps1
       - src/**
       - .github/workflows/compat-daily.yml
+      - .github/workflows/close-inactive-issues.yml
+      - .github/scripts/**
   pull_request:
     paths:
       - build.js
@@ -23,6 +25,8 @@ on:
       - install.ps1
       - src/**
       - .github/workflows/compat-daily.yml
+      - .github/workflows/close-inactive-issues.yml
+      - .github/scripts/**
 
 permissions:
   contents: write   # write needed to push the version-badge JSON to `badges` branch
@@ -48,6 +52,9 @@ jobs:
 
       - name: Run patch semantic tests
         run: node src/shared/patch.test.mjs
+
+      - name: Test inactive issue policy
+        run: node .github/scripts/close-inactive-issues.test.cjs
 
       - name: Run terminal reply regression tests
         run: node src/shared/terminal-reply.test.mjs
@@ -417,11 +424,20 @@ jobs:
             }
 
   windows-smoke:
-    name: Windows smoke (PowerShell 5.1)
+    name: Windows smoke (PowerShell 5.1, Claude ${{ matrix.claude }})
     runs-on: windows-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - claude: latest
+            bun: canary
+          - claude: 2.1.272
+            bun: 1.4.2
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}\.npm-cache
+      CLAWGOD_VERSION: ${{ matrix.claude }}
     steps:
       - uses: actions/checkout@v5
 
@@ -431,10 +447,21 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
-      - name: Set up Bun (canary)
+      - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: ${{ matrix.bun }}
+
+      - name: Set up Python for ConPTY tests
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install terminal test dependencies
+        shell: powershell
+        run: |
+          python -m pip install -r src/ci/tui-requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Cache npm downloads
         uses: actions/cache@v5
@@ -621,8 +648,44 @@ jobs:
             Write-Error "clawgod --version exited $exitCode"
           }
 
+      - name: Interactive renderer regression (Windows ConPTY)
+        # --version does not paint a frame. Run the installed cli.cjs in a
+        # real console, type a prompt, and require a visible local mock reply.
+        # The pinned job also reproduces #182 with only the shim disabled.
+        shell: powershell
+        run: |
+          $clawDir = Join-Path $env:USERPROFILE '.clawgod'
+          $version = (Get-Content (Join-Path $clawDir '.source-version') -Raw).Trim()
+          $fixture = Join-Path $env:RUNNER_TEMP 'tui-native'
+          node src/windows/npm-fetch.mjs "@anthropic-ai/claude-code-win32-x64@$version" $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $testArgs = @(
+            'src/ci/tui-smoke.py',
+            '--cli', (Join-Path $clawDir 'cli.cjs'),
+            '--bun', (Get-Command bun).Source,
+            '--native', (Join-Path $fixture 'package\claude.exe'),
+            '--version', $version,
+            '--output', (Join-Path $env:RUNNER_TEMP 'tui-artifacts')
+          )
+          if ($env:CLAWGOD_VERSION -eq '2.1.272') {
+            $testArgs += '--expect-missing-without-shim'
+          }
+          python @testArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload terminal regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-tui-${{ matrix.claude }}
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/tui-artifacts/*.log
+            ${{ runner.temp }}/tui-artifacts/*.txt
+            ${{ runner.temp }}/tui-artifacts/*.json
+
       - name: Open or update issue on scheduled failure
-        if: failure() && github.event_name == 'schedule'
+        if: failure() && github.event_name == 'schedule' && matrix.claude == 'latest'
         uses: actions/github-script@v8
         with:
           script: |
