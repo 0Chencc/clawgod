@@ -49,6 +49,9 @@ jobs:
       - name: Run patch semantic tests
         run: node src/shared/patch.test.mjs
 
+      - name: Run terminal reply regression tests
+        run: node src/shared/terminal-reply.test.mjs
+
       - name: Run Bun.ant shim tests
         # Claude Code >= 2.1.271 renders through Bun.ant.CellSegmenter, which
         # stock Bun lacks; the shim answers it. Pure JS, so it runs on Node.

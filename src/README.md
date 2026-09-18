@@ -34,7 +34,19 @@ falls back to a local width table when `Bun.stringWidth` is unavailable:
 node src/shared/bun-ant-shim.test.mjs
 ```
 
-CI runs both in the `build-sources` job, then loads the shim under Bun in the
+`src/shared/terminal-reply.test.mjs` checks the incomplete DA1 reply timer,
+normal keyboard/paste fallback, its two-second timeout, and the actual patch
+composition for legacy bundles and chunk graphs:
+
+```bash
+node src/shared/terminal-reply.test.mjs
+```
+
+While a terminal probe is pending, a lone Escape or Alt+[ may wait up to two
+seconds for a reply continuation before the original parser handles it. With
+no outstanding probe, the original input timing is unchanged.
+
+CI runs all three suites in the `build-sources` job, then loads the shim under Bun in the
 smoke jobs (`compat-daily.yml`).
 
 ## Layout
