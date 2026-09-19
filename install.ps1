@@ -1570,25 +1570,17 @@ if (hasProviderApiKey) {
 // Users can force re-enable with CLAUDE_CODE_ATTRIBUTION_HEADER=1 if needed.
 if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
   process.env.CLAUDE_CODE_ATTRIBUTION_HEADER ??= '0';
-  // Third-party proxies (headroom, etc.) often require remote control.
-  // Lean mode sets disableRemoteControl:true in settings.json \u2014 undo it
-  // when the user is routing through a non-Anthropic endpoint.
-  try {
-    const _rcSettings = join(homedir(), '.claude', 'settings.json');
-    if (existsSync(_rcSettings)) {
-      const _rcS = JSON.parse(readFileSync(_rcSettings, 'utf8'));
-      if (_rcS.disableRemoteControl) {
-        delete _rcS.disableRemoteControl;
-        writeFileSync(_rcSettings, JSON.stringify(_rcS, null, 2) + '\n');
-      }
-    }
-  } catch {}
 }
 
 if (config.timeoutMs) {
   process.env.API_TIMEOUT_MS ??= String(config.timeoutMs);
 }
-process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
+// Remote Control needs GrowthBook evaluation. Restrict network traffic by
+// default only in max mode; on/off retain upstream eligibility checks.
+// Explicit user environment settings still take precedence.
+if (existsSync(join(clawgodDir, '.lean-max')) && !existsSync(join(clawgodDir, '.lean-disabled'))) {
+  process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
+}
 process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
 // Use system ripgrep (extracted vendor rg path was build-time-baked; system
 // rg is the most reliable fallback under Bun runtime).
@@ -1624,8 +1616,8 @@ if (process.argv.includes('--lean-off') || process.argv.includes('--lean-on') ||
   const _leanSettings = join(homedir(), '.claude', 'settings.json');
   const _baseDeny = ['DesignSync','NotebookEdit','PushNotification','RemoteTrigger','CronCreate','CronDelete','CronList'];
   const _maxDeny = ['EnterPlanMode','ExitPlanMode','SendMessage','ScheduleWakeup','AskUserQuestion','ReportFindings'];
-  const _baseFlags = ['disableWorkflows','disableRemoteControl','disableClaudeAiConnectors','disableArtifact'];
-  const _maxFlags = ['disableBundledSkills'];
+  const _baseFlags = ['disableWorkflows','disableClaudeAiConnectors','disableArtifact'];
+  const _maxFlags = ['disableBundledSkills','disableRemoteControl'];
   const _allDeny = new Set([..._baseDeny, ..._maxDeny]);
   const _allFlags = [..._baseFlags, ..._maxFlags];
   const _unlink = function(p) { try { require('fs').unlinkSync(p); } catch {} };
@@ -3299,16 +3291,25 @@ if (-not (Test-Path $leanOffFlag)) {
     $leanApplyScript = @'
 const fs = require("fs");
 const settingsPath = process.argv[1];
-const isMax = process.argv[2] === "true";
+const isMax = process.argv[2]?.toLowerCase() === "true";
 const baseDeny = ["DesignSync","NotebookEdit","PushNotification","RemoteTrigger","CronCreate","CronDelete","CronList"];
 const maxDeny = ["EnterPlanMode","ExitPlanMode","SendMessage","ScheduleWakeup","AskUserQuestion","ReportFindings"];
-const baseFlags = ["disableWorkflows","disableRemoteControl","disableClaudeAiConnectors","disableArtifact"];
-const maxFlags = ["disableBundledSkills"];
+const baseFlags = ["disableWorkflows","disableClaudeAiConnectors","disableArtifact"];
+const maxFlags = ["disableBundledSkills","disableRemoteControl"];
 const deny = isMax ? [...baseDeny, ...maxDeny] : baseDeny;
 const flags = isMax ? [...baseFlags, ...maxFlags] : baseFlags;
 let s = {};
 try { s = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
 let changed = false;
+// Downgrade max to on and migrate the old default Remote Control disable.
+if (!isMax) {
+  for (const k of maxFlags) { if (k in s) { delete s[k]; changed = true; } }
+  if (Array.isArray(s.permissions?.deny)) {
+    const before = s.permissions.deny.length;
+    s.permissions.deny = s.permissions.deny.filter(t => !maxDeny.includes(t));
+    if (s.permissions.deny.length !== before) changed = true;
+  }
+}
 for (const k of flags) { if (!(k in s)) { s[k] = true; changed = true; } }
 if (!s.permissions) s.permissions = {};
 if (!Array.isArray(s.permissions.deny)) s.permissions.deny = [];

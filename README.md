@@ -88,9 +88,11 @@ Green logo = patched. Orange logo = original.
 | **Third-Party Cache Fix** | Auto-disables `x-anthropic-billing-header` when `baseURL` is non-Anthropic. The header's per-request `cch` field breaks prompt-cache hit rate on DeepSeek / OneAPI / Bedrock / vLLM and any other Anthropic-compatible proxy. You no longer need to set `CLAUDE_CODE_ATTRIBUTION_HEADER=0` yourself. |
 | **Auto Re-patch** | Detects when the user's native Claude binary has been upgraded; transparently re-extracts and re-patches on next launch |
 | **Update Notification** | Checks GitHub releases once per 24h (async, non-blocking). Shows a one-line notice if a newer ClawGod version is available |
-| **Lean Settings** | Three-level token optimization for `~/.claude/settings.json`. **on** (default): removes unused tool definitions + disables Workflows/RemoteControl/Artifact. **max**: additionally removes Plan mode, Agent Teams, bundled skills. **off**: all tools restored |
+| **Lean Settings** | Three-level token optimization for `~/.claude/settings.json`. **on** (default): removes unused tool definitions + disables Workflows/Artifact; Remote Control remains available. **max**: additionally disables Remote Control and removes Plan mode, Agent Teams, bundled skills. **off**: all tools restored |
 
 > **Lean Settings** are non-destructive and persist across updates. Toggle anytime: `claude --lean-on` (default) / `claude --lean-max` (aggressive) / `claude --lean-off` (restore all). To opt out of a single setting, set it yourself (e.g. `"disableArtifact": false`).
+
+Remote Control (`/remote-control`, `/rc`) is allowed in **on/off** and disabled by default only in **max**. Updating in **on** mode or running `claude --lean-on` clears the older Lean Remote Control disable setting. Only **max** defaults `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; explicit environment restrictions are preserved. Remote Control still requires upstream account, authentication, endpoint, and organization eligibility.
 
 ## Commands
 

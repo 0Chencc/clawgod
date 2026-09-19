@@ -59,6 +59,9 @@ jobs:
       - name: Run terminal reply regression tests
         run: node src/shared/terminal-reply.test.mjs
 
+      - name: Run Lean mode regression tests
+        run: node src/shared/lean.test.mjs
+
       - name: Run Bun.ant shim tests
         # Claude Code >= 2.1.271 renders through Bun.ant.CellSegmenter, which
         # stock Bun lacks; the shim answers it. Pure JS, so it runs on Node.
@@ -245,13 +248,14 @@ jobs:
           settings="$HOME/.claude/settings.json"
           [[ -f "$settings" ]] || { echo "::error::~/.claude/settings.json not created"; exit 1; }
           # Check that lean keys are present
-          for key in disableWorkflows disableRemoteControl disableClaudeAiConnectors disableArtifact; do
+          for key in disableWorkflows disableClaudeAiConnectors disableArtifact; do
             if ! grep -q "\"$key\"" "$settings"; then
               echo "::error::lean key $key missing from settings.json"
               cat "$settings"
               exit 1
             fi
           done
+          node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(s.disableRemoteControl===true) throw Error("default Lean must allow Remote Control")' "$settings"
           for tool in DesignSync NotebookEdit CronCreate; do
             if ! grep -q "\"$tool\"" "$settings"; then
               echo "::error::deny tool $tool missing from settings.json"

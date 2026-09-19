@@ -88,9 +88,11 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **第三方 Cache 修复** | 当 `baseURL` 指向非 Anthropic 域名时自动关闭 `x-anthropic-billing-header`。该 header 里的 `cch` 字段每请求都变，会让 DeepSeek / OneAPI / Bedrock / vLLM 以及所有 Anthropic 协议代理的 prompt-cache 命中率归零。不需要再自行配置 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`。 |
 | **自动重打补丁** | 检测到用户官方升级了 native Claude binary 时，下次启动自动重新抽取 + 重新 patch |
 | **更新通知** | 每 24h 异步检查 GitHub releases（非阻塞），发现新版本时启动前显示一行提示 |
-| **精简设置** | 三级 token 优化，作用于 `~/.claude/settings.json`。**on**（默认）：移除未使用工具定义 + 禁用 Workflows/RemoteControl/Artifact。**max**：额外移除 Plan mode、Agent Teams、内置 skills。**off**：恢复全部工具 |
+| **精简设置** | 三级 token 优化，作用于 `~/.claude/settings.json`。**on**（默认）：移除未使用工具定义 + 禁用 Workflows/Artifact，保留 Remote Control。**max**：额外禁用 Remote Control，并移除 Plan mode、Agent Teams、内置 skills。**off**：恢复全部工具 |
 
 > **精简设置**不会破坏现有配置，更新时保持用户选择。随时切换：`claude --lean-on`（默认）/ `claude --lean-max`（激进）/ `claude --lean-off`（恢复全部）。取消单项设置只需自行修改（如 `"disableArtifact": false`）。
+
+Remote Control（`/remote-control`、`/rc`）在 **on/off** 下允许使用，仅在 **max** 下默认禁用。默认 on 模式更新安装或执行 `claude --lean-on` 会清除旧版 Lean 遗留的远程控制禁用项。仅 **max** 默认设置 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`；用户显式设置的环境变量限制保持不变。远程控制仍需满足上游账号、认证、端点及组织策略要求。
 
 ## 使用
 

@@ -46,7 +46,16 @@ While a terminal probe is pending, a lone Escape or Alt+[ may wait up to two
 seconds for a reply continuation before the original parser handles it. With
 no outstanding probe, the original input timing is unchanged.
 
-CI runs all three suites in the `build-sources` job, then loads the shim under Bun in the
+`src/shared/lean.test.mjs` exercises the full launcher with isolated settings,
+plus the Unix and Windows installer settings scripts. It covers on/max/off
+transitions, old Remote Control settings migration, PowerShell Boolean casing,
+provider parity, and preservation of explicit network environment settings:
+
+```bash
+node src/shared/lean.test.mjs
+```
+
+CI runs all four suites in the `build-sources` job, then loads the shim under Bun in the
 smoke jobs (`compat-daily.yml`).
 
 `src/ci/tui-smoke.py` tests an installed CLI in a POSIX PTY or Windows ConPTY.
