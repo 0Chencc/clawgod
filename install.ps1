@@ -1344,6 +1344,9 @@ const CLAWGOD_FEATURES_META = {
   "classifier-retries": [
     "classifier-tuning"
   ],
+  "dangerous-rm-bypass": [
+    "dangerous-rm-bypass"
+  ],
   "theme-logo-rgb": [
     "theme"
   ],
@@ -2261,6 +2264,8 @@ const FEATURES = {
                       patchIds: ['auto-mode-helper-gate', 'auto-mode-inline-gate'] },
   'classifier-tuning': { desc: 'Auto-mode classifier overrides (timeout/model/retries env vars)',
                       patchIds: ['classifier-timeout', 'classifier-model', 'classifier-retries'] },
+  'dangerous-rm-bypass': { desc: 'skip dangerous rm/rmdir confirmation under bypassPermissions mode',
+                      patchIds: ['dangerous-rm-bypass'] },
   'theme':          { desc: 'Green brand/logo color scheme',
                       patchIds: [
                         'theme-logo-rgb', 'theme-logo-ansi',
@@ -2522,6 +2527,35 @@ const patches = [
       `function ${fn}(){let _cr=process.env.CLAWGOD_CLASSIFIER_RETRIES?.trim();if(${gate('classifier-retries')}&&_cr!==undefined&&_cr!==""&&Number.isInteger(+_cr)&&+_cr>=0)return{value:+_cr,src:"default"};` + m.slice(m.indexOf('{') + 1),
     unique: true,
     optional: true,  // v2.1.220+; \u2264v2.1.143 uses a plain constant
+  },
+  {
+    // Bash rm/rmdir static-safety "hard ask" (Dangerous rm operation on
+    // statically-unresolvable target, critical system directory, cd+relative
+    // glob) carries circuitBreaker:"dangerousRemoval". The breaker table
+    // marks it {bypassImmune:!0,classifierRouted:!0}: the main permission
+    // flow (cS(decisionReason, EUe)) then re-raises the ask even under
+    // bypassPermissions. Patch flips only bypassImmune so:
+    //   bypass mode  -> ask is skipped like every other ask
+    //   auto mode    -> unchanged (classifier already routes it via
+    //                   classifierRouted, incl. the simple-command path)
+    //   default mode -> unchanged
+    // Compound-command aggregation (cd x && rm y/*) hard-returns on
+    // classifierApprovable===!1 before EUe is consulted, but its decisions
+    // also come from the same table, so bypass is covered there too.
+    // Table shape (v2.1.251+): var Lur={dangerousRemoval:{...},...}
+    //   dangerousRemoval:{bypassImmune:!0,classifierRouted:!0}
+    // bypassImmune becomes a getter so the table entry is re-read on every
+    // EUe() call \u2014 mutating globalThis.__clawgodPatches at runtime flips
+    // the behavior immediately, no reload needed.
+    // v2.1.220 predates the table (direct string compare), so optional.
+    id: 'dangerous-rm-bypass',
+    toggleable: true,
+    name: 'dangerousRemoval ask skippable in bypassPermissions',
+    pattern: /dangerousRemoval:\{bypassImmune:!0(,classifierRouted:!0\})/g,
+    replacer: (m, tail) =>
+      'dangerousRemoval:{get bypassImmune(){return !(' + gate('dangerous-rm-bypass') + ')}' + tail,
+    unique: true,
+    optional: true,  // breaker table introduced in v2.1.251
   },
   {
     // v2.1.158+: provider gate refactored into helper function:
