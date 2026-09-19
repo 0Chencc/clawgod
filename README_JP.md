@@ -113,6 +113,7 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
   "baseURL": "https://api.anthropic.com",
   "model": "",
   "smallModel": "",
+  "effort": "",
   "timeoutMs": 3000000
 }
 ```

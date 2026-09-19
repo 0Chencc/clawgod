@@ -118,6 +118,7 @@ fn write_provider(provider_type: &str, key: &str, base_url: &str, model: &str, s
         "baseURL": base_url,
         "model": model,
         "smallModel": small_model,
+        "effort": "",
         "timeoutMs": 3000000
     });
 
@@ -411,6 +412,7 @@ fn cmd_reset() {
         "baseURL": "https://api.anthropic.com",
         "model": "",
         "smallModel": "",
+        "effort": "",
         "timeoutMs": 3000000
     });
 
