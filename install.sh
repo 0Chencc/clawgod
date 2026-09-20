@@ -2393,31 +2393,49 @@ const patches = [
   {
     // Bash rm/rmdir static-safety "hard ask" (Dangerous rm operation on
     // statically-unresolvable target, critical system directory, cd+relative
-    // glob) carries circuitBreaker:"dangerousRemoval". The breaker table
-    // marks it {bypassImmune:!0,classifierRouted:!0}: the main permission
-    // flow (cS(decisionReason, EUe)) then re-raises the ask even under
-    // bypassPermissions. Patch flips only bypassImmune so:
-    //   bypass mode  -> ask is skipped like every other ask
-    //   auto mode    -> unchanged (classifier already routes it via
-    //                   classifierRouted, incl. the simple-command path)
-    //   default mode -> unchanged
-    // Compound-command aggregation (cd x && rm y/*) hard-returns on
-    // classifierApprovable===!1 before EUe is consulted, but its decisions
-    // also come from the same table, so bypass is covered there too.
-    // Table shape (v2.1.251+): var Lur={dangerousRemoval:{...},...}
-    //   dangerousRemoval:{bypassImmune:!0,classifierRouted:!0}
-    // bypassImmune becomes a getter so the table entry is re-read on every
-    // EUe() call — mutating globalThis.__clawgodPatches at runtime flips
-    // the behavior immediately, no reload needed.
-    // v2.1.220 predates the table (direct string compare), so optional.
+    // glob) carries circuitBreaker:"dangerousRemoval", and the breaker
+    // table entry {bypassImmune:!0,classifierRouted:!0} makes the ask
+    // survive even bypassPermissions. We skip it in bypass mode ONLY —
+    // auto/default keep upstream behavior exactly.
+    //
+    // Why not flip the table entry itself (v1 of this patch, PR #172):
+    // the table is shared by every consumer of isBypassImmuneCircuitBreaker,
+    // including the pipe-aggregation multi-cd branch, which is mode-
+    // independent:
+    //   if(#cd segments>1){for(let[,z]of E)
+    //     if(z.behavior==="ask"&&xb(z.decisionReason,S1e))return z
+    //     ...return multi-cd ask (type:"other"})}
+    // With bypassImmune flipped, a piped `cd a | cd b | rm sub/*` loses its
+    // preserved dangerousRemoval safetyCheck ask, degrades to the
+    // bashAllowRuleOverridable multi-cd ask (type:"other"), and a whole-tool
+    // Bash allow rule can then ALLOW it even in default mode (PR #172
+    // review, P1). Patching the bypass-mode call site instead:
+    //   B=F&&v?.behavior==="ask"?xb(v.decisionReason,S1e):void 0
+    //   ... if(v?.behavior==="ask"&&(B||z||!F&&(xb(v.decisionReason)||...)))return v
+    //   ... if(F)return{behavior:"allow",...}
+    // F is true only in bypassPermissions (or plan+remote); wrapping the S1e
+    // predicate excludes dangerousRemoval from B, so the ask falls through
+    // to the `if(F)` allow. Everything else (multi-cd preservation,
+    // outside-reads safetyCheck preference, && compound aggregation) still
+    // consults the untouched table — default/auto unchanged.
+    // B is void unless F is true (short-circuit), so the predicate only ever
+    // runs in bypass mode. The wrapped closure re-reads
+    // globalThis.__clawgodPatches per invocation, so runtime toggling needs
+    // no reload.
+    // Anchor (v2.1.260 graph): unique across the bundle; F/v/xb/S1e are
+    // minified identifiers captured by group. Verified on v2.1.260; older
+    // bundles skip cleanly via optional (CI daily covers drift).
     id: 'dangerous-rm-bypass',
     toggleable: true,
     name: 'dangerousRemoval ask skippable in bypassPermissions',
-    pattern: /dangerousRemoval:\{bypassImmune:!0(,classifierRouted:!0\})/g,
-    replacer: (m, tail) =>
-      'dangerousRemoval:{get bypassImmune(){return !(' + gate('dangerous-rm-bypass') + ')}' + tail,
+    pattern: /,([\w$]+)=([\w$]+)&&([\w$]+)\?\.behavior==="ask"\?([\w$]+)\(\3\.decisionReason,([\w$]+)\):void 0/g,
+    replacer: (m, b, f, v, pred, s1e) =>
+      `,${b}=${f}&&${v}?.behavior==="ask"?${pred}(${v}.decisionReason,(${s1e})=>${s1e}.circuitBreaker!=="dangerousRemoval"||!(${gate('dangerous-rm-bypass')})):void 0`,
+    // guard: the bypass site sits next to "bypassPermissions" mode handling
+    validate: (m) => m[0].length < 200,
+    sentinel: 'bypassImmune:!0,classifierRouted:!0',
     unique: true,
-    optional: true,  // breaker table introduced in v2.1.251
+    optional: true,  // call-site shape verified on v2.1.260; older/newer may drift
   },
   {
     // v2.1.158+: provider gate refactored into helper function:
