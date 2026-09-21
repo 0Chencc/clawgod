@@ -49,6 +49,8 @@ const FEATURES = {
                       patchIds: ['auto-mode-helper-gate', 'auto-mode-inline-gate'] },
   'classifier-tuning': { desc: 'Auto-mode classifier overrides (timeout/model/retries env vars)',
                       patchIds: ['classifier-timeout', 'classifier-model', 'classifier-retries'] },
+  'dangerous-rm-bypass': { desc: 'skip dangerous rm/rmdir confirmation under bypassPermissions mode',
+                      patchIds: ['dangerous-rm-bypass'] },
   'theme':          { desc: 'Green brand/logo color scheme',
                       patchIds: [
                         'theme-logo-rgb', 'theme-logo-ansi',
@@ -310,6 +312,53 @@ const patches = [
       `function ${fn}(){let _cr=process.env.CLAWGOD_CLASSIFIER_RETRIES?.trim();if(${gate('classifier-retries')}&&_cr!==undefined&&_cr!==""&&Number.isInteger(+_cr)&&+_cr>=0)return{value:+_cr,src:"default"};` + m.slice(m.indexOf('{') + 1),
     unique: true,
     optional: true,  // v2.1.220+; ≤v2.1.143 uses a plain constant
+  },
+  {
+    // Bash rm/rmdir static-safety "hard ask" (Dangerous rm operation on
+    // statically-unresolvable target, critical system directory, cd+relative
+    // glob) carries circuitBreaker:"dangerousRemoval", and the breaker
+    // table entry {bypassImmune:!0,classifierRouted:!0} makes the ask
+    // survive even bypassPermissions. We skip it in bypass mode ONLY —
+    // auto/default keep upstream behavior exactly.
+    //
+    // Why not flip the table entry itself (v1 of this patch, PR #172):
+    // the table is shared by every consumer of isBypassImmuneCircuitBreaker,
+    // including the pipe-aggregation multi-cd branch, which is mode-
+    // independent:
+    //   if(#cd segments>1){for(let[,z]of E)
+    //     if(z.behavior==="ask"&&xb(z.decisionReason,S1e))return z
+    //     ...return multi-cd ask (type:"other"})}
+    // With bypassImmune flipped, a piped `cd a | cd b | rm sub/*` loses its
+    // preserved dangerousRemoval safetyCheck ask, degrades to the
+    // bashAllowRuleOverridable multi-cd ask (type:"other"), and a whole-tool
+    // Bash allow rule can then ALLOW it even in default mode (PR #172
+    // review, P1). Patching the bypass-mode call site instead:
+    //   B=F&&v?.behavior==="ask"?xb(v.decisionReason,S1e):void 0
+    //   ... if(v?.behavior==="ask"&&(B||z||!F&&(xb(v.decisionReason)||...)))return v
+    //   ... if(F)return{behavior:"allow",...}
+    // F is true only in bypassPermissions (or plan+remote); wrapping the S1e
+    // predicate excludes dangerousRemoval from B, so the ask falls through
+    // to the `if(F)` allow. Everything else (multi-cd preservation,
+    // outside-reads safetyCheck preference, && compound aggregation) still
+    // consults the untouched table — default/auto unchanged.
+    // B is void unless F is true (short-circuit), so the predicate only ever
+    // runs in bypass mode. The wrapped closure re-reads
+    // globalThis.__clawgodPatches per invocation, so runtime toggling needs
+    // no reload.
+    // Anchor (v2.1.260 graph): unique across the bundle; F/v/xb/S1e are
+    // minified identifiers captured by group. Verified on v2.1.260; older
+    // bundles skip cleanly via optional (CI daily covers drift).
+    id: 'dangerous-rm-bypass',
+    toggleable: true,
+    name: 'dangerousRemoval ask skippable in bypassPermissions',
+    pattern: /,([\w$]+)=([\w$]+)&&([\w$]+)\?\.behavior==="ask"\?([\w$]+)\(\3\.decisionReason,([\w$]+)\):void 0/g,
+    replacer: (m, b, f, v, pred, s1e) =>
+      `,${b}=${f}&&${v}?.behavior==="ask"?${pred}(${v}.decisionReason,(${s1e})=>${s1e}.circuitBreaker!=="dangerousRemoval"||!(${gate('dangerous-rm-bypass')})):void 0`,
+    // guard: the bypass site sits next to "bypassPermissions" mode handling
+    validate: (m) => m[0].length < 200,
+    sentinel: 'bypassImmune:!0,classifierRouted:!0',
+    unique: true,
+    optional: true,  // call-site shape verified on v2.1.260; older/newer may drift
   },
   {
     // v2.1.158+: provider gate refactored into helper function:

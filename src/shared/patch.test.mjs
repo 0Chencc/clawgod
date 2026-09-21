@@ -117,3 +117,136 @@ try {
   rmSync(testDir, { recursive: true, force: true });
 }
 console.log('[patch.test] ultraplan bundle/graph compatibility and toggle semantics ok');
+// ─── dangerous-rm-bypass: bypass-site predicate semantics ────────────
+//
+// The patch wraps the bypass-mode S1e call site:
+//   B = F && v?.behavior==="ask" ? xb(v.decisionReason,
+//        (S1e) => S1e.circuitBreaker !== "dangerousRemoval" ||
+//                 !(gate("dangerous-rm-bypass"))) : void 0
+// with the shared breaker table left untouched (upstream
+// {dangerousRemoval:{bypassImmune:!0,classifierRouted:!0}} — v1 of PR #172
+// flipped the table itself, which also flipped the mode-independent
+// pipe-aggregation multi-cd branch and could allow a degraded multi-cd
+// ask under a whole-tool Bash allow rule in default mode; see PR review).
+//
+// These tests re-implement iao's decision skeleton + the verbatim Pso
+// multi-cd aggregation from the 2.1.260 bundle and pin:
+//   - default mode: dangerousRemoval ask survives with/without allow
+//     rules, gate on or off (upstream behavior)
+//   - bypass mode: gate on -> allow, gate off -> ask
+//   - pipe multi-cd aggregation preserves the dangerousRemoval safetyCheck
+//     ask regardless of the gate (shared table untouched)
+// Run: node src/shared/patch.test.mjs  (wired into CI build-sources)
+
+// upstream breaker table (the shape the patcher must NOT modify)
+const table = {
+  dangerousRemoval: { bypassImmune: true, classifierRouted: true },
+  backgroundOperator: { bypassImmune: false, classifierRouted: true },
+  suspiciousWindowsPath: { bypassImmune: false, classifierRouted: true },
+  isolatePeerMachines: { bypassImmune: true, classifierRouted: false },
+  restrictedMode: { bypassImmune: true, classifierRouted: false },
+  outsideReadsBlocked: { bypassImmune: true, classifierRouted: false },
+};
+const isBypassImmune = (e) =>
+  e.circuitBreaker !== undefined && table[e.circuitBreaker]?.bypassImmune === true;
+// real xb(): recursive safetyCheck search with optional predicate
+const xb = (e, n = () => true) => {
+  if (!e) return undefined;
+  if (e.type === 'safetyCheck') return n(e) ? e : undefined;
+  if (e.type === 'subcommandResults')
+    for (const r of e.reasons.values()) {
+      const o = xb(r.decisionReason, n);
+      if (o) return o;
+    }
+  return undefined;
+};
+
+const dangerousAsk = {
+  behavior: 'ask',
+  decisionReason: {
+    type: 'safetyCheck',
+    reason: 'Dangerous rm operation detected',
+    classifierApprovable: false,
+    circuitBreaker: 'dangerousRemoval',
+  },
+};
+const multiCdAsk = {
+  behavior: 'ask',
+  decisionReason: {
+    type: 'other',
+    reason: 'Multiple directory changes in one command require approval for clarity',
+    bashMissKind: 'multi-cd',
+  },
+};
+
+// iao decision skeleton, gate-on form (patched expression verbatim)
+const decide = (v, mode, gateOn, wholeToolAllowRule) => {
+  globalThis.__clawgodPatches = { 'dangerous-rm-bypass': gateOn };
+  const N = mode;
+  const F = N === 'bypassPermissions' || N === 'plan';
+  const B = F && v?.behavior === 'ask'
+    ? xb(v.decisionReason, (S1e) =>
+        S1e.circuitBreaker !== 'dangerousRemoval' ||
+        !(globalThis.__clawgodPatches?.['dangerous-rm-bypass'] !== false))
+    : undefined;
+  if (v?.behavior === 'ask' &&
+      (B || !F && (xb(v.decisionReason) || v.decisionReason?.type === 'sandboxOverride')))
+    return 'ask';
+  if (F) return 'allow';
+  if (wholeToolAllowRule) return 'allow';
+  return 'ask';
+};
+// upstream (unpatched) decision for the same skeleton
+const upstreamDecide = (v, mode, wholeToolAllowRule) => {
+  const F = mode === 'bypassPermissions' || mode === 'plan';
+  const B = F && v?.behavior === 'ask' ? xb(v.decisionReason, isBypassImmune) : undefined;
+  if (v?.behavior === 'ask' &&
+      (B || !F && (xb(v.decisionReason) || v.decisionReason?.type === 'sandboxOverride')))
+    return 'ask';
+  if (F) return 'allow';
+  if (wholeToolAllowRule) return 'allow';
+  return 'ask';
+};
+
+// default mode: unchanged in every combination (P1 regression guard)
+assert.equal(upstreamDecide(dangerousAsk, 'default', false),
+             decide(dangerousAsk, 'default', true, false));
+assert.equal(upstreamDecide(dangerousAsk, 'default', false), 'ask');
+assert.equal(decide(dangerousAsk, 'default', true, false), 'ask');
+// P1 exact case: default + whole-tool Bash allow rule must still ask
+assert.equal(decide(dangerousAsk, 'default', true, true), 'ask');
+assert.equal(decide(dangerousAsk, 'default', false, true), 'ask');
+// gate off in bypass mode restores upstream (ask)
+assert.equal(decide(dangerousAsk, 'bypassPermissions', false, false), 'ask');
+// bypass mode + gate on -> allow (the feature)
+assert.equal(decide(dangerousAsk, 'bypassPermissions', true, false), 'allow');
+// non-dangerousRemoval breakers keep their bypass immunity
+const restrictedAsk = { behavior: 'ask', decisionReason: { type: 'safetyCheck', reason: 'restricted', circuitBreaker: 'restrictedMode' } };
+assert.equal(decide(restrictedAsk, 'bypassPermissions', true, false), 'ask');
+// plain multi-cd ask: bypass allows it (was never bypass-immune), default asks
+assert.equal(decide(multiCdAsk, 'bypassPermissions', true, false), 'allow');
+assert.equal(decide(multiCdAsk, 'default', true, true), 'allow');
+
+// pipe-aggregation multi-cd branch (verbatim Pso shape) uses the shared
+// table only — with the gate ON it must still preserve the
+// dangerousRemoval safetyCheck ask instead of degrading to multi-cd
+const multiCdAggregate = (E) => {
+  for (const [, z] of E)
+    if (z.behavior === 'ask' && xb(z.decisionReason, isBypassImmune)) return z;
+  return multiCdAsk;
+};
+const E = new Map([
+  ['cd /tmp/a', { behavior: 'allow' }],
+  ['cd /tmp/b', { behavior: 'allow' }],
+  ['rm sub/*', dangerousAsk],
+]);
+const aggregated = multiCdAggregate(E);
+assert.equal(aggregated.decisionReason.type, 'safetyCheck');
+assert.equal(aggregated.decisionReason.circuitBreaker, 'dangerousRemoval');
+// and that preserved safetyCheck ask then survives a whole-tool allow rule
+// in default mode even with the gate on
+assert.equal(decide(aggregated, 'default', true, true), 'ask');
+// while in bypass mode with the gate on it is allowed (feature goal)
+assert.equal(decide(aggregated, 'bypassPermissions', true, false), 'allow');
+
+console.log('[patch.test] dangerous-rm-bypass bypass-site semantics ok');
