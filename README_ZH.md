@@ -114,6 +114,7 @@ claude.orig         # 原版未修改版本（自动备份）
   "baseURL": "https://api.anthropic.com",
   "model": "",
   "smallModel": "",
+  "effort": "",
   "timeoutMs": 3000000
 }
 ```
