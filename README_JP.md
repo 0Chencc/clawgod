@@ -120,6 +120,7 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 
 - **`apiKey` を設定**：ClawGod が `ANTHROPIC_API_KEY` として注入し、`~/.claude/settings.json` から隔離します。Anthropic / DeepSeek など OpenAI 互換ゲートウェイでも動作。`baseURL` が Anthropic 以外を指す場合、ゲートウェイ認証用に `ANTHROPIC_AUTH_TOKEN` も自動設定されます。
 - **`apiKey` 未設定**：OAuth パス。一度 `claude auth login` を実行すれば、`~/.claude` 配下の subagents / skills / MCP はそのまま使えます。
+- **`effort`**：推論の強度を設定します。既存の `CLAUDE_CODE_EFFORT_LEVEL` が優先されます。`type: "grok"` または `"openai-compat"` では、Claude がカスタムモデルの effort を送信しなくても、プロキシが設定値を `reasoning_effort` として送信します。`low`、`medium`、`high`、`xhigh` はそのまま、`max` は `xhigh` に変換し、`auto` はパラメーターを省略して上流の既定値を使います。上流モデルが対応する値を選んでください。設定が空または未設定ならリクエストの effort を使い、リクエストにもなければ追加しません。
 
 ### 機能トグル
 

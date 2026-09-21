@@ -121,6 +121,7 @@ claude.orig         # 原版未修改版本（自动备份）
 
 - **填写 `apiKey`**：ClawGod 注入 `ANTHROPIC_API_KEY` 并与 `~/.claude/settings.json` 隔离。可用于 Anthropic 官方、DeepSeek，以及任何 OpenAI-compatible 网关；`baseURL` 指向非 Anthropic 域名时，还会自动注入 `ANTHROPIC_AUTH_TOKEN` 以适配网关鉴权。
 - **留空 `apiKey`**：走 OAuth 路径，执行一次 `claude auth login`，`~/.claude` 下的 subagents / skills / MCP 配置继续有效。
+- **`effort`**：设置推理强度，已有的 `CLAUDE_CODE_EFFORT_LEVEL` 优先。使用 `type: "grok"` 或 `"openai-compat"` 时，即使 Claude 没有为自定义模型发送 effort，代理也会发送配置对应的 `reasoning_effort`。`low`、`medium`、`high`、`xhigh` 原样传递，`max` 转为 `xhigh`，`auto` 则省略该参数、使用上游默认值。请选用上游模型支持的档位。配置为空或未设置时，沿用请求中的 effort；请求也未指定时不添加该参数。
 
 ### 功能开关
 

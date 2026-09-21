@@ -121,6 +121,7 @@ claude.orig         # Original unpatched version (auto-backed-up)
 
 - **`apiKey` set** → ClawGod injects it as `ANTHROPIC_API_KEY` and isolates from `~/.claude/settings.json`. Works with Anthropic, DeepSeek, and OpenAI-compatible gateways. A non-Anthropic `baseURL` populates only `ANTHROPIC_AUTH_TOKEN` for gateway auth.
 - **`apiKey` empty** → OAuth path. Run `claude auth login` once; `~/.claude` keeps hosting your subagents, skills, and MCP settings.
+- **`effort`** → Sets reasoning effort; an existing `CLAUDE_CODE_EFFORT_LEVEL` takes precedence. With `type: "grok"` or `"openai-compat"`, the proxy sends `reasoning_effort` even when Claude omits effort for a custom model alias. `low`, `medium`, `high`, and `xhigh` pass through; `max` maps to `xhigh`; `auto` omits the parameter to use the upstream default. Choose a level supported by your upstream model. Empty/unset configuration leaves request-level effort in control and adds no effort parameter when the request has none.
 
 ### Feature Toggles
 

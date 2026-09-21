@@ -55,7 +55,16 @@ provider parity, and preservation of explicit network environment settings:
 node src/shared/lean.test.mjs
 ```
 
-CI runs all four suites in the `build-sources` job, then loads the shim under Bun in the
+`src/shared/provider.test.mjs` runs the launcher and proxy request handler with
+isolated configuration and mocked HTTP transport. It checks provider authentication,
+blank-token fallback, effort translation and environment precedence, including
+streaming requests and custom model aliases that omit `output_config`:
+
+```bash
+node src/shared/provider.test.mjs
+```
+
+CI runs all five suites in the `build-sources` job, then loads the shim under Bun in the
 smoke jobs (`compat-daily.yml`).
 
 `src/ci/tui-smoke.py` tests an installed CLI in a POSIX PTY or Windows ConPTY.

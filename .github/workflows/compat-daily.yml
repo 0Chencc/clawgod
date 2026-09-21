@@ -62,6 +62,9 @@ jobs:
       - name: Run Lean mode regression tests
         run: node src/shared/lean.test.mjs
 
+      - name: Run provider auth and proxy effort regression tests
+        run: node src/shared/provider.test.mjs
+
       - name: Run Bun.ant shim tests
         # Claude Code >= 2.1.271 renders through Bun.ant.CellSegmenter, which
         # stock Bun lacks; the shim answers it. Pure JS, so it runs on Node.

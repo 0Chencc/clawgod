@@ -960,7 +960,7 @@ function stripCacheControl(obj) {
   return out;
 }
 
-function translateRequest(body) {
+function translateRequest(body, configuredEffort) {
   var cleaned = stripCacheControl(body);
   var systemMsgs = translateSystem(cleaned.system);
   var userMsgs = translateMessages(cleaned.messages || []);
@@ -969,6 +969,13 @@ function translateRequest(body) {
   if (cleaned.temperature !== undefined) openaiBody.temperature = cleaned.temperature;
   if (cleaned.top_p !== undefined) openaiBody.top_p = cleaned.top_p;
   if (cleaned.stop_sequences) openaiBody.stop = cleaned.stop_sequences;
+  // Claude can omit output_config for unknown model aliases. Keep an explicit
+  // launcher setting authoritative, matching CLAUDE_CODE_EFFORT_LEVEL priority.
+  var effort = configuredEffort || (cleaned.output_config && cleaned.output_config.effort);
+  if (effort && effort !== 'auto') {
+    // Chat Completions calls the highest effort xhigh, not Claude's max.
+    openaiBody.reasoning_effort = effort === 'max' ? 'xhigh' : effort;
+  }
   var tools = translateTools(cleaned.tools);
   if (tools) openaiBody.tools = tools;
   if (cleaned.stream) openaiBody.stream_options = { include_usage: true };
@@ -1076,7 +1083,7 @@ function startProxy(config) {
       var requestModel = body.model || config.model || '';
       var isStream = !!body.stream;
       var openaiBody;
-      try { openaiBody = translateRequest(body); } catch (e) {
+      try { openaiBody = translateRequest(body, config.effort); } catch (e) {
         return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Translation error: ' + e.message } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
       }
 
@@ -1394,6 +1401,7 @@ if (_proxyTypes[config.type]) {
       apiKey: _proxyKey,
       baseURL: config.baseURL || (config.type === 'grok' ? 'https://api.x.ai/v1' : ''),
       model: config.model || '',
+      effort: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? config.effort,
     });
     delete process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + _proxy.port;
