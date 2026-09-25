@@ -113,7 +113,34 @@ try {
       assert.equal(readFileSync(target, 'utf8'), source);
     }
   }
+
+  // The provider check moved into a no-argument helper in Claude 2.1.280.
+  // Both forms must keep the upstream restriction when the feature is off.
+  for (const graph of [false, true]) {
+    if (graph) mkdirSync(join(testDir, 'bunfs'));
+    else rmSync(join(testDir, 'bunfs'), { recursive: true, force: true });
+    for (const [label, condition] of [
+      ['inline provider', 'provider!=="firstParty"&&!isAws(provider)&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku"))'],
+      ['provider helper', 'isThirdParty()&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku"))'],
+    ]) {
+      const source = `function isThirdParty(){return provider!=="firstParty"&&!isAws(provider)}function isAws(value){return value==="anthropicAws"}function supports(model){if(${condition})return!1;return!0}`;
+      const target = join(testDir, graph ? 'bunfs/auto-mode.js' : 'cli.original.cjs');
+      if (graph) writeFileSync(join(testDir, 'cli.original.cjs'), '// entry');
+      writeFileSync(target, source);
+      const output = execFileSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+      assert.match(output, /Auto-mode unlock for third-party API \(inline gate\) \(1 replacement in 1 file\)/, label);
+      const patched = readFileSync(target, 'utf8');
+      for (const toggle of [false, true]) {
+        for (const provider of ['firstParty', 'anthropicAws', 'proxy']) {
+          const context = { provider, __clawgodPatches: { 'auto-mode-inline-gate': toggle } };
+          const result = runInNewContext(`${patched};supports("claude-sonnet-4-6")`, context);
+          assert.equal(result, toggle || provider !== 'proxy', `${label}: ${provider}, toggle ${toggle}`);
+        }
+      }
+    }
+  }
 } finally {
   rmSync(testDir, { recursive: true, force: true });
 }
 console.log('[patch.test] ultraplan bundle/graph compatibility and toggle semantics ok');
+console.log('[patch.test] auto-mode provider gate compatibility and toggle semantics ok');
