@@ -9,8 +9,12 @@ const require = createRequire(import.meta.url);
 const read = path => fs.readFileSync(new URL(path, import.meta.url), 'utf8');
 const wrapper = read('./cli.cjs');
 const unix = read('../templates/install.sh');
-const unixApply = unix.match(/node -e '\n(const fs = require\("fs"\);[\s\S]*?)\n' "\$CLAUDE_SETTINGS" "\$LEAN_IS_MAX"/)[1];
-const unixRemove = unix.match(/node -e '\n(const fs=require\("fs"\),p=process.argv\[1\];[\s\S]*?)\n' "\$CLAUDE_SETTINGS"/)[1];
+// Stay inside one shell single-quoted argument. Other node -e blocks (such
+// as version recovery) can start with the same fs import as the Lean scripts.
+const unixApply = unix.match(/node -e '\n([^']*)\n' "\$CLAUDE_SETTINGS" "\$LEAN_IS_MAX"/)?.[1];
+const unixRemove = unix.match(/node -e '\n(const fs=require\("fs"\),p=process.argv\[1\];[^']*)\n' "\$CLAUDE_SETTINGS"/)?.[1];
+assert.ok(unixApply, 'Lean apply script must be a single node -e argument');
+assert.ok(unixRemove, 'Lean removal script must be a single node -e argument');
 const home = fs.mkdtempSync(join(tmpdir(), 'clawgod-lean-test-'));
 const dir = join(home, '.clawgod');
 const settings = join(home, '.claude', 'settings.json');
