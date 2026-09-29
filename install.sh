@@ -1339,17 +1339,11 @@ const clawgodDir = join(homedir(), '.clawgod');
 
 // Note: there used to be a "drift detection" block here that scanned
 // ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
-// Removed because:
-//   1. Windows users don't have a `versions/` directory at all (Anthropic's
-//      Windows install doesn't follow that convention).
-//   2. We patch out `claude update` (it would otherwise overwrite the bun
-//      runtime under our launcher), so `versions/` no longer auto-grows
-//      on a healthy clawgod install.
-// In practice the block was reading a directory that never changes, but
-// could *retract* a fresher version that install.sh just pulled from npm
-// registry — putting users into a re-patch loop. Upgrades now go through
-// the patched `claude update` → install.sh redirect, which always pulls
-// the latest from npm.
+// Retained native versions (including on Windows) may be older than the
+// version our installer pulled from npm. Scanning them could roll back a
+// fresh install and cause a re-patch loop. Upgrades instead go through the
+// patched `claude update` redirect; native background updates are disabled
+// below so they cannot restore an official launcher over ours.
 
 // One-time migration: earlier wrapper versions set CLAUDE_CONFIG_DIR=~/.clawgod,
 // which made Claude Code read/write ~/.clawgod/.claude.json instead of the
@@ -1462,6 +1456,10 @@ if (existsSync(join(clawgodDir, '.lean-max')) && !existsSync(join(clawgodDir, '.
   process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
 }
 process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
+// Updates belong to clawgod's `claude update` redirect. The native background
+// updater can repair a missing Windows claude.exe even at the same version,
+// shadowing our claude.cmd. Keep it disabled for every clawgod process (#200).
+process.env.DISABLE_AUTOUPDATER = '1';
 // Use system ripgrep (extracted vendor rg path was build-time-baked; system
 // rg is the most reliable fallback under Bun runtime).
 process.env.USE_BUILTIN_RIPGREP ??= '1';

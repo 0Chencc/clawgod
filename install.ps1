@@ -1476,17 +1476,11 @@ const clawgodDir = join(homedir(), '.clawgod');
 
 // Note: there used to be a "drift detection" block here that scanned
 // ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
-// Removed because:
-//   1. Windows users don't have a `versions/` directory at all (Anthropic's
-//      Windows install doesn't follow that convention).
-//   2. We patch out `claude update` (it would otherwise overwrite the bun
-//      runtime under our launcher), so `versions/` no longer auto-grows
-//      on a healthy clawgod install.
-// In practice the block was reading a directory that never changes, but
-// could *retract* a fresher version that install.sh just pulled from npm
-// registry \u2014 putting users into a re-patch loop. Upgrades now go through
-// the patched `claude update` \u2192 install.sh redirect, which always pulls
-// the latest from npm.
+// Retained native versions (including on Windows) may be older than the
+// version our installer pulled from npm. Scanning them could roll back a
+// fresh install and cause a re-patch loop. Upgrades instead go through the
+// patched `claude update` redirect; native background updates are disabled
+// below so they cannot restore an official launcher over ours.
 
 // One-time migration: earlier wrapper versions set CLAUDE_CONFIG_DIR=~/.clawgod,
 // which made Claude Code read/write ~/.clawgod/.claude.json instead of the
@@ -1599,6 +1593,10 @@ if (existsSync(join(clawgodDir, '.lean-max')) && !existsSync(join(clawgodDir, '.
   process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
 }
 process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
+// Updates belong to clawgod's `claude update` redirect. The native background
+// updater can repair a missing Windows claude.exe even at the same version,
+// shadowing our claude.cmd. Keep it disabled for every clawgod process (#200).
+process.env.DISABLE_AUTOUPDATER = '1';
 // Use system ripgrep (extracted vendor rg path was build-time-baked; system
 // rg is the most reliable fallback under Bun runtime).
 process.env.USE_BUILTIN_RIPGREP ??= '1';
@@ -3453,6 +3451,11 @@ foreach ($loc in @(
     (Join-Path $env:LOCALAPPDATA "Programs\claude-code")
 )) {
     if (Test-Path $loc) {
+        # Reinstalling must not back up our own launcher as the original.
+        # Continue searching versions/ if no native executable was found yet.
+        if ($loc -like "*.cmd" -and (Select-String -LiteralPath $loc -Pattern '\.clawgod[\\/]cli\.(?:cjs|js)' -Quiet)) {
+            continue
+        }
         # Back up .exe if exists and not already backed up
         if ($loc -like "*.exe" -and -not (Test-Path $claudeOrigExe)) {
             Copy-Item $loc $claudeOrigExe -Force
@@ -3478,6 +3481,12 @@ foreach ($loc in @(
     }
 }
 
+# Write both entry points before removing a competing exe. If Windows refuses
+# removal, the explicit clawgod command remains available for recovery.
+foreach ($cmd in @("claude", "clawgod")) {
+    $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding Default
+}
+
 # Clean up leftover timestamped/old exes from previous installs
 Get-ChildItem $BinDir -Filter "claude.*.exe" -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne "claude.orig.exe" } |
@@ -3494,24 +3503,21 @@ if (Test-Path $claudeExe) {
         try {
             Remove-Item -Force $claudeExe
         } catch {
-            # File locked (running process) -- rename aside with timestamp
-            $ts = Get-Date -Format "yyyyMMddHHmmss"
-            Rename-Item $claudeExe "claude.$ts.exe" -Force -ErrorAction SilentlyContinue
+            # Running binaries can often be renamed even when deletion fails.
+            # A unique name also avoids collisions during repeated installs.
+            $suffix = [Guid]::NewGuid().ToString('N')
+            try {
+                Rename-Item $claudeExe "claude.$suffix.exe" -ErrorAction Stop
+            } catch {
+                throw "Cannot remove or rename $claudeExe. Close Claude Code sessions (including VS Code), then rerun this installer. Use 'clawgod' to run the patched CLI in the meantime. Windows error: $($_.Exception.Message)"
+            }
         }
-        Write-OK "Removed claude.exe (.cmd now takes priority)"
     }
 }
-
-
-# Write .cmd launcher for both 'claude' and the explicit 'clawgod' alias.
-# Why both:
-#  - claude.cmd may be shadowed by a claude.exe higher in PATH
-#  - clawgod.cmd has no .exe competitor, so it always works
-#  - User can invoke patched explicitly via `clawgod` regardless of which
-#    binary 'claude' resolves to
-foreach ($cmd in @("claude", "clawgod")) {
-    $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding Default
+if (Test-Path $claudeExe) {
+    throw "$claudeExe still shadows claude.cmd. Close Claude Code sessions and rerun this installer; use 'clawgod' in the meantime."
 }
+# An exe earlier in PATH can still shadow claude.cmd; clawgod is unambiguous.
 Write-OK "Commands 'claude' + 'clawgod' -> patched"
 
 # --- Ensure BinDir is in PATH -----------------------------------------

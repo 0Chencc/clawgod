@@ -62,6 +62,9 @@ jobs:
       - name: Run Lean mode regression tests
         run: node src/shared/lean.test.mjs
 
+      - name: Run updater environment regression tests
+        run: node src/shared/updater.test.mjs
+
       - name: Run provider auth and proxy effort regression tests
         run: node src/shared/provider.test.mjs
 
@@ -458,6 +461,10 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ matrix.bun }}
+
+      - name: Test Windows launcher recovery and repeated installs
+        shell: powershell
+        run: ./src/windows/launchers.test.ps1
 
       - name: Set up Python for ConPTY tests
         uses: actions/setup-python@v7
