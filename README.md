@@ -178,10 +178,10 @@ Extra options:
 
 ```bash
 claude update --version 2.1.180   # Pin to a specific Claude Code version
-claude update --no-upgrade        # Re-patch without downloading (use existing cli.js)
+claude update --no-upgrade        # Re-patch the installed Claude version
 ```
 
-`--version` is useful when a new release has issues and you want to stay on a known-good version. `--no-upgrade` re-applies the latest patches from the installer to the existing cli.js — handy when only the patcher has been updated.
+`--version` is useful when a new release has issues and you want to stay on a known-good version. `--no-upgrade` re-applies the latest patches to a complete clean-source backup of the installed version. Older installations without that backup download the same Claude version once to recover it; subsequent re-patches reuse the local backup.
 
 If you'd rather invoke the installer directly (same effect, both paths fetch the same upstream release and re-patch):
 

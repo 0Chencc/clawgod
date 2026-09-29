@@ -53,6 +53,9 @@ jobs:
       - name: Run patch semantic tests
         run: node src/shared/patch.test.mjs
 
+      - name: Run clean source and repatch regression tests
+        run: node src/shared/source-backup.test.mjs
+
       - name: Test inactive issue policy
         run: node .github/scripts/close-inactive-issues.test.cjs
 
@@ -247,6 +250,20 @@ jobs:
           [[ -n "$line" ]] || { echo "::error::patch.mjs result line missing from install.sh output"; exit 1; }
           failed=$(echo "$line" | sed -E 's/.*skipped, ([0-9]+) failed.*/\1/')
           [[ "$failed" -eq 0 ]] || { echo "::error::patch.mjs reported $failed failed patches"; exit 1; }
+
+      - name: Verify repeated no-upgrade installs
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=$(grep -oE 'Result: [0-9]+ applied, [0-9]+ skipped, [0-9]+ failed' /tmp/install.log | tail -1)
+          for attempt in 1 2; do
+            log="/tmp/reinstall-$attempt.log"
+            bash install.sh --no-upgrade >"$log" 2>&1 || { cat "$log"; exit 1; }
+            summary=$(grep -oE 'Result: [0-9]+ applied, [0-9]+ skipped, [0-9]+ failed' "$log" | tail -1)
+            echo "$summary"
+            [[ "$summary" == "$baseline" ]] || { cat "$log"; exit 1; }
+            grep -q 'Using complete clean-source backup' "$log"
+          done
 
       - name: Verify lean settings applied
         shell: bash
@@ -466,6 +483,10 @@ jobs:
         shell: powershell
         run: ./src/windows/launchers.test.ps1
 
+      - name: Test Windows clean source recovery
+        shell: powershell
+        run: ./src/windows/source-recovery.test.ps1
+
       - name: Set up Python for ConPTY tests
         uses: actions/setup-python@v7
         with:
@@ -634,6 +655,23 @@ jobs:
           Write-Host "Patch summary: $($summary.Line)"
           if ($summary.Line -notmatch 'skipped, 0 failed') {
             Write-Error "patch.mjs reported failed patches: $($summary.Line)"
+          }
+
+      - name: Verify repeated no-upgrade installs on Windows
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pattern = 'Result: [0-9]+ applied, [0-9]+ skipped, [0-9]+ failed'
+          $baseline = [regex]::Match((Get-Content (Join-Path $env:RUNNER_TEMP 'install-windows.log') -Raw), $pattern).Value
+          foreach ($attempt in 1..2) {
+            $log = Join-Path $env:RUNNER_TEMP "reinstall-windows-$attempt.log"
+            & powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1 -NoUpgrade *> $log
+            if ($LASTEXITCODE -ne 0) { Get-Content $log; throw 'Reinstall failed' }
+            $output = Get-Content $log -Raw
+            $summary = [regex]::Match($output, $pattern).Value
+            Write-Host $summary
+            if (-not $summary -or $summary -ne $baseline) { throw 'Reinstall changed patch results' }
+            if ($output -notmatch 'Using complete clean-source backup') { throw 'Clean source was not reused' }
           }
 
       - name: Smoke test - clawgod --version

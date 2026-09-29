@@ -84,6 +84,21 @@ Run them with Node and Windows PowerShell 5.1 respectively; CI runs both.
 
 ## Layout
 
+`source-backup.json` in the installed directory stores the complete clean
+JavaScript source (entry and graph chunks) after extraction/post-processing.
+The patcher reads it before applying patches, and writes runtime source only
+if no patch failed. Fresh installs replace the snapshot; `--no-upgrade` reuses
+it. Older installations without a complete snapshot fetch the exact installed
+version once to recover clean source. `--capture-clean-source` is an installer
+operation and must only run against freshly extracted, unpatched source.
+
+`node src/shared/source-backup.test.mjs` covers repeated patching, graph and
+legacy backups, version/file-set validation, revert, and failure without source
+writes, plus Unix migration and failure propagation. The Windows preflight is
+covered by `src/windows/source-recovery.test.ps1`. CI also repeats the actual
+Unix and Windows installers and compares their patch summaries with the first
+install.
+
 - `shared/` contains payloads embedded identically in both installers,
   including `cli.cjs` (the launcher/patcher bootstrap shared by Unix and
   Windows). `feature-gates.cjs` carries a `{{CLAWGOD:FEATURES_META}}` marker

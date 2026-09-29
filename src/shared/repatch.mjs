@@ -36,6 +36,7 @@ const patcher = join(here, 'patch.mjs');
 
 run('extract', [extractor, nativeBin, here]);
 run('post-process', [postProc]);
+run('clean source backup', [patcher, '--capture-clean-source']);
 run('patcher', [patcher]);
 
 writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');

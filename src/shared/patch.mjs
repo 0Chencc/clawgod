@@ -2,13 +2,14 @@
 /**
  * ClawGod Universal Patcher — 正则模式匹配, 跨版本兼容
  */
-import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, renameSync } from 'fs';
+import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGET = join(__dirname, 'cli.original.cjs');
 const BACKUP = TARGET + '.bak';
+const CLEAN_SOURCE = join(__dirname, 'source-backup.json');
 
 // ─── Feature registry (toggle units) ─────────────────────
 // A feature is the user-facing unit toggled via ~/.clawgod/patches.json
@@ -749,6 +750,7 @@ const dryRun = args.includes('--dry-run');
 const verify = args.includes('--verify');
 const revert = args.includes('--revert');
 const dumpFeatures = args.includes('--dump-features');
+const captureCleanSource = args.includes('--capture-clean-source');
 
 // Build-time export: `patch.mjs --dump-features` prints the inverted
 // registry (patch id → owning feature ids) as JSON and exits. build.js
@@ -813,13 +815,10 @@ if (dumpFeatures) {
 const GRAPH_DIR = join(__dirname, 'bunfs');
 const isGraph = existsSync(GRAPH_DIR);
 
-if (revert) {
+if (revert && !existsSync(CLEAN_SOURCE)) {
   if (isGraph) {
-    // graph: restore each file from its .bak (no-op if none) — full graph
-    // backup isn't taken for chunks; only the entry has a .bak. Re-extract
-    // instead: the safest revert for graph installs is to rerun extract.
-    console.log('⚠️  Graph install detected — run install.sh to re-extract clean source.');
-    process.exit(0);
+    console.error('No complete clean-source backup. Reinstall the same Claude version to recover it.');
+    process.exit(1);
   }
   if (!existsSync(BACKUP)) { console.error('❌ No backup found'); process.exit(1); }
   copyFileSync(BACKUP, TARGET);
@@ -848,6 +847,45 @@ if (isGraph) {
 // Extract version from entry content
 const version = (files[TARGET] || '').match(/Version:\s*([\d.]+)/)?.[1] || 'unknown';
 const isCJSBundle = !isGraph; // legacy
+
+// Capture only immediately after extraction/post-processing (or restoration of
+// a legacy single-file backup). Never infer clean chunks from a patched graph.
+// A single renamed JSON file avoids accepting an interrupted partial backup.
+if (captureCleanSource) {
+  const snapshot = { format: 1, version, files: Object.fromEntries(
+    Object.entries(files).map(([name, content]) => [relative(__dirname, name).replaceAll('\\', '/'), content]),
+  ) };
+  const temporary = `${CLEAN_SOURCE}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(snapshot));
+  renameSync(temporary, CLEAN_SOURCE);
+  copyFileSync(TARGET, BACKUP); // Refresh legacy backup after a version change too.
+  console.log(`Saved clean source: ${Object.keys(files).length} files (v${version})`);
+  process.exit(0);
+}
+
+if (existsSync(CLEAN_SOURCE) && !verify) {
+  try {
+    const snapshot = JSON.parse(readFileSync(CLEAN_SOURCE, 'utf8'));
+    const names = Object.keys(files).map(name => relative(__dirname, name).replaceAll('\\', '/')).sort();
+    if (snapshot.format !== 1 || snapshot.version !== version ||
+        !snapshot.files || typeof snapshot.files !== 'object' ||
+        JSON.stringify(Object.keys(snapshot.files).sort()) !== JSON.stringify(names) ||
+        !names.every(name => typeof snapshot.files[name] === 'string')) {
+      throw new Error('version or file set does not match the installed source');
+    }
+    // Keep the active files untouched until all patch checks succeed.
+    files = Object.fromEntries(names.map(name => [join(__dirname, name), snapshot.files[name]]));
+    console.log(`Using clean source backup: ${names.length} files (v${version})`);
+  } catch (error) {
+    console.error(`Invalid clean-source backup: ${error.message}. Reinstall Claude ${version} without --no-upgrade.`);
+    process.exit(1);
+  }
+}
+if (revert) {
+  for (const [name, content] of Object.entries(files)) writeFileSync(name, content, 'utf8');
+  console.log('Reverted all source files from clean backup');
+  process.exit(0);
+}
 
 console.log(`\n${'═'.repeat(55)}`);
 console.log(`  ClawGod (universal)`);
@@ -961,6 +999,11 @@ for (const p of patches) {
 
 console.log(`\n${'─'.repeat(55)}`);
 console.log(`  Result: ${applied} applied, ${skipped} skipped, ${failed} failed`);
+
+if (failed > 0) {
+  console.error('Patching failed; source files were not changed.');
+  process.exit(1);
+}
 
 if (!dryRun && !verify && applied > 0) {
   // backup the entry (legacy semantics); graph writes all files in place

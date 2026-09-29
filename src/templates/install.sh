@@ -70,7 +70,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -161,7 +161,7 @@ if ! command -v rg &>/dev/null; then
 fi
 info "ripgrep: $(rg --version | head -1)"
 
-# ─── Handle --no-upgrade (skip download, re-patch only) ──────────────
+# ─── Handle --no-upgrade (re-patch the installed version) ───────────
 mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
 
 if [ "$NO_UPGRADE" = "1" ]; then
@@ -170,12 +170,29 @@ if [ "$NO_UPGRADE" = "1" ]; then
     warn "Run a full install first (without --no-upgrade)."
     exit 1
   fi
-  if [ -f "$CLAWGOD_DIR/cli.original.cjs.bak" ]; then
-    cp "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/cli.original.cjs"
-    info "Restored clean cli.original.cjs from backup"
+  if [ -f "$CLAWGOD_DIR/source-backup.json" ]; then
+    info "Using complete clean-source backup (--no-upgrade)"
+  else
+    # Old installations have no clean chunk backup. Use the installer's version
+    # stamp, falling back to the entry header, to avoid silently upgrading.
+    VERSION=$(node -e '
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+let stamp = "";
+try { stamp = fs.readFileSync(process.argv[2], "utf8").trim(); } catch {}
+const version = stamp.match(/^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/)?.[1] ||
+  source.match(/Version:\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
+if (!version) process.exit(1);
+console.log(version);
+' "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/.source-version") || {
+      warn "No complete source backup and installed version is unknown. Reinstall with --version <version>."
+      exit 1
+    }
+    NO_UPGRADE=0
+    info "Recovering clean source for installed version $VERSION (one-time download, no version upgrade)"
   fi
-  info "Skipping download (--no-upgrade)"
-else
+fi
+if [ "$NO_UPGRADE" != "1" ]; then
 
 # ─── Locate native Bun binary (cli.js source) ──────────────────────────
 # v2.1.113+ ships a Bun standalone executable as the only canonical form.
@@ -378,6 +395,9 @@ info "Patcher created (patch.mjs)"
 
 # ─── Apply patches ─────────────────────────────────────
 
+if [ "$NO_UPGRADE" != "1" ]; then
+  node "$CLAWGOD_DIR/patch.mjs" --capture-clean-source
+fi
 dim "Applying patches ..."
 node "$CLAWGOD_DIR/patch.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
 patch_status=${PIPESTATUS[0]}
@@ -685,7 +705,7 @@ dim "  Updates: 'claude update' is patched to route through this installer."
 dim "  Just run it as usual — pulls latest Anthropic release + re-patches"
 dim "  in one step. Extra options:"
 dim "    claude update --version 2.1.180   (install a specific version)"
-dim "    claude update --no-upgrade        (re-patch without downloading)"
+dim "    claude update --no-upgrade        (re-patch the installed version)"
 dim "  To leave clawgod and use vanilla update:"
 dim "    bash ~/.clawgod/install.sh --uninstall"
 echo ""

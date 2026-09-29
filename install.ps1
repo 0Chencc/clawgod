@@ -73,7 +73,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -216,23 +216,38 @@ catch {
     exit 1
 }
 
-# --- Handle -NoUpgrade (skip download, re-patch only) -----------------
+# --- Handle -NoUpgrade (re-patch the installed version) --------------
 if ($NoUpgrade) {
     New-Item -ItemType Directory -Force -Path $ClawDir | Out-Null
     New-Item -ItemType Directory -Force -Path $BinDir  | Out-Null
     $existingCjs = Join-Path $ClawDir "cli.original.cjs"
-    $existingBak = "$existingCjs.bak"
     if (-not (Test-Path $existingCjs)) {
         Write-Err "-NoUpgrade requires an existing installation."
         Write-Err "Run a full install first (without -NoUpgrade)."
         exit 1
     }
-    if (Test-Path $existingBak) {
-        Copy-Item $existingBak $existingCjs -Force
-        Write-OK "Restored clean cli.original.cjs from backup"
+    if (Test-Path (Join-Path $ClawDir 'source-backup.json')) {
+        Write-OK "Using complete clean-source backup (-NoUpgrade)"
+    } else {
+        # Older installers backed up only the entry, not bunfs chunks. Recover
+        # clean source from the exact installed version, never from latest.
+        $versionStamp = Join-Path $ClawDir '.source-version'
+        $installedVersion = [regex]::Match('', '^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$')
+        if (Test-Path $versionStamp) {
+            $installedVersion = [regex]::Match((Get-Content $versionStamp -Raw).Trim(), '^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$')
+        }
+        if (-not $installedVersion.Success) {
+            $installedVersion = [regex]::Match((Get-Content $existingCjs -Raw), 'Version:\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)')
+        }
+        if (-not $installedVersion.Success) {
+            throw 'No complete source backup and installed version is unknown. Reinstall with -Version <version>.'
+        }
+        $Version = $installedVersion.Groups[1].Value
+        $NoUpgrade = [switch]$false
+        Write-OK "Recovering clean source for installed version $Version (one-time download, no version upgrade)"
     }
-    Write-OK "Skipping download (-NoUpgrade)"
-} else {
+}
+if (-not $NoUpgrade) {
 
 # --- Locate native Bun binary (cli.js source) -------------------------
 # Source: npm registry (@anthropic-ai/claude-code-win32-<arch>).
@@ -1021,6 +1036,7 @@ const patcher = join(here, 'patch.mjs');
 
 run('extract', [extractor, nativeBin, here]);
 run('post-process', [postProc]);
+run('clean source backup', [patcher, '--capture-clean-source']);
 run('patcher', [patcher]);
 
 writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
@@ -2229,13 +2245,14 @@ $patcherCode = @'
 /**
  * ClawGod Universal Patcher \u2014 \u6b63\u5219\u6a21\u5f0f\u5339\u914d, \u8de8\u7248\u672c\u517c\u5bb9
  */
-import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, renameSync } from 'fs';
+import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGET = join(__dirname, 'cli.original.cjs');
 const BACKUP = TARGET + '.bak';
+const CLEAN_SOURCE = join(__dirname, 'source-backup.json');
 
 // \u2500\u2500\u2500 Feature registry (toggle units) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 // A feature is the user-facing unit toggled via ~/.clawgod/patches.json
@@ -2976,6 +2993,7 @@ const dryRun = args.includes('--dry-run');
 const verify = args.includes('--verify');
 const revert = args.includes('--revert');
 const dumpFeatures = args.includes('--dump-features');
+const captureCleanSource = args.includes('--capture-clean-source');
 
 // Build-time export: `patch.mjs --dump-features` prints the inverted
 // registry (patch id \u2192 owning feature ids) as JSON and exits. build.js
@@ -3040,13 +3058,10 @@ if (dumpFeatures) {
 const GRAPH_DIR = join(__dirname, 'bunfs');
 const isGraph = existsSync(GRAPH_DIR);
 
-if (revert) {
+if (revert && !existsSync(CLEAN_SOURCE)) {
   if (isGraph) {
-    // graph: restore each file from its .bak (no-op if none) \u2014 full graph
-    // backup isn't taken for chunks; only the entry has a .bak. Re-extract
-    // instead: the safest revert for graph installs is to rerun extract.
-    console.log('\u26a0\ufe0f  Graph install detected \u2014 run install.sh to re-extract clean source.');
-    process.exit(0);
+    console.error('No complete clean-source backup. Reinstall the same Claude version to recover it.');
+    process.exit(1);
   }
   if (!existsSync(BACKUP)) { console.error('\u274c No backup found'); process.exit(1); }
   copyFileSync(BACKUP, TARGET);
@@ -3075,6 +3090,45 @@ if (isGraph) {
 // Extract version from entry content
 const version = (files[TARGET] || '').match(/Version:\s*([\d.]+)/)?.[1] || 'unknown';
 const isCJSBundle = !isGraph; // legacy
+
+// Capture only immediately after extraction/post-processing (or restoration of
+// a legacy single-file backup). Never infer clean chunks from a patched graph.
+// A single renamed JSON file avoids accepting an interrupted partial backup.
+if (captureCleanSource) {
+  const snapshot = { format: 1, version, files: Object.fromEntries(
+    Object.entries(files).map(([name, content]) => [relative(__dirname, name).replaceAll('\\', '/'), content]),
+  ) };
+  const temporary = `${CLEAN_SOURCE}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(snapshot));
+  renameSync(temporary, CLEAN_SOURCE);
+  copyFileSync(TARGET, BACKUP); // Refresh legacy backup after a version change too.
+  console.log(`Saved clean source: ${Object.keys(files).length} files (v${version})`);
+  process.exit(0);
+}
+
+if (existsSync(CLEAN_SOURCE) && !verify) {
+  try {
+    const snapshot = JSON.parse(readFileSync(CLEAN_SOURCE, 'utf8'));
+    const names = Object.keys(files).map(name => relative(__dirname, name).replaceAll('\\', '/')).sort();
+    if (snapshot.format !== 1 || snapshot.version !== version ||
+        !snapshot.files || typeof snapshot.files !== 'object' ||
+        JSON.stringify(Object.keys(snapshot.files).sort()) !== JSON.stringify(names) ||
+        !names.every(name => typeof snapshot.files[name] === 'string')) {
+      throw new Error('version or file set does not match the installed source');
+    }
+    // Keep the active files untouched until all patch checks succeed.
+    files = Object.fromEntries(names.map(name => [join(__dirname, name), snapshot.files[name]]));
+    console.log(`Using clean source backup: ${names.length} files (v${version})`);
+  } catch (error) {
+    console.error(`Invalid clean-source backup: ${error.message}. Reinstall Claude ${version} without --no-upgrade.`);
+    process.exit(1);
+  }
+}
+if (revert) {
+  for (const [name, content] of Object.entries(files)) writeFileSync(name, content, 'utf8');
+  console.log('Reverted all source files from clean backup');
+  process.exit(0);
+}
 
 console.log(`\n${'\u2550'.repeat(55)}`);
 console.log(`  ClawGod (universal)`);
@@ -3189,6 +3243,11 @@ for (const p of patches) {
 console.log(`\n${'\u2500'.repeat(55)}`);
 console.log(`  Result: ${applied} applied, ${skipped} skipped, ${failed} failed`);
 
+if (failed > 0) {
+  console.error('Patching failed; source files were not changed.');
+  process.exit(1);
+}
+
 if (!dryRun && !verify && applied > 0) {
   // backup the entry (legacy semantics); graph writes all files in place
   if (!existsSync(BACKUP)) {
@@ -3210,6 +3269,10 @@ Write-OK "Patcher created (patch.mjs)"
 
 # --- Apply patches ----------------------------------------------------
 
+if (-not $NoUpgrade) {
+    node (Join-Path $ClawDir "patch.mjs") --capture-clean-source
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 Write-Dim "Applying patches ..."
 node (Join-Path $ClawDir "patch.mjs")
 if ($LASTEXITCODE -ne 0) {
@@ -3542,7 +3605,7 @@ Write-Dim "  Updates: 'claude update' is patched to route through this installer
 Write-Dim "  Just run it as usual -- pulls latest Anthropic release + re-patches"
 Write-Dim "  in one step. Extra options:"
 Write-Dim "    claude update --version 2.1.180   (install a specific version)"
-Write-Dim "    claude update --no-upgrade        (re-patch without downloading)"
+Write-Dim "    claude update --no-upgrade        (re-patch the installed version)"
 Write-Dim "  To leave clawgod and use vanilla update:"
 Write-Dim "    bash ~/.clawgod/install.sh --uninstall"
 Write-Host ""

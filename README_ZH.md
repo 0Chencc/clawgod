@@ -181,7 +181,7 @@ claude update --version 2.1.180   # 锁定到指定 Claude Code 版本
 claude update --no-upgrade        # 不下载新版，只用最新 patcher 重新打补丁
 ```
 
-`--version` 适用于新版有问题、想停留在已知稳定版本时。`--no-upgrade` 对现有 cli.js 重新应用最新 patch——当只有 patcher 更新了（修了正则）而不需要拉新 Claude 版本时特别好用。
+`--version` 适用于新版有问题、想停留在已知稳定版本时。`--no-upgrade` 使用当前版本的完整干净源码备份重新应用最新补丁。旧安装若缺少这份备份，会下载一次相同版本来恢复源码，不会升级 Claude；之后重复打补丁直接复用本地备份。
 
 如果你想直接调 installer（效果一样，两条路径都会拉同一个上游 release 并重新 patch）:
 

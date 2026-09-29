@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 
 // legal values → parsed as the floor (injected Math.max applies it)
@@ -108,8 +108,9 @@ try {
       const source = `var command={name:"ultraplan",${body}};var neighbor={name:"other",argumentHint:"<prompt>",isEnabled:()=>!1};`;
       const target = join(testDir, graph ? 'bunfs/commands.js' : 'cli.original.cjs');
       writeFileSync(target, source);
-      const output = execFileSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
-      assert.match(output, /Ultraplan enable — regex stale/);
+      const result = spawnSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /Ultraplan enable — regex stale/);
       assert.equal(readFileSync(target, 'utf8'), source);
     }
   }
@@ -117,8 +118,8 @@ try {
   // The provider check moved into a no-argument helper in Claude 2.1.280.
   // Both forms must keep the upstream restriction when the feature is off.
   for (const graph of [false, true]) {
+    rmSync(join(testDir, 'bunfs'), { recursive: true, force: true });
     if (graph) mkdirSync(join(testDir, 'bunfs'));
-    else rmSync(join(testDir, 'bunfs'), { recursive: true, force: true });
     for (const [label, condition] of [
       ['inline provider', 'provider!=="firstParty"&&!isAws(provider)&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku"))'],
       ['provider helper', 'isThirdParty()&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku"))'],

@@ -73,7 +73,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -216,23 +216,38 @@ catch {
     exit 1
 }
 
-# --- Handle -NoUpgrade (skip download, re-patch only) -----------------
+# --- Handle -NoUpgrade (re-patch the installed version) --------------
 if ($NoUpgrade) {
     New-Item -ItemType Directory -Force -Path $ClawDir | Out-Null
     New-Item -ItemType Directory -Force -Path $BinDir  | Out-Null
     $existingCjs = Join-Path $ClawDir "cli.original.cjs"
-    $existingBak = "$existingCjs.bak"
     if (-not (Test-Path $existingCjs)) {
         Write-Err "-NoUpgrade requires an existing installation."
         Write-Err "Run a full install first (without -NoUpgrade)."
         exit 1
     }
-    if (Test-Path $existingBak) {
-        Copy-Item $existingBak $existingCjs -Force
-        Write-OK "Restored clean cli.original.cjs from backup"
+    if (Test-Path (Join-Path $ClawDir 'source-backup.json')) {
+        Write-OK "Using complete clean-source backup (-NoUpgrade)"
+    } else {
+        # Older installers backed up only the entry, not bunfs chunks. Recover
+        # clean source from the exact installed version, never from latest.
+        $versionStamp = Join-Path $ClawDir '.source-version'
+        $installedVersion = [regex]::Match('', '^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$')
+        if (Test-Path $versionStamp) {
+            $installedVersion = [regex]::Match((Get-Content $versionStamp -Raw).Trim(), '^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$')
+        }
+        if (-not $installedVersion.Success) {
+            $installedVersion = [regex]::Match((Get-Content $existingCjs -Raw), 'Version:\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)')
+        }
+        if (-not $installedVersion.Success) {
+            throw 'No complete source backup and installed version is unknown. Reinstall with -Version <version>.'
+        }
+        $Version = $installedVersion.Groups[1].Value
+        $NoUpgrade = [switch]$false
+        Write-OK "Recovering clean source for installed version $Version (one-time download, no version upgrade)"
     }
-    Write-OK "Skipping download (-NoUpgrade)"
-} else {
+}
+if (-not $NoUpgrade) {
 
 # --- Locate native Bun binary (cli.js source) -------------------------
 # Source: npm registry (@anthropic-ai/claude-code-win32-<arch>).
@@ -476,6 +491,10 @@ Write-OK "Patcher created (patch.mjs)"
 
 # --- Apply patches ----------------------------------------------------
 
+if (-not $NoUpgrade) {
+    node (Join-Path $ClawDir "patch.mjs") --capture-clean-source
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 Write-Dim "Applying patches ..."
 node (Join-Path $ClawDir "patch.mjs")
 if ($LASTEXITCODE -ne 0) {
@@ -764,7 +783,7 @@ Write-Dim "  Updates: 'claude update' is patched to route through this installer
 Write-Dim "  Just run it as usual -- pulls latest Anthropic release + re-patches"
 Write-Dim "  in one step. Extra options:"
 Write-Dim "    claude update --version 2.1.180   (install a specific version)"
-Write-Dim "    claude update --no-upgrade        (re-patch without downloading)"
+Write-Dim "    claude update --no-upgrade        (re-patch the installed version)"
 Write-Dim "  To leave clawgod and use vanilla update:"
 Write-Dim "    bash ~/.clawgod/install.sh --uninstall"
 Write-Host ""
