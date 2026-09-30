@@ -71,6 +71,9 @@ jobs:
       - name: Run provider auth and proxy effort regression tests
         run: node src/shared/provider.test.mjs
 
+      - name: Run Chat Completions protocol regression tests
+        run: node --test src/shared/openai-proxy.test.mjs
+
       - name: Run Bun.ant shim tests
         # Claude Code >= 2.1.271 renders through Bun.ant.CellSegmenter, which
         # stock Bun lacks; the shim answers it. Pure JS, so it runs on Node.
@@ -238,6 +241,10 @@ jobs:
         # exercises the production Bun.stringWidth branch of the shim.
         shell: bash
         run: bun src/shared/bun-ant-shim.test.mjs
+
+      - name: Run Chat Completions protocol and HTTP integration tests under Bun
+        shell: bash
+        run: bun test src/shared/openai-proxy.test.mjs src/shared/openai-proxy.integration.test.mjs
 
       - name: Assert all patches applied (parse install log)
         # patch.mjs prints "Result: A applied, S skipped, F failed".
@@ -641,6 +648,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             Write-Error 'bun-ant shim check failed'
           }
+
+      - name: Run Chat Completions protocol and HTTP integration tests under Bun
+        shell: powershell
+        run: |
+          bun test src/shared/openai-proxy.test.mjs src/shared/openai-proxy.integration.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Assert all patches applied
         shell: powershell

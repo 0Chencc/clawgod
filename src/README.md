@@ -64,6 +64,24 @@ streaming requests and custom model aliases that omit `output_config`:
 node src/shared/provider.test.mjs
 ```
 
+`src/shared/openai-proxy.test.mjs` exercises request/response translation,
+tool selection and parallel calls, images/PDFs and unsupported content errors,
+local token estimates, HTTP failures, SSE framing and fragmented UTF-8,
+usage trailers, incomplete streams, cancellation, and timeouts. The provider
+suite also checks protocol selection, legacy aliases, and configuration errors.
+
+```bash
+node --test src/shared/openai-proxy.test.mjs
+bun test src/shared/openai-proxy.test.mjs src/shared/openai-proxy.integration.test.mjs
+```
+
+The integration suite runs a real Bun proxy and loopback HTTP upstream. It
+verifies a complete tool call/result round trip, streaming token accounting,
+error status/retry headers, local counting without network calls, and stream
+timeouts. It is skipped under Node, which cannot run `Bun.serve`. CI runs the
+protocol suite under Node and both suites under Bun on Unix and Windows.
+These fixtures do not certify compatibility with every third-party model.
+
 CI runs the JavaScript suites in the `build-sources` job, then loads the shim under Bun in the
 smoke jobs (`compat-daily.yml`).
 

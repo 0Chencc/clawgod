@@ -1055,249 +1055,314 @@ if (-not $ProxySource) {
   # Inline fallback: fetch from release assets
   $ProxySource = @'
 'use strict';
-function translateSystem(system) {
-  if (!system) return [];
-  if (typeof system === 'string') return [{ role: 'system', content: system }];
-  if (Array.isArray(system)) {
-    var text = system.filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('\n');
-    return text ? [{ role: 'system', content: text }] : [];
+function textParts(content, context) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) throw new Error(context + ' must be text or content blocks');
+  return content.map(function (block) {
+    if (block.type !== 'text') throw new Error(context + ': unsupported block ' + block.type);
+    return textValue(block.text);
+  }).join('\n');
+}
+function textValue(value) {
+  if (typeof value !== 'string') throw new Error('Text content must be a string');
+  return value;
+}
+function userPart(block) {
+  if (block.type === 'text') return { type: 'text', text: textValue(block.text) };
+  var source = block.source || {};
+  if (block.type === 'image') {
+    if (source.type === 'base64' && source.data && /^image\//.test(source.media_type))
+      return { type: 'image_url', image_url: { url: 'data:' + source.media_type + ';base64,' + source.data } };
+    if (source.type === 'url' && source.url) return { type: 'image_url', image_url: { url: source.url } };
+    throw new Error('Unsupported image source');
   }
-  return [];
+  if (block.type === 'document') {
+    if (block.citations && block.citations.enabled) throw new Error('Document citations are not supported by openai-chat');
+    if (source.type === 'text') return { type: 'text', text: textValue(source.data) };
+    if (source.type === 'base64' && source.media_type === 'application/pdf' && source.data)
+      return { type: 'file', file: { filename: block.title || 'document.pdf', file_data: 'data:application/pdf;base64,' + source.data } };
+    throw new Error('Unsupported document source; use base64 PDF (requires upstream file support) or text');
+  }
+  throw new Error('Unsupported user content block: ' + block.type);
 }
 function translateMessages(msgs) {
+  if (!Array.isArray(msgs)) throw new Error('messages must be an array');
   var out = [];
-  for (var i = 0; i < msgs.length; i++) {
-    var msg = msgs[i];
+  for (var msg of msgs) {
+    if (msg.role !== 'user' && msg.role !== 'assistant') throw new Error('Unsupported message role: ' + msg.role);
+    if (typeof msg.content === 'string') { out.push({ role: msg.role, content: msg.content }); continue; }
+    if (!Array.isArray(msg.content)) throw new Error('Message content must be text or content blocks');
     if (msg.role === 'user') {
-      if (typeof msg.content === 'string') { out.push({ role: 'user', content: msg.content }); continue; }
-      if (!Array.isArray(msg.content)) continue;
-      var toolResults = [], otherBlocks = [];
-      for (var j = 0; j < msg.content.length; j++) {
-        if (msg.content[j].type === 'tool_result') toolResults.push(msg.content[j]);
-        else otherBlocks.push(msg.content[j]);
+      var parts = [];
+      for (var block of msg.content) {
+        if (block.type === 'tool_result') {
+          var text = block.content === undefined ? '' : textParts(block.content, 'Tool result');
+          out.push({ role: 'tool', tool_call_id: block.tool_use_id, content: (block.is_error ? '[ERROR] ' : '') + text });
+        } else parts.push(userPart(block));
       }
-      for (var k = 0; k < toolResults.length; k++) {
-        var tr = toolResults[k], content = '';
-        if (typeof tr.content === 'string') content = tr.content;
-        else if (Array.isArray(tr.content)) content = tr.content.filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('\n');
-        if (tr.is_error) content = '[ERROR] ' + content;
-        out.push({ role: 'tool', tool_call_id: tr.tool_use_id, content: content || '' });
-      }
-      if (otherBlocks.length > 0) {
-        var parts = [];
-        for (var l = 0; l < otherBlocks.length; l++) {
-          var block = otherBlocks[l];
-          if (block.type === 'text') parts.push({ type: 'text', text: block.text });
-          else if (block.type === 'image') {
-            var url = block.source.type === 'base64' ? 'data:' + block.source.media_type + ';base64,' + block.source.data : block.source.url;
-            parts.push({ type: 'image_url', image_url: { url: url } });
-          }
-        }
-        if (parts.length === 1 && parts[0].type === 'text') out.push({ role: 'user', content: parts[0].text });
-        else if (parts.length > 0) out.push({ role: 'user', content: parts });
-      }
-    } else if (msg.role === 'assistant') {
-      if (typeof msg.content === 'string') { out.push({ role: 'assistant', content: msg.content }); continue; }
-      if (!Array.isArray(msg.content)) continue;
+      // All tool results must precede the next user turn (including parallel calls).
+      if (parts.length) out.push({ role: 'user', content: parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts });
+    } else {
       var textContent = '', toolCalls = [];
-      for (var m = 0; m < msg.content.length; m++) {
-        var b = msg.content[m];
-        if (b.type === 'text') textContent += b.text;
+      for (var b of msg.content) {
+        if (b.type === 'text') textContent += textValue(b.text);
         else if (b.type === 'tool_use') toolCalls.push({ id: b.id, type: 'function', function: { name: b.name, arguments: typeof b.input === 'string' ? b.input : JSON.stringify(b.input) } });
+        // Anthropic thinking signatures cannot be replayed to Chat Completions.
+        else if (b.type !== 'thinking' && b.type !== 'redacted_thinking') throw new Error('Unsupported assistant content block: ' + b.type);
       }
       var assistantMsg = { role: 'assistant', content: textContent || null };
-      if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+      if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
       out.push(assistantMsg);
     }
   }
   return out;
 }
-function translateTools(tools) {
-  if (!tools || tools.length === 0) return undefined;
-  return tools.map(function (t) {
-    return { type: 'function', function: { name: t.name, description: t.description || '', parameters: t.input_schema || { type: 'object', properties: {} } } };
-  });
-}
-function stripCacheControl(obj) {
-  if (!obj || typeof obj !== 'object') return obj;
-  if (Array.isArray(obj)) return obj.map(stripCacheControl);
-  var out = {};
-  for (var key in obj) { if (key === 'cache_control') continue; out[key] = stripCacheControl(obj[key]); }
-  return out;
-}
 function translateRequest(body, configuredEffort) {
-  var cleaned = stripCacheControl(body);
-  var systemMsgs = translateSystem(cleaned.system);
-  var userMsgs = translateMessages(cleaned.messages || []);
-  var openaiBody = { model: cleaned.model, messages: systemMsgs.concat(userMsgs), stream: !!cleaned.stream };
-  if (cleaned.max_tokens) openaiBody.max_tokens = cleaned.max_tokens;
-  if (cleaned.temperature !== undefined) openaiBody.temperature = cleaned.temperature;
-  if (cleaned.top_p !== undefined) openaiBody.top_p = cleaned.top_p;
-  if (cleaned.stop_sequences) openaiBody.stop = cleaned.stop_sequences;
-  // Claude can omit output_config for unknown model aliases. Keep an explicit
-  // launcher setting authoritative, matching CLAUDE_CODE_EFFORT_LEVEL priority.
-  var effort = configuredEffort || (cleaned.output_config && cleaned.output_config.effort);
-  if (effort && effort !== 'auto') {
-    // Chat Completions calls the highest effort xhigh, not Claude's max.
-    openaiBody.reasoning_effort = effort === 'max' ? 'xhigh' : effort;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Request must be an object');
+  var messages = body.system ? [{ role: 'system', content: textParts(body.system, 'System prompt') }] : [];
+  var result = { model: body.model, messages: messages.concat(translateMessages(body.messages || [])), stream: !!body.stream };
+  if (body.max_tokens !== undefined) result.max_tokens = body.max_tokens;
+  if (body.temperature !== undefined) result.temperature = body.temperature;
+  if (body.top_p !== undefined) result.top_p = body.top_p;
+  if (body.stop_sequences) result.stop = body.stop_sequences;
+  var effort = configuredEffort || (body.output_config && body.output_config.effort);
+  if (effort && effort !== 'auto') result.reasoning_effort = effort === 'max' ? 'xhigh' : effort;
+  if (body.tools && body.tools.length) result.tools = body.tools.map(function (tool) {
+    if (tool.type && tool.type !== 'custom') throw new Error('Unsupported tool type: ' + tool.type);
+    return { type: 'function', function: { name: tool.name, description: tool.description || '', parameters: tool.input_schema || { type: 'object', properties: {} } } };
+  });
+  if (body.tool_choice) {
+    var choice = body.tool_choice;
+    if (choice.type === 'tool' && choice.name) result.tool_choice = { type: 'function', function: { name: choice.name } };
+    else if (choice.type === 'any') result.tool_choice = 'required';
+    else if (choice.type === 'auto' || choice.type === 'none') result.tool_choice = choice.type;
+    else throw new Error('Unsupported tool_choice');
+    if (choice.disable_parallel_tool_use !== undefined) result.parallel_tool_calls = !choice.disable_parallel_tool_use;
   }
-  var tools = translateTools(cleaned.tools);
-  if (tools) openaiBody.tools = tools;
-  if (cleaned.stream) openaiBody.stream_options = { include_usage: true };
-  return openaiBody;
+  if (body.output_config && body.output_config.format) throw new Error('Structured output format is not supported by openai-chat');
+  if (body.stream) result.stream_options = { include_usage: true };
+  // Build only protocol fields; never recursively strip keys from user tool data/schema.
+  return result;
+}
+// Deliberately local and approximate: text UTF-8 bytes / 3, image budget 1600,
+// PDF decoded bytes / 3. Binary size is not a tokenizer or a PDF page count.
+function estimateTokens(request) {
+  var bytes = 0, mediaTokens = 0;
+  function visit(value) {
+    if (typeof value === 'string') bytes += new TextEncoder().encode(value).length;
+    else if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === 'object') {
+      if (value.type === 'image_url' && value.image_url) { mediaTokens += 1600; return; }
+      if (value.type === 'file' && value.file && typeof value.file.file_data === 'string' && value.file.file_data.startsWith('data:application/pdf;base64,')) {
+        mediaTokens += Math.ceil(value.file.file_data.split(',')[1].length / 4); return;
+      }
+      for (var key of Object.keys(value)) { bytes += key.length; visit(value[key]); }
+    }
+  }
+  visit(request.messages);
+  visit(request.tools);
+  return Math.max(1, Math.ceil(bytes / 3) + mediaTokens + request.messages.length * 4);
 }
 function mapFinishReason(reason) {
-  if (reason === 'stop') return 'end_turn';
   if (reason === 'tool_calls') return 'tool_use';
   if (reason === 'length') return 'max_tokens';
-  return 'end_turn';
+  if (reason === 'content_filter') return 'refusal';
+  // Chat's stop does not distinguish natural stops from stop sequences.
+  if (reason === 'stop') return 'end_turn';
+  throw new Error('Unsupported upstream finish_reason: ' + reason);
 }
-function translateResponse(openaiResp, requestModel) {
-  var choice = openaiResp.choices && openaiResp.choices[0];
-  if (!choice) return { id: 'msg_proxy_error', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'No response from upstream API' }], model: requestModel, stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } };
-  var content = [];
-  if (choice.message.content) content.push({ type: 'text', text: choice.message.content });
-  if (choice.message.tool_calls) {
-    for (var i = 0; i < choice.message.tool_calls.length; i++) {
-      var tc = choice.message.tool_calls[i], input = {};
-      try { input = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: input });
-    }
+function toolInput(argumentsText) {
+  var input = JSON.parse(argumentsText || '{}');
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Tool arguments must be a JSON object');
+  return input;
+}
+function usageOf(usage) {
+  return { input_tokens: (usage && usage.prompt_tokens) || 0, output_tokens: (usage && usage.completion_tokens) || 0 };
+}
+function translateResponse(response, model) {
+  if (response.error) throw new Error(response.error.message || 'Upstream API error');
+  var choice = response.choices && response.choices[0];
+  if (!choice || !choice.message || typeof choice.message !== 'object') throw new Error('No message in upstream response');
+  var content = [], message = choice.message;
+  if (message.content !== undefined && message.content !== null) content.push({ type: 'text', text: textValue(message.content) });
+  if (message.refusal) content.push({ type: 'text', text: textValue(message.refusal) });
+  for (var tc of message.tool_calls || []) {
+    if (!tc.id || !tc.function || !tc.function.name) throw new Error('Incomplete upstream tool call');
+    content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: toolInput(tc.function.arguments) });
   }
-  if (content.length === 0) content.push({ type: 'text', text: '' });
-  return { id: openaiResp.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: content, model: requestModel || openaiResp.model, stop_reason: mapFinishReason(choice.finish_reason), stop_sequence: null, usage: { input_tokens: (openaiResp.usage && openaiResp.usage.prompt_tokens) || 0, output_tokens: (openaiResp.usage && openaiResp.usage.completion_tokens) || 0 } };
+  return { id: response.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: content, model: model || response.model, stop_reason: mapFinishReason(choice.finish_reason), stop_sequence: null, usage: usageOf(response.usage) };
 }
 function sse(event, data) { return 'event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n'; }
-function createStreamTranslator(requestModel) {
-  var state = { model: requestModel, blockIndex: 0, sentStart: false, inText: false, tcBufs: {}, inTok: 0, outTok: 0, msgId: 'msg_' + Date.now() };
+function createStreamTranslator(model) {
+  var started = false, finished = false, stopped = false, textIndex = null, nextIndex = 0;
+  var tools = new Map(), usage = usageOf(), reason;
   return function (chunk) {
+    if (stopped) throw new Error('Data after stream end');
     var events = [];
-    if (!state.sentStart) {
-      state.sentStart = true;
-      if (chunk.id) state.msgId = chunk.id;
-      events.push(sse('message_start', { type: 'message_start', message: { id: state.msgId, type: 'message', role: 'assistant', content: [], model: state.model || chunk.model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } }));
-      events.push(sse('ping', { type: 'ping' }));
+    function emit(type, fields) { events.push(sse(type, { type: type, ...fields })); }
+    if (chunk === null) {
+      if (!finished) throw new Error('Upstream stream ended before finish_reason');
+      stopped = true;
+      emit('message_delta', { delta: { stop_reason: reason, stop_sequence: null }, usage: usage });
+      emit('message_stop', {});
+      return events;
     }
-    var choice = chunk.choices && chunk.choices[0];
-    if (!choice) { if (chunk.usage) { state.inTok = chunk.usage.prompt_tokens || 0; state.outTok = chunk.usage.completion_tokens || 0; } return events; }
+    if (chunk.error) throw new Error(chunk.error.message || 'Upstream stream error');
+    if (chunk.usage) usage = usageOf(chunk.usage);
+    var choice = chunk.choices && chunk.choices.find(function (c) { return c.index === undefined || c.index === 0; });
+    if (!choice) {
+      if (!Array.isArray(chunk.choices)) throw new Error('Invalid upstream stream chunk');
+      return events;
+    }
+    if (finished) throw new Error('Completion data after finish_reason');
+    if (!started) {
+      started = true;
+      emit('message_start', { message: { id: chunk.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: [], model: model || chunk.model, stop_reason: null, stop_sequence: null, usage: usage } });
+    }
     var delta = choice.delta || {};
-    if (delta.content) {
-      if (!state.inText) { state.inText = true; events.push(sse('content_block_start', { type: 'content_block_start', index: state.blockIndex, content_block: { type: 'text', text: '' } })); }
-      events.push(sse('content_block_delta', { type: 'content_block_delta', index: state.blockIndex, delta: { type: 'text_delta', text: delta.content } }));
+    var text = delta.content || delta.refusal;
+    if (text) {
+      textValue(text);
+      if (textIndex === null) { textIndex = nextIndex++; emit('content_block_start', { index: textIndex, content_block: { type: 'text', text: '' } }); }
+      emit('content_block_delta', { index: textIndex, delta: { type: 'text_delta', text: text } });
     }
-    if (delta.tool_calls) {
-      if (state.inText) { events.push(sse('content_block_stop', { type: 'content_block_stop', index: state.blockIndex })); state.blockIndex++; state.inText = false; }
-      for (var i = 0; i < delta.tool_calls.length; i++) {
-        var tc = delta.tool_calls[i], idx = tc.index;
-        if (!state.tcBufs[idx]) {
-          var tcId = tc.id || ('toolu_' + Date.now() + '_' + idx), tcName = (tc.function && tc.function.name) || '';
-          state.tcBufs[idx] = { id: tcId, name: tcName, bi: state.blockIndex };
-          events.push(sse('content_block_start', { type: 'content_block_start', index: state.blockIndex, content_block: { type: 'tool_use', id: tcId, name: tcName, input: {} } }));
-          state.blockIndex++;
-        }
-        var buf = state.tcBufs[idx];
-        if (tc.function && tc.function.name) buf.name = tc.function.name;
-        if (tc.function && tc.function.arguments) {
-          events.push(sse('content_block_delta', { type: 'content_block_delta', index: buf.bi, delta: { type: 'input_json_delta', partial_json: tc.function.arguments } }));
-        }
-      }
+    for (var tc of delta.tool_calls || []) {
+      if (!Number.isInteger(tc.index) || tc.index < 0) throw new Error('Invalid upstream tool index');
+      if (!tools.has(tc.index)) tools.set(tc.index, { id: '', name: '', args: '' });
+      var buf = tools.get(tc.index);
+      if (tc.id) buf.id += tc.id;
+      if (tc.function) { buf.name += tc.function.name || ''; buf.args += tc.function.arguments || ''; }
     }
     if (choice.finish_reason) {
-      if (state.inText) { events.push(sse('content_block_stop', { type: 'content_block_stop', index: state.blockIndex })); state.inText = false; }
-      for (var key in state.tcBufs) events.push(sse('content_block_stop', { type: 'content_block_stop', index: state.tcBufs[key].bi }));
-      events.push(sse('message_delta', { type: 'message_delta', delta: { stop_reason: mapFinishReason(choice.finish_reason), stop_sequence: null }, usage: { output_tokens: state.outTok } }));
-      events.push(sse('message_stop', { type: 'message_stop' }));
+      reason = mapFinishReason(choice.finish_reason);
+      if (textIndex !== null) emit('content_block_stop', { index: textIndex });
+      // Buffer tools until complete so fragmented metadata and parallel calls
+      // produce valid, sequential Anthropic content blocks with validated JSON.
+      for (var tool of tools.values()) {
+        if (!tool.id || !tool.name) throw new Error('Incomplete upstream tool call');
+        toolInput(tool.args);
+        var index = nextIndex++;
+        emit('content_block_start', { index: index, content_block: { type: 'tool_use', id: tool.id, name: tool.name, input: {} } });
+        emit('content_block_delta', { index: index, delta: { type: 'input_json_delta', partial_json: tool.args || '{}' } });
+        emit('content_block_stop', { index: index });
+      }
+      finished = true;
     }
     return events;
   };
 }
-function parseSSELines(text) {
-  var chunks = [], lines = text.split('\n');
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i].trim();
-    if (!line.startsWith('data: ')) continue;
-    var payload = line.substring(6);
-    if (payload === '[DONE]') { chunks.push(null); continue; }
-    try { chunks.push(JSON.parse(payload)); } catch (e) {}
+// Parse complete SSE events, independent of transport chunk / UTF-8 boundaries.
+async function* translateStream(reader, model) {
+  var decoder = new TextDecoder(), buffer = '', data = [], translate = createStreamTranslator(model);
+  function payload(line) {
+    if (line === '') { var result = data.length ? data.join('\n') : undefined; data = []; return result; }
+    if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
   }
-  return chunks;
+  while (true) {
+    var read = await reader.read();
+    buffer += read.done ? decoder.decode() : decoder.decode(read.value, { stream: true });
+    if (read.done && buffer && !/[\r\n]$/.test(buffer)) buffer += '\n';
+    var match;
+    while ((match = /[\r\n]/.exec(buffer))) {
+      var offset = match.index;
+      if (!read.done && buffer[offset] === '\r' && offset === buffer.length - 1) break;
+      var line = buffer.slice(0, offset);
+      buffer = buffer.slice(offset + (buffer.slice(offset, offset + 2) === '\r\n' ? 2 : 1));
+      var value = payload(line);
+      if (value === undefined) continue;
+      if (value === '[DONE]') { yield* translate(null); return; }
+      yield* translate(JSON.parse(value));
+    }
+    if (read.done) {
+      if (data.length) {
+        var tail = data.join('\n');
+        if (tail !== '[DONE]') yield* translate(JSON.parse(tail));
+      }
+      yield* translate(null);
+      return;
+    }
+  }
+}
+function json(body, status, headers) {
+  return new Response(JSON.stringify(body), { status: status || 200, headers: { 'Content-Type': 'application/json', ...headers } });
+}
+function errorResponse(status, message) {
+  var types = { 400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_error', 404: 'not_found_error', 429: 'rate_limit_error' };
+  return json({ type: 'error', error: { type: types[status] || 'api_error', message: message } }, status);
 }
 function startProxy(config) {
-  var upstreamURL = (config.baseURL || 'https://api.x.ai/v1').replace(/\/+$/, '');
-  var upstreamKey = config.apiKey;
+  var upstreamURL = new URL(config.baseURL || 'https://api.x.ai/v1');
+  if (!['http:', 'https:'].includes(upstreamURL.protocol) || upstreamURL.username || upstreamURL.password || upstreamURL.search || upstreamURL.hash)
+    throw new Error('OpenAI baseURL must be an HTTP(S) API base without credentials, query, or fragment');
+  upstreamURL.pathname = upstreamURL.pathname.replace(/\/+$/, '') + '/chat/completions';
   var server = Bun.serve({
     port: 0, hostname: '127.0.0.1', idleTimeout: 255,
     fetch: async function (req) {
-      var url = new URL(req.url);
-      if (req.method === 'GET' && url.pathname === '/health') return new Response('ok');
-      if (req.method !== 'POST' || !url.pathname.endsWith('/messages'))
-        return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
-      var body;
-      try { body = await req.json(); } catch (e) {
-        return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON' } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-      }
-      var requestModel = body.model || config.model || '';
-      var isStream = !!body.stream;
-      var openaiBody;
-      try { openaiBody = translateRequest(body, config.effort); } catch (e) {
-        return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Translation error: ' + e.message } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-      }
-      var upstreamResp;
+      var path = new URL(req.url).pathname;
+      if (req.method === 'GET' && path === '/health') return new Response('ok');
+      var count = path === '/v1/messages/count_tokens' || path === '/messages/count_tokens';
+      if (req.method !== 'POST' || (!count && path !== '/v1/messages' && path !== '/messages')) return errorResponse(404, 'Not found');
+      var body, request;
       try {
-        upstreamResp = await fetch(upstreamURL + '/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + upstreamKey },
-          body: JSON.stringify(openaiBody),
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Upstream connection failed: ' + e.message } }), { status: 502, headers: { 'Content-Type': 'application/json' } });
-      }
-      if (!upstreamResp.ok && !isStream) {
-        var errText = await upstreamResp.text().catch(function () { return ''; });
-        var errBody; try { errBody = JSON.parse(errText); } catch (e) { errBody = null; }
-        return new Response(JSON.stringify({ type: 'error', error: { type: upstreamResp.status === 429 ? 'rate_limit_error' : 'api_error', message: (errBody && errBody.error && errBody.error.message) || errText || ('HTTP ' + upstreamResp.status) } }), { status: upstreamResp.status, headers: { 'Content-Type': 'application/json' } });
-      }
-      if (!isStream) {
-        var result; try { result = await upstreamResp.json(); } catch (e) {
-          return new Response(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Invalid upstream response' } }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+        body = await req.json();
+        request = translateRequest(body, config.effort);
+        request.model = body.model || config.model || '';
+      } catch (e) { return errorResponse(400, 'Translation error: ' + e.message); }
+      if (count) return json({ input_tokens: estimateTokens(request) }, 200, { 'x-clawgod-token-count': 'estimate' });
+      var abort = new AbortController();
+      var onAbort = function () { abort.abort(req.signal.reason); };
+      req.signal.addEventListener('abort', onAbort, { once: true });
+      if (req.signal.aborted) onAbort();
+      var timeout = Number(config.timeoutMs) || 3000000;
+      var timer = setTimeout(function () { abort.abort(new Error('Upstream request timed out')); }, timeout);
+      if (timer.unref) timer.unref();
+      function cleanup() { clearTimeout(timer); req.signal.removeEventListener('abort', onAbort); }
+      var upstream;
+      try {
+        upstream = await fetch(upstreamURL.href, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + config.apiKey }, body: JSON.stringify(request), signal: abort.signal });
+        if (!upstream.ok) {
+          var errText = await upstream.text(), errBody;
+          try { errBody = JSON.parse(errText); } catch {}
+          var response = errorResponse(upstream.status, (errBody && errBody.error && errBody.error.message) || errText || ('HTTP ' + upstream.status));
+          var retryAfter = upstream.headers.get('retry-after');
+          if (retryAfter) response.headers.set('retry-after', retryAfter);
+          cleanup();
+          return response;
         }
-        return new Response(JSON.stringify(translateResponse(result, requestModel)), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        if (!request.stream) {
+          var result = translateResponse(await upstream.json(), request.model);
+          cleanup();
+          return json(result);
+        }
+        if (!upstream.body || !(upstream.headers.get('content-type') || '').toLowerCase().startsWith('text/event-stream'))
+          throw new Error('Expected an upstream text/event-stream response');
+      } catch (e) {
+        abort.abort();
+        cleanup();
+        return errorResponse(502, 'Upstream request failed: ' + e.message);
       }
-      var translator = createStreamTranslator(requestModel);
-      var upstreamBody = upstreamResp.body;
+      var reader = upstream.body.getReader(), iterator = translateStream(reader, request.model), cancelled = false;
+      var encoder = new TextEncoder();
+      async function closeReader() { try { await reader.cancel(); } catch {} cleanup(); }
       var readable = new ReadableStream({
-        async start(controller) {
-          var encoder = new TextEncoder(), decoder = new TextDecoder(), buffer = '';
+        async pull(controller) {
           try {
-            var reader = upstreamBody.getReader();
-            while (true) {
-              var r = await reader.read();
-              if (r.done) break;
-              buffer += decoder.decode(r.value, { stream: true });
-              var boundary = buffer.lastIndexOf('\n');
-              if (boundary === -1) continue;
-              var complete = buffer.substring(0, boundary + 1);
-              buffer = buffer.substring(boundary + 1);
-              var chunks = parseSSELines(complete);
-              for (var ci = 0; ci < chunks.length; ci++) {
-                if (chunks[ci] === null) continue;
-                var evts = translator(chunks[ci]);
-                for (var ei = 0; ei < evts.length; ei++) controller.enqueue(encoder.encode(evts[ei]));
-              }
+            var next = await iterator.next();
+            if (cancelled) return;
+            if (next.done) { await closeReader(); controller.close(); }
+            else controller.enqueue(encoder.encode(next.value));
+          } catch (e) {
+            if (!cancelled) {
+              controller.enqueue(encoder.encode(sse('error', { type: 'error', error: { type: 'api_error', message: 'Stream error: ' + e.message } })));
+              controller.close();
             }
-            if (buffer.trim()) {
-              var rem = parseSSELines(buffer);
-              for (var ri = 0; ri < rem.length; ri++) {
-                if (rem[ri] === null) continue;
-                var revts = translator(rem[ri]);
-                for (var rei = 0; rei < revts.length; rei++) controller.enqueue(encoder.encode(revts[rei]));
-              }
-            }
-          } catch (e) { controller.enqueue(encoder.encode(sse('error', { type: 'error', error: { type: 'api_error', message: 'Stream error: ' + e.message } }))); }
-          finally { controller.close(); }
+            abort.abort();
+            await closeReader();
+          }
         },
+        async cancel() { cancelled = true; abort.abort(); await closeReader(); await iterator.return(); },
       });
-      return new Response(readable, { status: 200, headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' } });
+      return new Response(readable, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
     },
   });
   return { port: server.port, stop: function () { server.stop(); } };
@@ -1531,9 +1596,13 @@ if (existsSync(configFile)) {
   writeFileSync(configFile, JSON.stringify(defaultConfig, null, 2) + '\n');
 }
 
-// OpenAI-compatible provider proxy (grok, openai-compat, etc.)
-const _proxyTypes = { grok: 1, 'openai-compat': 1 };
-if (_proxyTypes[config.type]) {
+// Explicit protocol takes precedence over legacy provider types.
+if (config.protocol !== undefined && !['anthropic', 'openai-chat'].includes(config.protocol)) {
+  throw new Error('[clawgod] Unsupported provider protocol: ' + config.protocol + '. Use anthropic or openai-chat; auto and Responses are not supported.');
+}
+const _useProxy = config.protocol === 'openai-chat' ||
+  (config.protocol === undefined && ['grok', 'openai-compat'].includes(config.type));
+if (_useProxy) {
   let _proxyKey = config.apiKey || '';
   if (!_proxyKey && config.type === 'grok') {
     try {
@@ -1542,6 +1611,11 @@ if (_proxyTypes[config.type]) {
     } catch {}
     if (!_proxyKey) _proxyKey = process.env.GROK_API_KEY || '';
   }
+  // The generic Anthropic default must never become a Chat Completions URL.
+  if (config.baseURL === defaultConfig.baseURL || !config.baseURL) {
+    if (config.type === 'grok') config.baseURL = 'https://api.x.ai/v1';
+    else throw new Error('[clawgod] openai-chat requires an explicit baseURL, for example https://example.com/v1');
+  }
   if (_proxyKey) {
     const { startProxy } = require('./openai-proxy.cjs');
     const _proxy = startProxy({
@@ -1549,6 +1623,7 @@ if (_proxyTypes[config.type]) {
       baseURL: config.baseURL || (config.type === 'grok' ? 'https://api.x.ai/v1' : ''),
       model: config.model || '',
       effort: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? config.effort,
+      timeoutMs: process.env.API_TIMEOUT_MS ?? config.timeoutMs,
     });
     delete process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + _proxy.port;
@@ -1558,10 +1633,10 @@ if (_proxyTypes[config.type]) {
     process.env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= '1';
     process.on('exit', function () { try { _proxy.stop(); } catch {} });
-    process.stderr.write('[clawgod] OpenAI-compat proxy on port ' + _proxy.port + ' (type: ' + config.type + ')\n');
+    process.stderr.write('[clawgod] OpenAI Chat Completions proxy on port ' + _proxy.port + '\n');
     config = { ...config, apiKey: '', baseURL: '', model: '', smallModel: '' };  // prevent fallthrough to apiKey/baseURL injection below
   } else {
-    process.stderr.write('[clawgod] Warning: type=' + config.type + ' but no API key found\n');
+    throw new Error('[clawgod] openai-chat requires an API key (grok also accepts GROK_API_KEY or ~/.grok/user-settings.json)');
   }
 }
 

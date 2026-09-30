@@ -119,9 +119,32 @@ claude.orig         # Original unpatched version (auto-backed-up)
 }
 ```
 
-- **`apiKey` set** → ClawGod injects it as `ANTHROPIC_API_KEY` and isolates from `~/.claude/settings.json`. Works with Anthropic, DeepSeek, and OpenAI-compatible gateways. A non-Anthropic `baseURL` populates only `ANTHROPIC_AUTH_TOKEN` for gateway auth.
+- **`apiKey` set** → ClawGod injects it as `ANTHROPIC_API_KEY` and isolates from `~/.claude/settings.json`. The default protocol requires an Anthropic Messages-compatible endpoint. For Chat Completions gateways, use the configuration below. A non-Anthropic `baseURL` populates only `ANTHROPIC_AUTH_TOKEN` for gateway auth.
 - **`apiKey` empty** → OAuth path. Run `claude auth login` once; `~/.claude` keeps hosting your subagents, skills, and MCP settings.
-- **`effort`** → Sets reasoning effort; an existing `CLAUDE_CODE_EFFORT_LEVEL` takes precedence. With `type: "grok"` or `"openai-compat"`, the proxy sends `reasoning_effort` even when Claude omits effort for a custom model alias. `low`, `medium`, `high`, and `xhigh` pass through; `max` maps to `xhigh`; `auto` omits the parameter to use the upstream default. Choose a level supported by your upstream model. Empty/unset configuration leaves request-level effort in control and adds no effort parameter when the request has none.
+- **`effort`** → Sets reasoning effort; an existing `CLAUDE_CODE_EFFORT_LEVEL` takes precedence. With `protocol: "openai-chat"`, `type: "grok"` or `"openai-compat"`, the proxy sends `reasoning_effort` even when Claude omits effort for a custom model alias. `low`, `medium`, `high`, and `xhigh` pass through; `max` maps to `xhigh`; `auto` omits the parameter to use the upstream default. Choose a level supported by your upstream model. Empty/unset configuration leaves request-level effort in control and adds no effort parameter when the request has none.
+
+### OpenAI Chat Completions endpoints
+
+For an endpoint that exposes `/v1/chat/completions`, configure:
+
+```json
+{
+  "protocol": "openai-chat",
+  "apiKey": "sk-...",
+  "baseURL": "https://example.com/v1",
+  "model": "your-upstream-model",
+  "smallModel": "your-upstream-model"
+}
+```
+
+`baseURL` is the API base (including `/v1` when required), **not** the full `/chat/completions` URL. Set the model names to IDs accepted by your provider. ClawGod starts a loopback proxy inside the launcher process; no external gateway or separate service is required. `timeoutMs` also covers the upstream request and stream; an existing `API_TIMEOUT_MS` takes precedence.
+
+- Omitting `protocol` keeps the existing behavior. `type: "openai-compat"` and `type: "grok"` remain supported; an explicit `protocol` takes precedence. `protocol: "anthropic"` uses Messages directly. Grok defaults to `https://api.x.ai/v1` and retains its settings/environment API key fallback. Other Chat providers require an explicit API base and key.
+- Supports text, system prompts, tool calls/results, forced tool selection and parallel-tool controls, streaming, usage, and base64/URL images. Parallel tool arguments are assembled and validated before their content blocks are emitted; text still streams immediately. Missing upstream usage remains zero rather than a fabricated exact count.
+- Base64 PDFs are sent as Chat Completions `file` parts and require file support in the upstream model/API. Text documents are sent as text. PDF URLs, document citations, non-text tool results, server tools, and structured output formats are rejected with a clear error. Historical Anthropic thinking/signature blocks are omitted. Model-specific reasoning features are not losslessly translated.
+- `/v1/messages/count_tokens` estimates locally without a billed generation request. The `x-clawgod-token-count: estimate` response header marks the result. It uses UTF-8 text bytes / 3 plus message overhead, 1600 tokens per image, and decoded PDF bytes / 3. This is a rough budget, not the model's tokenizer; PDF byte size does not reflect page count and the estimate cannot guarantee context-window fit.
+- Chat `stop` maps to `end_turn`: the protocol does not distinguish natural completion from a matched stop sequence. `length`, `tool_calls`, and `content_filter` map to `max_tokens`, `tool_use`, and `refusal`. Upstream HTTP errors retain their status and `Retry-After`; malformed or truncated streams produce an error.
+- `/v1/responses` and automatic protocol detection are not supported. Use `openai-chat` only for Chat Completions endpoints.
 
 ### Feature Toggles
 

@@ -47,9 +47,13 @@ if (existsSync(configFile)) {
   writeFileSync(configFile, JSON.stringify(defaultConfig, null, 2) + '\n');
 }
 
-// OpenAI-compatible provider proxy (grok, openai-compat, etc.)
-const _proxyTypes = { grok: 1, 'openai-compat': 1 };
-if (_proxyTypes[config.type]) {
+// Explicit protocol takes precedence over legacy provider types.
+if (config.protocol !== undefined && !['anthropic', 'openai-chat'].includes(config.protocol)) {
+  throw new Error('[clawgod] Unsupported provider protocol: ' + config.protocol + '. Use anthropic or openai-chat; auto and Responses are not supported.');
+}
+const _useProxy = config.protocol === 'openai-chat' ||
+  (config.protocol === undefined && ['grok', 'openai-compat'].includes(config.type));
+if (_useProxy) {
   let _proxyKey = config.apiKey || '';
   if (!_proxyKey && config.type === 'grok') {
     try {
@@ -58,6 +62,11 @@ if (_proxyTypes[config.type]) {
     } catch {}
     if (!_proxyKey) _proxyKey = process.env.GROK_API_KEY || '';
   }
+  // The generic Anthropic default must never become a Chat Completions URL.
+  if (config.baseURL === defaultConfig.baseURL || !config.baseURL) {
+    if (config.type === 'grok') config.baseURL = 'https://api.x.ai/v1';
+    else throw new Error('[clawgod] openai-chat requires an explicit baseURL, for example https://example.com/v1');
+  }
   if (_proxyKey) {
     const { startProxy } = require('./openai-proxy.cjs');
     const _proxy = startProxy({
@@ -65,6 +74,7 @@ if (_proxyTypes[config.type]) {
       baseURL: config.baseURL || (config.type === 'grok' ? 'https://api.x.ai/v1' : ''),
       model: config.model || '',
       effort: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? config.effort,
+      timeoutMs: process.env.API_TIMEOUT_MS ?? config.timeoutMs,
     });
     delete process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + _proxy.port;
@@ -74,10 +84,10 @@ if (_proxyTypes[config.type]) {
     process.env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= '1';
     process.on('exit', function () { try { _proxy.stop(); } catch {} });
-    process.stderr.write('[clawgod] OpenAI-compat proxy on port ' + _proxy.port + ' (type: ' + config.type + ')\n');
+    process.stderr.write('[clawgod] OpenAI Chat Completions proxy on port ' + _proxy.port + '\n');
     config = { ...config, apiKey: '', baseURL: '', model: '', smallModel: '' };  // prevent fallthrough to apiKey/baseURL injection below
   } else {
-    process.stderr.write('[clawgod] Warning: type=' + config.type + ' but no API key found\n');
+    throw new Error('[clawgod] openai-chat requires an API key (grok also accepts GROK_API_KEY or ~/.grok/user-settings.json)');
   }
 }
 

@@ -26,6 +26,7 @@ function launch(config = {}, env = {}) {
   const proxyModule = { exports: {} };
   runInNewContext(proxy, {
     module: proxyModule, URL, Response, ReadableStream, TextEncoder, TextDecoder,
+    AbortController, setTimeout, clearTimeout,
     Bun: { serve(options) { handler = options.fetch; return { port: 12345, stop() {} }; } },
     async fetch(url, options) {
       const body = JSON.parse(options.body);
@@ -35,7 +36,7 @@ function launch(config = {}, env = {}) {
           { id: 'fixture', choices: [{ delta: { content: 'ok' }, finish_reason: null }] },
           { choices: [{ delta: {}, finish_reason: 'stop' }] },
         ];
-        return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n');
+        return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
       }
       return new Response(JSON.stringify({
         id: 'fixture', choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
@@ -87,8 +88,9 @@ try {
   assert.equal(launch({}, { ANTHROPIC_AUTH_TOKEN: 'external-token' }).env.ANTHROPIC_AUTH_TOKEN, 'external-token');
   console.log('[provider.test] direct provider auth, blank tokens, and OAuth preservation ok');
 
-  for (const type of ['grok', 'openai-compat']) {
-    const config = { type, apiKey: 'fixture-key', baseURL: 'https://upstream.invalid/v1', model: 'custom-model-alias', smallModel: 'small-alias', timeoutMs: 4321 };
+  for (const type of ['grok', 'openai-compat', 'openai-chat']) {
+    const selector = type === 'openai-chat' ? { protocol: type } : { type };
+    const config = { ...selector, apiKey: 'fixture-key', baseURL: 'https://upstream.invalid/v1', model: 'custom-model-alias', smallModel: 'small-alias', timeoutMs: 4321 };
     const session = launch({ ...config, effort: 'low' }, { ANTHROPIC_API_KEY: 'stale-key', ANTHROPIC_AUTH_TOKEN: 'stale-token' });
     assert.equal(session.env.ANTHROPIC_API_KEY, undefined);
     assert.equal(session.env.ANTHROPIC_AUTH_TOKEN, 'proxy-passthrough');
@@ -127,6 +129,14 @@ try {
   const grokRequest = await grok.send();
   assert.equal(grokRequest.headers.Authorization, 'Bearer grok-env-key');
   assert.equal(grokRequest.body.reasoning_effort, 'low');
+  assert.equal((await launch({ type: 'grok' }, { GROK_API_KEY: 'test' }).send()).url, 'https://api.x.ai/v1/chat/completions');
+  const direct = launch({ ...custom, type: 'openai-compat', protocol: 'anthropic' });
+  assert.equal(direct.env.ANTHROPIC_BASE_URL, custom.baseURL);
+  for (const protocol of ['auto', 'openai-responses', '', null, 'typo']) {
+    assert.throws(() => launch({ ...custom, protocol }), /Unsupported provider protocol/);
+  }
+  assert.throws(() => launch({ protocol: 'openai-chat', apiKey: 'test' }), /explicit baseURL/);
+  assert.throws(() => launch({ protocol: 'openai-chat', baseURL: 'https://upstream.invalid/v1' }), /requires an API key/);
   console.log('[provider.test] proxy auth, effort translation/fallback/precedence, streaming, and defaults ok');
 } finally {
   fs.rmSync(home, { recursive: true, force: true });
