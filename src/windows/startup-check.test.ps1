@@ -54,3 +54,6 @@ Write-Host 'launcher-step-reached'
     $env:CLAWGOD_STARTUP_TIMEOUT_MS = $savedTimeout
     Remove-Item -Recurse -Force $root
 }
+# Expected-failure probes leave LASTEXITCODE nonzero. Actions' PowerShell
+# wrapper propagates it even after all assertions pass, so report suite success.
+exit 0
