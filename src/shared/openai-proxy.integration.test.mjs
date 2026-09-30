@@ -7,6 +7,7 @@ const { startProxy } = createRequire(import.meta.url)('./openai-proxy.cjs');
 test('Bun HTTP integration: tool round trip, streaming usage, errors, count and timeout', { skip: typeof Bun === 'undefined' }, async () => {
   const calls = [];
   let mode = 'tool';
+  let toolFinish = 'tool_calls';
   const upstream = Bun.serve({
     hostname: '127.0.0.1', port: 0,
     async fetch(req) {
@@ -14,13 +15,19 @@ test('Bun HTTP integration: tool round trip, streaming usage, errors, count and 
       assert.equal(req.headers.get('authorization'), 'Bearer fixture-key');
       const body = await req.json();
       calls.push(body);
+      if (mode === 'tool' || mode === 'text') {
+        assert.deepEqual(body.messages.slice(0, 2), [
+          { role: 'system', content: 'top-level instructions' },
+          { role: 'system', content: 'inline instructions\nadditional context' },
+        ]);
+      }
       if (mode === 'error') return Response.json({ error: { message: 'slow down' } }, { status: 429, headers: { 'retry-after': '2' } });
       if (mode === 'timeout') return new Response(new ReadableStream({
         start(c) { c.enqueue(new TextEncoder().encode(':waiting\n\n')); },
       }), { headers: { 'content-type': 'text/event-stream' } });
       const tool = mode === 'tool';
       const message = tool ? { content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{"path":"README.md"}' } }] } : { content: 'file read' };
-      const finish_reason = tool ? 'tool_calls' : 'stop';
+      const finish_reason = tool ? toolFinish : 'stop';
       const usage = { prompt_tokens: 42, completion_tokens: 9 };
       if (!body.stream) return Response.json({ id: 'fixture', choices: [{ message, finish_reason }], usage });
       const delta = tool ? { tool_calls: message.tool_calls.map(t => ({ ...t, index: 0 })) } : message;
@@ -47,15 +54,20 @@ test('Bun HTTP integration: tool round trip, streaming usage, errors, count and 
     return fetch(`http://127.0.0.1:${server.port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   }
   try {
-    for (const stream of [false, true]) {
+    for (const finish of ['tool_calls', 'stop']) for (const stream of [false, true]) {
+      toolFinish = finish;
       mode = 'tool';
-      const first = { model: 'fixture-model', messages: [{ role: 'user', content: 'Read README.md' }], tools: [{ name: 'read_file', input_schema: { type: 'object', properties: { path: { type: 'string' } } } }], tool_choice: { type: 'tool', name: 'read_file' }, max_tokens: 100, stream };
+      const first = { model: 'fixture-model', system: 'top-level instructions', messages: [
+        { role: 'system', content: [{ type: 'text', text: 'inline instructions', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'additional context' }] },
+        { role: 'user', content: 'Read README.md' },
+      ], tools: [{ name: 'read_file', input_schema: { type: 'object', properties: { path: { type: 'string' } } } }], tool_choice: { type: 'tool', name: 'read_file' }, max_tokens: 100, stream };
       const r = await send(first);
       assert.equal(r.status, 200);
       let content;
       if (stream) {
         const events = (await r.text()).split('\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6)));
         assert.equal(events.at(-1).type, 'message_stop');
+        assert.equal(events.at(-2).delta.stop_reason, 'tool_use');
         assert.deepEqual(events.at(-2).usage, { input_tokens: 42, output_tokens: 9 });
         content = events.filter(e => e.type === 'content_block_start').map(e => e.content_block);
         content[0].input = JSON.parse(events.find(e => e.delta?.type === 'input_json_delta').delta.partial_json);

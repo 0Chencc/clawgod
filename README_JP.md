@@ -142,7 +142,7 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 - テキスト、system、ツール呼び出しと結果、ツール選択・並列実行の制御、ストリーミング、usage、base64/URL 画像に対応します。並列ツール引数は組み立て・検証後に内容ブロックを送信し、テキストは即時に配信します。上流から usage が届かない場合はゼロのままです。
 - base64 PDF は Chat Completions の `file` に変換するため、上流モデル/API のファイル対応が必要です。テキスト文書はテキストへ変換します。PDF URL、文書の引用、非テキストのツール結果、サーバーツール、構造化出力形式には明示的なエラーを返します。過去の Anthropic thinking/signature ブロックは省略され、モデル固有の推論機能は完全には変換できません。
 - `/v1/messages/count_tokens` はローカル推定で、課金される生成リクエストを追加しません。応答ヘッダー `x-clawgod-token-count: estimate` で推定と示します。テキストの UTF-8 バイト数 / 3 とメッセージ分の加算、画像ごとに 1600 token、PDF は復号後バイト数 / 3 を使います。モデルの tokenizer ではなく、PDF のバイト数もページ数とは異なるため、コンテキスト上限内に収まる保証はありません。
-- Chat の `stop` は自然終了と停止シーケンスを区別しないため、`end_turn` に変換します。`length`、`tool_calls`、`content_filter` はそれぞれ `max_tokens`、`tool_use`、`refusal` です。HTTP エラーの状態コードと `Retry-After` を保持し、壊れた・途中で切れたストリームはエラーになります。
+- Chat の `stop` は自然終了と停止シーケンスを区別しないため、`end_turn` に変換します（ツール呼び出しを含む応答では `tool_use`）。`length`、`tool_calls`、`content_filter` はそれぞれ `max_tokens`、`tool_use`、`refusal` です。HTTP エラーの状態コードと `Retry-After` を保持し、壊れた・途中で切れたストリームはエラーになります。
 - `/v1/responses` と自動プロトコル検出は未対応です。`openai-chat` は Chat Completions エンドポイントにのみ使用してください。
 
 ### 機能トグル

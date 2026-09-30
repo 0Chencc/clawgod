@@ -143,7 +143,7 @@ claude.orig         # 原版未修改版本（自动备份）
 - 支持文本、system、工具调用/结果、强制工具选择、并行工具控制、流式响应、usage，以及 base64/URL 图片。并行工具参数会在组装完整并验证后输出内容块；文本仍实时输出。上游缺少 usage 时保持为零，不伪造精确计数。
 - base64 PDF 转为 Chat Completions 的 `file` 块，要求上游模型/API 支持文件；文本型文档转为文本。PDF URL、文档引用、非文本工具结果、服务端工具和结构化输出格式会明确报错。历史 Anthropic thinking/signature 块会省略，模型专属推理能力无法无损转换。
 - `/v1/messages/count_tokens` 使用本地估算，不额外调用计费接口。响应头 `x-clawgod-token-count: estimate` 标记估算结果。算法为文本 UTF-8 字节数 / 3 加消息开销，每张图片预算 1600 token，PDF 按解码字节数 / 3 估算。这不是模型 tokenizer；PDF 字节数不等于页数，估算不能保证上下文窗口一定容纳得下。
-- Chat 的 `stop` 统一映射为 `end_turn`，因为该协议不区分自然结束与命中停止序列。`length`、`tool_calls`、`content_filter` 分别映射为 `max_tokens`、`tool_use`、`refusal`。上游 HTTP 错误保留状态码和 `Retry-After`；损坏或提前截断的流会报错。
+- Chat 的 `stop` 映射为 `end_turn`（响应包含工具调用时映射为 `tool_use`），因为该协议不区分自然结束与命中停止序列。`length`、`tool_calls`、`content_filter` 分别映射为 `max_tokens`、`tool_use`、`refusal`。上游 HTTP 错误保留状态码和 `Retry-After`；损坏或提前截断的流会报错。
 - 暂不支持 `/v1/responses` 和自动协议探测；`openai-chat` 仅用于 Chat Completions 端点。
 
 ### 功能开关

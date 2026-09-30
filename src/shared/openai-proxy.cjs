@@ -39,6 +39,13 @@ function translateMessages(msgs) {
   if (!Array.isArray(msgs)) throw new Error('messages must be an array');
   var out = [];
   for (var msg of msgs) {
+    // Some clients supply system instructions inside the conversation rather
+    // than only in body.system. Chat Completions supports these directly;
+    // retain their position and never silently discard instruction content.
+    if (msg.role === 'system') {
+      out.push({ role: 'system', content: textParts(msg.content, 'System message') });
+      continue;
+    }
     if (msg.role !== 'user' && msg.role !== 'assistant') throw new Error('Unsupported message role: ' + msg.role);
     if (typeof msg.content === 'string') { out.push({ role: msg.role, content: msg.content }); continue; }
     if (!Array.isArray(msg.content)) throw new Error('Message content must be text or content blocks');
@@ -116,8 +123,10 @@ function estimateTokens(request) {
   return Math.max(1, Math.ceil(bytes / 3) + mediaTokens + request.messages.length * 4);
 }
 
-function mapFinishReason(reason) {
-  if (reason === 'tool_calls') return 'tool_use';
+function mapFinishReason(reason, hasToolCalls) {
+  // Some compatible providers use stop even when they return tool_calls.
+  // Keep truncation/refusal distinct, but do not hide a completed tool turn.
+  if (reason === 'tool_calls' || (reason === 'stop' && hasToolCalls)) return 'tool_use';
   if (reason === 'length') return 'max_tokens';
   if (reason === 'content_filter') return 'refusal';
   // Chat's stop does not distinguish natural stops from stop sequences.
@@ -146,7 +155,7 @@ function translateResponse(response, model) {
     if (!tc.id || !tc.function || !tc.function.name) throw new Error('Incomplete upstream tool call');
     content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: toolInput(tc.function.arguments) });
   }
-  return { id: response.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: content, model: model || response.model, stop_reason: mapFinishReason(choice.finish_reason), stop_sequence: null, usage: usageOf(response.usage) };
+  return { id: response.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: content, model: model || response.model, stop_reason: mapFinishReason(choice.finish_reason, content.some(function (b) { return b.type === 'tool_use'; })), stop_sequence: null, usage: usageOf(response.usage) };
 }
 
 function sse(event, data) { return 'event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n'; }
@@ -192,7 +201,7 @@ function createStreamTranslator(model) {
       if (tc.function) { buf.name += tc.function.name || ''; buf.args += tc.function.arguments || ''; }
     }
     if (choice.finish_reason) {
-      reason = mapFinishReason(choice.finish_reason);
+      reason = mapFinishReason(choice.finish_reason, tools.size > 0);
       if (textIndex !== null) emit('content_block_stop', { index: textIndex });
       // Buffer tools until complete so fragmented metadata and parallel calls
       // produce valid, sequential Anthropic content blocks with validated JSON.

@@ -65,6 +65,7 @@ node src/shared/provider.test.mjs
 ```
 
 `src/shared/openai-proxy.test.mjs` exercises request/response translation,
+including inline system messages alongside the top-level system prompt,
 tool selection and parallel calls, images/PDFs and unsupported content errors,
 local token estimates, HTTP failures, SSE framing and fragmented UTF-8,
 usage trailers, incomplete streams, cancellation, and timeouts. The provider

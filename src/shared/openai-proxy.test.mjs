@@ -94,6 +94,44 @@ test('request translation preserves conversation, parallel tool results and user
   assert.equal(body.tools[0].cache_control, undefined);
 });
 
+test('inline system messages preserve instructions and order alongside top-level system', async () => {
+  for (const stream of [false, true]) {
+    for (const system of [undefined, 'top-level instructions', [{ type: 'text', text: 'top-level instructions', cache_control: { type: 'ephemeral' } }]]) {
+      const p = setup(() => stream ? streamResponse(encodeEvents([chunk({ content: 'ok' }), chunk({}, 'stop'), usageChunk])) : jsonResponse());
+      const response = await p.send({ system, stream, messages: [
+        { role: 'system', content: 'initial instructions' },
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'hi' },
+        { role: 'system', content: [{ type: 'text', text: 'follow-up instructions', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'more context' }] },
+        { role: 'user', content: 'continue' },
+      ] });
+      assert.equal(response.status, 200);
+      if (stream) checkLifecycle(await readEvents(response));
+      else assert.equal((await response.json()).content[0].text, 'ok');
+      assert.deepEqual(p.calls[0].body.messages, [
+        ...(system ? [{ role: 'system', content: 'top-level instructions' }] : []),
+        { role: 'system', content: 'initial instructions' },
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'hi' },
+        { role: 'system', content: 'follow-up instructions\nmore context' },
+        { role: 'user', content: 'continue' },
+      ]);
+    }
+  }
+});
+
+test('inline system messages contribute to local token counts without upstream calls', async () => {
+  const p = setup(() => { throw new Error('must not call upstream'); });
+  const messages = [{ role: 'user', content: 'hello' }];
+  const baseline = await (await p.send({ messages }, '/v1/messages/count_tokens')).json();
+  for (const content of ['instruction '.repeat(100), [{ type: 'text', text: 'instruction '.repeat(100) }]]) {
+    const response = await p.send({ messages: [{ role: 'system', content }, ...messages] }, '/v1/messages/count_tokens');
+    assert.equal(response.status, 200);
+    assert.ok((await response.json()).input_tokens > baseline.input_tokens);
+  }
+  assert.equal(p.calls.length, 0);
+});
+
 test('tool_choice and parallel constraints map without changing omitted defaults', async () => {
   for (const [type, expected] of [['auto', 'auto'], ['any', 'required'], ['none', 'none'], ['tool', { type: 'function', function: { name: 'run' } }]]) {
     for (const disable of [true, false, undefined]) {
@@ -133,6 +171,9 @@ test('unsupported attachments, citations, tools and malformed requests fail befo
     { messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: [{ type: 'image' }] }] }] },
     { messages: [{ role: 'assistant', content: [{ type: 'server_tool_use' }] }] },
     { messages: [{ role: 'unknown', content: 'text' }] },
+    { messages: [{ role: 'system', content: null }] },
+    { messages: [{ role: 'system', content: [{ type: 'text' }] }] },
+    { messages: [{ role: 'system', content: [{ type: 'image', source: { type: 'url', url: 'https://example.invalid/a.png' } }] }] },
     { messages: [{ role: 'user', content: 7 }] },
     { messages: [{ role: 'user', content: [{ type: 'text' }] }] },
     { messages: 'invalid' }, { system: [{ type: 'image' }] },
@@ -178,7 +219,7 @@ test('count_tokens is local, deterministic, includes system/tools/media and excl
 });
 
 test('non-stream text, tool JSON, refusal, usage, model fallback and finish reasons', async () => {
-  for (const [reason, expected] of [['stop', 'end_turn'], ['length', 'max_tokens'], ['tool_calls', 'tool_use'], ['content_filter', 'refusal']]) {
+  for (const [reason, expected] of [['stop', 'tool_use'], ['length', 'max_tokens'], ['tool_calls', 'tool_use'], ['content_filter', 'refusal']]) {
     const p = setup(() => jsonResponse(success({ choices: [{ message: { content: 'text', tool_calls: [{ id: 'call-1', function: { name: 'run', arguments: '{"x":1}' } }] }, finish_reason: reason }] })));
     const result = await (await p.send({ model: '' })).json();
     assert.equal(p.calls[0].body.model, 'fallback-model');
@@ -271,6 +312,15 @@ test('SSE reassembles interleaved parallel tool arguments and fragmented metadat
   const args = events.filter(e => e.delta?.type === 'input_json_delta').map(e => JSON.parse(e.delta.partial_json));
   assert.deepEqual(args, [{ b: 2 }, { a: 1 }]);
   assert.equal(events.at(-2).delta.stop_reason, 'tool_use');
+});
+
+test('SSE tool calls with upstream stop still request tool execution', async () => {
+  for (const [finish, expected] of [['stop', 'tool_use'], ['length', 'max_tokens'], ['content_filter', 'refusal']]) {
+    const chunks = [chunk({ tool_calls: [{ index: 0, id: 'call-1', function: { name: 'run', arguments: '{"x":1}' } }] }), chunk({}, finish), usageChunk];
+    const events = await readEvents(await setup(() => streamResponse(encodeEvents(chunks))).send({ stream: true }));
+    checkLifecycle(events);
+    assert.equal(events.at(-2).delta.stop_reason, expected);
+  }
 });
 
 test('SSE malformed/truncated/error streams emit error without success completion', async () => {
