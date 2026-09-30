@@ -5,6 +5,10 @@ const { homedir } = require('os');
 const { spawnSync } = require('child_process');
 
 const clawgodDir = join(homedir(), '.clawgod');
+// Version queries (including installer verification) must not start provider
+// servers or background update requests that keep the process alive (#203).
+// Match only a standalone flag, never a prompt/subcommand containing it.
+const versionOnly = process.argv.length === 3 && ['--version', '-v'].includes(process.argv[2]);
 
 // Note: there used to be a "drift detection" block here that scanned
 // ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
@@ -20,7 +24,7 @@ const clawgodDir = join(homedir(), '.clawgod');
 // index). Move it back transparently on first run after upgrade.
 const nativeClaudeJson = join(homedir(), '.claude.json');
 const strayClaudeJson = join(clawgodDir, '.claude.json');
-if (existsSync(strayClaudeJson) && !existsSync(nativeClaudeJson)) {
+if (!versionOnly && existsSync(strayClaudeJson) && !existsSync(nativeClaudeJson)) {
   try { renameSync(strayClaudeJson, nativeClaudeJson); } catch {}
 }
 
@@ -37,12 +41,12 @@ const defaultConfig = {
 };
 
 let config = { ...defaultConfig };
-if (existsSync(configFile)) {
+if (!versionOnly && existsSync(configFile)) {
   try {
     const raw = JSON.parse(readFileSync(configFile, 'utf8'));
     config = { ...defaultConfig, ...raw };
   } catch {}
-} else {
+} else if (!versionOnly) {
   mkdirSync(providerDir, { recursive: true });
   writeFileSync(configFile, JSON.stringify(defaultConfig, null, 2) + '\n');
 }
@@ -223,7 +227,7 @@ if (process.argv.includes('--lean-off') || process.argv.includes('--lean-on') ||
 try {
   const _ucFile = join(clawgodDir, '.update-check');
   const _verFile = join(clawgodDir, '.clawgod-version');
-  if (existsSync(_verFile)) {
+  if (!versionOnly && existsSync(_verFile)) {
     const _localVer = readFileSync(_verFile, 'utf8').trim();
     let _uc = null;
     try { if (existsSync(_ucFile)) _uc = JSON.parse(readFileSync(_ucFile, 'utf8')); } catch {}

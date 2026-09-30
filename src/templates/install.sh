@@ -70,7 +70,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -369,6 +369,10 @@ chmod +x "$CLAWGOD_DIR/cli.cjs"
 echo "$CLAWGOD_SELF_VERSION" > "$CLAWGOD_DIR/.clawgod-version"
 info "Wrapper created (cli.cjs)"
 
+cat > "$CLAWGOD_DIR/startup-check.cjs" << 'STARTUP_EOF'
+{{CLAWGOD:startup-check.cjs}}
+STARTUP_EOF
+
 # ─── Write classifier runtime helper ────────────────────
 
 cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
@@ -517,11 +521,12 @@ fi
 # to fail loudly than to leave the user with a launcher that panics on
 # first invocation.
 
-dim "Verifying Bun can load patched cli.original.cjs ..."
-sanity_out=$("$BUN_BIN" "$CLAWGOD_DIR/cli.cjs" --version 2>&1 || true)
+dim "Verifying Bun can load patched cli.original.cjs (bounded startup check) ..."
+sanity_rc=0
+sanity_out=$(node "$CLAWGOD_DIR/startup-check.cjs" "$BUN_BIN" "$CLAWGOD_DIR/cli.cjs" 2>&1) || sanity_rc=$?
 if echo "$sanity_out" | grep -q "Expected CommonJS module to have a function wrapper"; then
   echo ""
-  warn "Bun $($BUN_BIN --version) cannot load Anthropic's cli.original.cjs."
+  warn "The selected Bun runtime cannot load Anthropic's cli.original.cjs."
   warn ""
   warn "  Anthropic builds with Bun's canary channel (currently ~1.3.14), while"
   warn "  bun.sh's main download is on stable (currently 1.3.13). The canary build"
@@ -540,6 +545,11 @@ if echo "$sanity_out" | grep -q "Expected CommonJS module to have a function wra
   warn ""
   warn "  Then re-run install.sh — this sanity check will pass."
   exit 1
+fi
+if [ "$sanity_rc" -ne 0 ]; then
+  warn "Patched Claude failed its startup check (exit $sanity_rc):"
+  printf '%s\n' "$sanity_out"
+  exit "$sanity_rc"
 fi
 info "Bun loads cli.original.cjs"
 

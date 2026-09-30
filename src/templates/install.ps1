@@ -73,7 +73,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","startup-check.cjs","startup-check.log","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -462,6 +462,10 @@ Write-OK "Patch feature gates created (feature-gates.cjs)"
 Set-Content (Join-Path $ClawDir ".clawgod-version") $ClawSelfVersion
 Write-OK "Wrapper created (cli.cjs)"
 
+@'
+{{CLAWGOD:startup-check.cjs}}
+'@ | Set-Content (Join-Path $ClawDir "startup-check.cjs") -Encoding UTF8
+
 # --- Write classifier runtime helper -----------------------------------
 
 @'
@@ -592,7 +596,7 @@ if (-not (Test-Path $leanOffFlag)) {
 # to fail loudly than to leave the user with a launcher that panics on
 # first invocation.
 
-Write-Dim "Verifying Bun can load patched cli.original.cjs ..."
+Write-Dim "Verifying Bun can load patched cli.original.cjs (bounded startup check) ..."
 $sanityCli = Join-Path $ClawDir "cli.cjs"
 # PowerShell folds native-command stderr into the error stream as
 # ErrorRecord objects; with $ErrorActionPreference='Stop' (common when
@@ -605,7 +609,7 @@ $sanityOut = $null
 try {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $sanityOut = (& $BunBin $sanityCli --version 2>&1 | Out-String)
+    $sanityOut = (& node (Join-Path $ClawDir "startup-check.cjs") $BunBin $sanityCli 2>&1 | Out-String)
     $sanityExitCode = $LASTEXITCODE
 } catch {
     $sanityOut = "$_"
@@ -615,7 +619,7 @@ try {
 }
 if ($sanityOut -match "Expected CommonJS module to have a function wrapper") {
     Write-Host ""
-    Write-Err "Bun $(& $BunBin --version) cannot load Anthropic's cli.original.cjs."
+    Write-Err "The selected Bun runtime cannot load Anthropic's cli.original.cjs."
     Write-Err ""
     Write-Err "  Anthropic builds with Bun's canary channel (currently ~1.3.14), while"
     Write-Err "  bun.sh's main download is on stable (currently 1.3.13). The canary build"

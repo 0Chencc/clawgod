@@ -95,6 +95,27 @@ logs, final screens and results are uploaded as CI artifacts.
 
 `src/shared/updater.test.mjs` checks that every Lean mode disables native
 background updates before loading Claude, including inherited false values.
+`src/shared/startup-check.test.mjs` checks the installer's bounded startup
+probe, version output, errors, closed stdin, paths with spaces/non-ASCII text,
+process-tree timeout cleanup, logs, and standalone version-query side effects.
+Version detection uses stdout independently of stderr and the truncated log
+tail, including split writes and interleaved/noisy diagnostics.
+It also runs the real Bun launcher when Bun is on PATH or specified through
+`CLAWGOD_TEST_BUN`. `src/windows/startup-check.test.ps1` exercises the actual
+PowerShell installer check with successful, failing and hanging child processes.
+The smoke jobs preconfigure a dummy Chat provider before the real installation,
+retain it through repeated `--no-upgrade` runs and launcher version queries,
+and reject any probe that starts a proxy listener. Windows also pins Claude
+2.1.285, the version reported in #203, alongside the existing compatibility cases.
+
+Both installers use `startup-check.cjs` (under Node) to run Bun's
+`cli.cjs --version` with a 30-second deadline. `CLAWGOD_STARTUP_TIMEOUT_MS`
+can raise that deadline on slow machines. Failures preserve the output in
+`~/.clawgod/startup-check.log` and abort before replacing launchers; printing a
+version without exiting is still a failure. A standalone `--version` or `-v`
+loads the patched bundle and runtime helpers without initializing the provider,
+migrating settings, or starting the background release check.
+
 `src/windows/launchers.test.ps1` runs the installer's launcher section on real
 Windows files, including repeated installs, restored official executables,
 running binaries, deletion/rename locks, recovery, and original backups.

@@ -68,6 +68,9 @@ jobs:
       - name: Run updater environment regression tests
         run: node src/shared/updater.test.mjs
 
+      - name: Run bounded startup verification regression tests
+        run: node src/shared/startup-check.test.mjs
+
       - name: Run provider auth and proxy effort regression tests
         run: node src/shared/provider.test.mjs
 
@@ -173,6 +176,9 @@ jobs:
             sw_vers
           fi
 
+      - name: Configure a provider before fresh installation
+        run: node src/ci/provider-startup-fixture.cjs seed
+
       - name: Run install.sh (npm-fallback path)
         # No official Claude binary pre-installed → install.sh exercises
         # its npm-registry fallback to fetch @anthropic-ai/claude-code-<plat>.
@@ -189,7 +195,7 @@ jobs:
         shell: bash
         run: |
           ls -la "$HOME/.clawgod/" || true
-          for f in cli.cjs cli.original.cjs patch.mjs extract-natives.mjs post-process.mjs feature-gates.cjs runtime-helpers.cjs bun-ant-shim.cjs .source-version; do
+          for f in cli.cjs cli.original.cjs startup-check.cjs startup-check.log patch.mjs extract-natives.mjs post-process.mjs feature-gates.cjs runtime-helpers.cjs bun-ant-shim.cjs .source-version; do
             test -e "$HOME/.clawgod/$f" || { echo "::error::missing ~/.clawgod/$f"; exit 1; }
           done
           echo "Source: $(cat "$HOME/.clawgod/.source-version")"
@@ -246,6 +252,10 @@ jobs:
         shell: bash
         run: bun test src/shared/openai-proxy.test.mjs src/shared/openai-proxy.integration.test.mjs
 
+      - name: Verify version-only startup with a configured provider
+        shell: bash
+        run: CLAWGOD_TEST_BUN="$(command -v bun)" node src/shared/startup-check.test.mjs
+
       - name: Assert all patches applied (parse install log)
         # patch.mjs prints "Result: A applied, S skipped, F failed".
         # F must be 0 — otherwise upstream has shifted enough that one of
@@ -271,6 +281,7 @@ jobs:
             [[ "$summary" == "$baseline" ]] || { cat "$log"; exit 1; }
             grep -q 'Using complete clean-source backup' "$log"
           done
+          node src/ci/provider-startup-fixture.cjs verify /tmp/install.log /tmp/reinstall-1.log /tmp/reinstall-2.log
 
       - name: Verify lean settings applied
         shell: bash
@@ -319,6 +330,7 @@ jobs:
           echo "Lean toggle verified"
 
       - name: Smoke test — claude --version
+        timeout-minutes: 1
         # Exercises the wrapper path:
         #   launcher → bun cli.cjs → require('./cli.original.cjs')
         # The Bun CJS-wrapper panic surfaces here, not at install time.
@@ -334,6 +346,10 @@ jobs:
             exit 1
           fi
           [[ $rc -eq 0 ]] || { echo "::error::claude --version exited $rc"; exit 1; }
+          if echo "$out" | grep -qi 'proxy on port'; then
+            echo '::error::version query started a provider listener'
+            exit 1
+          fi
 
       - name: Functional checks — runtime invariants
         # Verify that clawgod's monkey-patches produce correct runtime state.
@@ -469,6 +485,8 @@ jobs:
             bun: canary
           - claude: 2.1.272
             bun: 1.4.2
+          - claude: 2.1.285
+            bun: 1.4.2
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}\.npm-cache
       CLAWGOD_VERSION: ${{ matrix.claude }}
@@ -493,6 +511,14 @@ jobs:
       - name: Test Windows clean source recovery
         shell: powershell
         run: ./src/windows/source-recovery.test.ps1
+
+      - name: Test bounded startup verification and configured-provider version queries
+        shell: powershell
+        run: |
+          $env:CLAWGOD_TEST_BUN = (Get-Command bun).Source
+          node src/shared/startup-check.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./src/windows/startup-check.test.ps1
 
       - name: Set up Python for ConPTY tests
         uses: actions/setup-python@v7
@@ -561,6 +587,9 @@ jobs:
             Write-Error 'install.ps1 must start directly with #Requires'
           }
 
+      - name: Configure a provider before fresh installation
+        run: node src/ci/provider-startup-fixture.cjs seed
+
       - name: Run install.ps1 through Invoke-Expression (npm-fallback path)
         # Use Windows PowerShell 5.1 and evaluate the installer as a decoded
         # string, matching the documented `irm ... | iex` parser path.
@@ -586,6 +615,8 @@ jobs:
           $required = @(
             'cli.cjs',
             'cli.original.cjs',
+            'startup-check.cjs',
+            'startup-check.log',
             'patch.mjs',
             'extract-natives.mjs',
             'post-process.mjs',
@@ -685,9 +716,14 @@ jobs:
             Write-Host $summary
             if (-not $summary -or $summary -ne $baseline) { throw 'Reinstall changed patch results' }
             if ($output -notmatch 'Using complete clean-source backup') { throw 'Clean source was not reused' }
+            node src/ci/provider-startup-fixture.cjs verify $log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+          node src/ci/provider-startup-fixture.cjs verify (Join-Path $env:RUNNER_TEMP 'install-windows.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Smoke test - clawgod --version
+        timeout-minutes: 1
         # Use the unambiguous clawgod.cmd entry point. This exercises the full
         # launcher -> Bun -> cli.cjs -> chunk-graph path on Windows.
         shell: powershell
@@ -712,6 +748,7 @@ jobs:
           if ($exitCode -ne 0) {
             Write-Error "clawgod --version exited $exitCode"
           }
+          if ($output -match 'proxy on port') { throw 'Version query started a provider listener' }
 
       - name: Interactive renderer regression (Windows ConPTY)
         # --version does not paint a frame. Run the installed cli.cjs in a
