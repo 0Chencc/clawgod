@@ -68,6 +68,9 @@ jobs:
       - name: Run updater environment regression tests
         run: node src/shared/updater.test.mjs
 
+      - name: Run native binary refresh regression tests
+        run: node src/shared/native-refresh.test.mjs
+
       - name: Run bounded startup verification regression tests
         run: node src/shared/startup-check.test.mjs
 

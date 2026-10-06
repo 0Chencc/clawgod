@@ -122,6 +122,14 @@ Windows files, including repeated installs, restored official executables,
 running binaries, deletion/rename locks, recovery, and original backups.
 Run them with Node and Windows PowerShell 5.1 respectively; CI runs both.
 
+Every real install (not `--no-upgrade`) also replaces `claude.orig` /
+`claude.orig.exe` with the binary it extracted from. `cli.cjs` points
+`process.execPath` there, so sessions Claude spawns from it (daemon,
+background, forked) must be the same version as the patched bundle.
+`launchers.test.ps1` covers the Windows side, including a backup that is still
+running; `src/shared/native-refresh.test.mjs` runs the Unix installer section
+against a symlinked backup and checks nothing is written into `versions/`.
+
 ## Layout
 
 `source-backup.json` in the installed directory stores the complete clean

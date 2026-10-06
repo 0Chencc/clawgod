@@ -70,7 +70,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/claude.staged" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -327,6 +327,14 @@ node "$CLAWGOD_DIR/post-process.mjs" 2>&1 | while IFS= read -r line; do echo "  
 
 # Stamp the source version so the wrapper can detect drift on next launch
 echo "$NATIVE_BIN_LABEL" > "$CLAWGOD_DIR/.source-version"
+
+# Keep the binary we just extracted from. cli.cjs points process.execPath at
+# claude.orig, so everything Claude re-spawns from execPath (daemon, background
+# and forked sessions) runs that file, not the patched bundle. The launcher
+# section below swaps it in once it knows where claude lives.
+if [ -f "$NATIVE_BIN" ]; then
+  mv -f "$NATIVE_BIN" "$CLAWGOD_DIR/claude.staged"
+fi
 
 # If we pulled the binary from npm into a tmpdir, clean it up now —
 # extraction is done, drift detection only consults ~/.local/share/claude/versions/.
@@ -625,6 +633,21 @@ export CLAUDE_CODE_EXECPATH=\"$CLAUDE_BIN.orig\"
 export HERDR_AGENT=\"\${HERDR_AGENT:-claude}\"
 exec \"\$BUN_BIN\" \"\$CLAWGOD_CLI\" \"\$@\""
 
+
+# Refresh claude.orig from the binary this run extracted. The backup below is
+# only taken once (and on native installs is a symlink into versions/, which
+# no longer moves because the background updater is off), so without this it
+# stays at the first-install version while cli.original.cjs moves on. Sessions
+# spawned from process.execPath then report the old version to the API, which
+# rejects models that need a newer client.
+# rm first: never write through a symlink into the official versions/ dir.
+NATIVE_STAGED="$CLAWGOD_DIR/claude.staged"
+if [ -f "$NATIVE_STAGED" ]; then
+  rm -f "$CLAUDE_BIN.orig"
+  mv -f "$NATIVE_STAGED" "$CLAUDE_BIN.orig"
+  chmod +x "$CLAUDE_BIN.orig"
+  info "Native binary refreshed → claude.orig"
+fi
 
 # Back up original claude (only once)
 if [ ! -e "$CLAUDE_BIN.orig" ]; then
