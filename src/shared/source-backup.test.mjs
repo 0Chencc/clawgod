@@ -114,7 +114,30 @@ try {
     result = shell(apply + '\necho UNEXPECTED_SUCCESS');
     assert.equal(result.status, 7);
     assert.match(result.stdout, /Installation aborted/);
+    assert.match(result.stdout, /No previous working installation found to roll back/);
+    assert.match(result.stdout, /To install or roll back to a known compatible version/);
     assert.doesNotMatch(result.stdout, /UNEXPECTED_SUCCESS/);
+
+    // Rollback test: simulate an existing working installation before upgrade fails
+    const rollbackDir = join(dir, 'rollback-test');
+    mkdirSync(rollbackDir);
+    const backupDir = join(rollbackDir, 'backup');
+    mkdirSync(backupDir);
+    writeFileSync(join(backupDir, 'cli.original.cjs'), '// Old working 2.1.280');
+    writeFileSync(join(backupDir, '.source-version'), '2.1.280\n');
+    writeFileSync(join(rollbackDir, 'cli.original.cjs'), '// Broken candidate 2.1.299');
+    writeFileSync(join(rollbackDir, '.source-version'), '2.1.299\n');
+    writeFileSync(join(rollbackDir, 'patch.mjs'), 'process.exit(9)');
+    
+    const rollbackEnv = { ...env, CLAWGOD_DIR: rollbackDir, PREV_BACKUP_DIR: backupDir, NATIVE_BIN_LABEL: '2.1.299' };
+    const rollbackShell = body => spawnSync('bash', ['-c', 'set -e\ninfo() { echo "$*"; }; warn() { echo "$*"; }; dim() { :; };\n' + body], { env: rollbackEnv, encoding: 'utf8' });
+    result = rollbackShell(apply + '\necho UNEXPECTED_SUCCESS');
+    assert.equal(result.status, 9);
+    assert.match(result.stdout, /Restored previous working installation \(2.1.280\)/);
+    assert.match(result.stdout, /The new Claude Code build \(2.1.299\) is not yet supported/);
+    assert.equal(readFileSync(join(rollbackDir, '.source-version'), 'utf8').trim(), '2.1.280');
+    assert.equal(readFileSync(join(rollbackDir, 'cli.original.cjs'), 'utf8'), '// Old working 2.1.280');
+    assert.equal(existsSync(backupDir), false, 'rollback temp dir cleaned up');
   }
   console.log('[source-backup.test] complete backups, repeated patching, revert, validation, upgrades, and failure without source writes passed');
 } finally {
