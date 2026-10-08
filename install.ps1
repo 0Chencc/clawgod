@@ -2750,10 +2750,13 @@ const patches = [
     // v2.1.280+: if(Fin()&&(n==="claude-opus-4-6"||\u2026))return!1;
     //   Fin() now contains the provider check. Keep the original condition
     //   behind the feature gate so disabling the patch restores upstream.
+    // v2.1.293+: if(jDn()&&(n==="claude-opus-4-6"||n==="claude-sonnet-4-6"||n.includes("haiku")&&n!=="claude-haiku-5-5"))return!1;
+    //   upstream added `&&n!=="claude-haiku-5-5"` exemption to the haiku check.
+    //   Relaxed to [^;]*? to tolerate model exclusion variants without breaking on future additions.
     id: 'auto-mode-inline-gate',
     toggleable: true,
     name: 'Auto-mode unlock for third-party API (inline gate)',
-    pattern: /if\((?:([\w$]+)!=="firstParty"&&(?:\1!=="anthropicAws"|![\w$]+\(\1\))[^;]*|[\w$]+\(\)&&\([\w$]+==="claude-opus-4-6"\|\|[\w$]+==="claude-sonnet-4-6"\|\|[\w$]+\.includes\("haiku"\)\))\)return!1;/g,
+    pattern: /if\((?:([\w$]+)!=="firstParty"&&(?:\1!=="anthropicAws"|![\w$]+\(\1\))[^;]*|[\w$]+\(\)&&\([\w$]+==="claude-opus-4-6"\|\|[\w$]+==="claude-sonnet-4-6"\|\|[\w$]+\.includes\("haiku"\)[^;]*?\))\)return!1;/g,
     replacer: (m) => `if(globalThis.__clawgodPatches?.[${JSON.stringify('auto-mode-inline-gate')}]===!1&&` + m.slice(3, -10) + `)return!1;`,
     sentinel: '!=="firstParty"&&',
   },
