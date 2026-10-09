@@ -171,7 +171,7 @@ try {
     const section = template.slice(template.indexOf('dim "Verifying Bun'), template.indexOf('# ─── Replace claude command'));
     assert.ok(section.startsWith('dim "Verifying Bun'));
     fs.copyFileSync(checker, join(dir, 'startup-check.cjs'));
-    const script = `set -e\nCLAWGOD_DIR="$1"\nBUN_BIN="$2"\nwarn(){ printf '%s\\n' "$*"; }\ninfo(){ printf '%s\\n' "$*"; }\ndim(){ :; }\n${section}\nprintf 'launcher-step-reached\\n'\n`;
+    const script = `set -e\nCLAWGOD_DIR="$1"\nBUN_BIN="$2"\nwarn(){ printf '%s\\n' "$*"; }\ninfo(){ printf '%s\\n' "$*"; }\ndim(){ :; }\nrollback_install(){ :; }\n${section}\nprintf 'launcher-step-reached\\n'\n`;
     for (const [code, expected] of [
       [`console.log(${JSON.stringify(version)});`, 0],
       ['console.error("fixture failed"); process.exit(7);', 7],

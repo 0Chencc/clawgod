@@ -21,6 +21,7 @@ $BunBin = (Get-Command node.exe).Source
 function Write-Dim($message) { Write-Host $message }
 function Write-Err($message) { Write-Host $message }
 function Write-OK($message) { Write-Host $message }
+function Restore-Install {}
 '@
     $suffix = @'
 if ($ErrorActionPreference -ne 'Stop') { throw 'ErrorActionPreference was not restored' }
