@@ -6,6 +6,8 @@ $selectSource = [ScriptBlock]::Create($section)
 $ClawDir = Join-Path ([IO.Path]::GetTempPath()) ('clawgod-source-recovery-' + [Guid]::NewGuid().ToString('N'))
 $BinDir = Join-Path $ClawDir 'bin'
 function Write-OK($message) {}
+function Write-Dim($message) {}
+function Write-Err($message) {}
 function Assert($condition, $message) { if (-not $condition) { throw $message } }
 try {
     New-Item -ItemType Directory -Force $ClawDir | Out-Null
@@ -28,5 +30,32 @@ try {
     $failed = $false
     try { . $selectSource } catch { $failed = $true }
     Assert $failed 'Unknown installed version must not upgrade to latest'
-    Write-Host '[source-recovery.test] exact-version migration and local backup selection passed'
+
+    $rollbackSection = [regex]::Match($template, '(?s)# --- Snapshot existing installation.*?(?=# Always write the extractor)').Value
+    Assert $rollbackSection 'Rollback section not found'
+    $snapshot = [ScriptBlock]::Create($rollbackSection)
+    Set-Content (Join-Path $ClawDir 'cli.original.cjs') '// old source'
+    Set-Content (Join-Path $ClawDir '.source-version') '2.1.280'
+    Set-Content (Join-Path $ClawDir 'cli.cjs') '// old wrapper'
+    New-Item -ItemType Directory -Path (Join-Path $ClawDir 'bunfs') | Out-Null
+    Set-Content (Join-Path $ClawDir 'bunfs\commands.js') '// old graph'
+    . $snapshot
+    Remove-Item -Recurse -Force (Join-Path $ClawDir 'bunfs')
+    Set-Content (Join-Path $ClawDir 'cli.original.cjs') '// new source'
+    Set-Content (Join-Path $ClawDir '.source-version') '2.1.299'
+    Set-Content (Join-Path $ClawDir 'cli.cjs') '// new wrapper'
+    Set-Content (Join-Path $ClawDir 'claude.staged.exe') 'new binary'
+    Restore-Install
+    Assert (((Get-Content (Join-Path $ClawDir 'cli.original.cjs') -Raw).Trim()) -eq '// old source') 'Source rollback failed'
+    Assert (((Get-Content (Join-Path $ClawDir '.source-version') -Raw).Trim()) -eq '2.1.280') 'Version rollback failed'
+    Assert (((Get-Content (Join-Path $ClawDir 'cli.cjs') -Raw).Trim()) -eq '// old wrapper') 'Wrapper rollback failed'
+    Assert (((Get-Content (Join-Path $ClawDir 'bunfs\commands.js') -Raw).Trim()) -eq '// old graph') 'Graph rollback failed'
+    Assert (-not (Test-Path (Join-Path $ClawDir 'claude.staged.exe'))) 'Staged binary was not cleaned up'
+    $staleCleanup = [regex]::Match($template, '(?s)# A failed earlier upgrade may have left a newer native binary staged\..*?(?=# --- Write re-patch helper)').Value
+    Assert $staleCleanup 'Stale native cleanup section not found'
+    Set-Content (Join-Path $ClawDir 'claude.staged.exe') 'stale newer binary'
+    $NoUpgrade = [switch]$true
+    . ([ScriptBlock]::Create($staleCleanup))
+    Assert (-not (Test-Path (Join-Path $ClawDir 'claude.staged.exe'))) '-NoUpgrade retained a stale staged binary'
+    Write-Host '[source-recovery.test] exact-version migration and failure rollback passed'
 } finally { Remove-Item -Recurse -Force $ClawDir }

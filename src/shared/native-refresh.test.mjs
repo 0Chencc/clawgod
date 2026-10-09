@@ -26,6 +26,13 @@ try {
   const orig = claude + '.orig';
   const staged = join(clawgod, 'claude.staged');
   const env = { ...process.env, HOME: root, CLAWGOD_DIR: clawgod, CLAUDE_BIN: claude };
+  const cleanupStart = template.indexOf('# A failed earlier upgrade may have left a newer native binary staged.');
+  const cleanup = template.slice(cleanupStart, template.indexOf('# ─── Write re-patch helper', cleanupStart));
+  assert.ok(cleanupStart > 0);
+  writeFileSync(staged, 'stale newer binary');
+  const cleanupResult = spawnSync('bash', ['-c', 'set -e\n' + cleanup], { env: { ...env, NO_UPGRADE: '1' }, encoding: 'utf8' });
+  assert.equal(cleanupResult.status, 0, cleanupResult.stderr);
+  assert.equal(existsSync(staged), false, '--no-upgrade must discard a stale staged binary');
   const install = () => {
     const result = spawnSync('bash', ['-c', 'set -e\ninfo() { echo "$*"; }; warn() { echo "$*"; }; dim() { :; };\n' + section], { env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);

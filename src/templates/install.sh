@@ -286,22 +286,49 @@ if [ -z "$NATIVE_BIN" ]; then
   exit 1
 fi
 
-# Write extractor to a temp file (used both for cli.js and .node modules)
+# ─── Snapshot existing installation for rollback on failure ──────────
+PREV_BACKUP_DIR=""
+ROLLBACK_FILES=(cli.original.cjs cli.original.cjs.bak cli.original.js .source-version
+  source-backup.json bunfs vendor pathmap.json extract-natives.mjs post-process.mjs
+  repatch.mjs openai-proxy.cjs feature-gates.cjs cli.cjs .clawgod-version
+  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs)
+if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
+  PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
+  for f in "${ROLLBACK_FILES[@]}"; do
+    if [ -e "$CLAWGOD_DIR/$f" ]; then
+      cp -a "$CLAWGOD_DIR/$f" "$PREV_BACKUP_DIR/" || {
+        warn "Could not snapshot $f; installation was not changed."
+        rm -rf "$PREV_BACKUP_DIR"
+        exit 1
+      }
+    fi
+  done
+fi
+
+rollback_install() {
+  local status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ]; then
+    rm -f "$CLAWGOD_DIR/claude.staged"
+    if [ -n "$PREV_BACKUP_DIR" ]; then
+      dim "Rolling back to previous working installation ..."
+      for f in "${ROLLBACK_FILES[@]}"; do rm -rf "$CLAWGOD_DIR/$f"; done
+      if cp -a "$PREV_BACKUP_DIR"/. "$CLAWGOD_DIR/"; then
+        info "Restored previous working installation ($(cat "$CLAWGOD_DIR/.source-version"))."
+      else
+        warn "Rollback failed; backup kept at $PREV_BACKUP_DIR"
+        return
+      fi
+    fi
+  fi
+  [ -z "$PREV_BACKUP_DIR" ] || rm -rf "$PREV_BACKUP_DIR" || warn "Could not remove rollback snapshot at $PREV_BACKUP_DIR"
+}
+trap rollback_install EXIT
+
+# Write extractor (used both for cli.js and .node modules)
 cat > "$CLAWGOD_DIR/extract-natives.mjs" << 'EXTRACTOR_EOF'
 {{CLAWGOD:extract-natives.mjs}}
 EXTRACTOR_EOF
-
-# ─── Snapshot existing installation for rollback on failure ──────────
-PREV_BACKUP_DIR=""
-if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
-  PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
-  cp -a "$CLAWGOD_DIR/cli.original.cjs" "$PREV_BACKUP_DIR/" 2>/dev/null || true
-  cp -a "$CLAWGOD_DIR/.source-version" "$PREV_BACKUP_DIR/" 2>/dev/null || true
-  [ -f "$CLAWGOD_DIR/source-backup.json" ] && cp -a "$CLAWGOD_DIR/source-backup.json" "$PREV_BACKUP_DIR/" 2>/dev/null || true
-  [ -f "$CLAWGOD_DIR/patches.json" ] && cp -a "$CLAWGOD_DIR/patches.json" "$PREV_BACKUP_DIR/" 2>/dev/null || true
-  [ -d "$CLAWGOD_DIR/bunfs" ] && cp -a "$CLAWGOD_DIR/bunfs" "$PREV_BACKUP_DIR/" 2>/dev/null || true
-  [ -d "$CLAWGOD_DIR/vendor" ] && cp -a "$CLAWGOD_DIR/vendor" "$PREV_BACKUP_DIR/" 2>/dev/null || true
-fi
 
 # ─── Extract cli.js + native modules from Bun binary ──────────
 # Note: extract-natives.mjs and post-process.mjs are kept around (NOT deleted)
@@ -315,7 +342,8 @@ rm -rf "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bunfs" "$CLAWGOD_DIR/pathmap.json" \
   "$CLAWGOD_DIR/cli.original.js" 2>/dev/null
 
 dim "Extracting cli.js + modules from $(echo "$NATIVE_BIN_LABEL") ..."
-if ! node "$CLAWGOD_DIR/extract-natives.mjs" "$NATIVE_BIN" "$CLAWGOD_DIR" 2>&1 | while IFS= read -r line; do echo "  $line"; done; then
+node "$CLAWGOD_DIR/extract-natives.mjs" "$NATIVE_BIN" "$CLAWGOD_DIR" 2>&1 | while IFS= read -r line; do echo "  $line"; done
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
   err "Failed to extract from native binary"
   exit 1
 fi
@@ -335,6 +363,7 @@ cat > "$CLAWGOD_DIR/post-process.mjs" << 'POSTPROC_EOF'
 {{CLAWGOD:post-process.mjs}}
 POSTPROC_EOF
 node "$CLAWGOD_DIR/post-process.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then err "Post-process failed"; exit 1; fi
 [ -f "$CLAWGOD_DIR/cli.original.cjs" ] || { err "Post-process failed"; exit 1; }
 
 # Stamp the source version so the wrapper can detect drift on next launch
@@ -357,6 +386,10 @@ fi
 info "cli.original.cjs ready ($NATIVE_BIN_LABEL)"
 
 fi  # end --no-upgrade skip
+
+# A failed earlier upgrade may have left a newer native binary staged.
+# Re-patching the installed source must not install that different version.
+if [ "$NO_UPGRADE" = "1" ]; then rm -f "$CLAWGOD_DIR/claude.staged"; fi
 
 # ─── Write re-patch helper (used by wrapper on version drift) ─────────
 
@@ -427,14 +460,7 @@ node "$CLAWGOD_DIR/patch.mjs" 2>&1 | while IFS= read -r line; do echo "  $line";
 patch_status=${PIPESTATUS[0]}
 if [ "$patch_status" -ne 0 ]; then
   warn "Patching failed (node exit $patch_status). Installation aborted."
-  if [ -n "$PREV_BACKUP_DIR" ] && [ -f "$PREV_BACKUP_DIR/cli.original.cjs" ]; then
-    dim "Rolling back to previous working installation ..."
-    rm -rf "$CLAWGOD_DIR/bunfs" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/.source-version" "$CLAWGOD_DIR/source-backup.json" 2>/dev/null || true
-    cp -a "$PREV_BACKUP_DIR"/. "$CLAWGOD_DIR/" 2>/dev/null || true
-    rm -rf "$PREV_BACKUP_DIR"
-    PREV_VER=$(cat "$CLAWGOD_DIR/.source-version" 2>/dev/null || echo "previous")
-    info "Restored previous working installation ($PREV_VER)."
-  else
+  if [ -z "$PREV_BACKUP_DIR" ]; then
     warn "No previous working installation found to roll back."
   fi
   warn ""
@@ -444,8 +470,6 @@ if [ "$patch_status" -ne 0 ]; then
   warn "(Note: 'claude update --version' will fail on unpatched Claude Code with \"unknown option '--version'\")"
   exit "$patch_status"
 fi
-
-[ -n "$PREV_BACKUP_DIR" ] && rm -rf "$PREV_BACKUP_DIR" 2>/dev/null || true
 
 # ─── Report which renderer runtime this Claude Code build needs ────────
 # 2.1.271+ renders through Bun.ant.CellSegmenter, an Anthropic-private Bun
@@ -589,6 +613,7 @@ if [ "$sanity_rc" -ne 0 ]; then
   exit "$sanity_rc"
 fi
 info "Bun loads cli.original.cjs"
+if [ "$NO_UPGRADE" != "1" ]; then rollback_install; fi
 
 # ─── Replace claude command ───────────────────────────
 

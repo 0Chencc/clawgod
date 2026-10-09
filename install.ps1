@@ -430,6 +430,50 @@ if (-not $NativeBin) {
     exit 1
 }
 
+# --- Snapshot existing installation for rollback on failure ----------
+$RollbackDir = $null
+$script:RollbackPending = $false
+$RollbackFiles = @("cli.original.cjs","cli.original.cjs.bak","cli.original.js",".source-version",
+    "source-backup.json","bunfs","vendor","pathmap.json","extract-natives.mjs","post-process.mjs",
+    "repatch.mjs","openai-proxy.cjs","feature-gates.cjs","cli.cjs",".clawgod-version",
+    "startup-check.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","patch.mjs")
+$origCjs = Join-Path $ClawDir "cli.original.cjs"
+$sourceVerFile = Join-Path $ClawDir ".source-version"
+if ((Test-Path $origCjs) -and (Test-Path $sourceVerFile)) {
+    $RollbackDir = Join-Path ([System.IO.Path]::GetTempPath()) ("clawgod-rollback-" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $RollbackDir -Force | Out-Null
+    try {
+        foreach ($f in $RollbackFiles) {
+            $path = Join-Path $ClawDir $f
+            if (Test-Path $path) { Copy-Item -LiteralPath $path -Destination $RollbackDir -Recurse -Force -ErrorAction Stop }
+        }
+    } catch {
+        Remove-Item -LiteralPath $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Could not snapshot existing installation; installation was not changed: $_"
+    }
+}
+
+function Restore-Install {
+    Remove-Item -LiteralPath (Join-Path $ClawDir "claude.staged.exe") -Force -ErrorAction SilentlyContinue
+    if (-not $script:RollbackPending) { return }
+    $script:RollbackPending = $false
+    if (-not $RollbackDir) { return }
+    Write-Dim "Rolling back to previous working installation ..."
+    try {
+        foreach ($f in $RollbackFiles) {
+            $path = Join-Path $ClawDir $f
+            if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
+        }
+        Get-ChildItem -LiteralPath $RollbackDir -Force | Copy-Item -Destination $ClawDir -Recurse -Force -ErrorAction Stop
+        Write-OK "Restored previous working installation ($((Get-Content $sourceVerFile -Raw).Trim()))."
+        Remove-Item -LiteralPath $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Err "Rollback failed; backup kept at $RollbackDir : $_"
+    }
+}
+$script:RollbackPending = $true
+trap { Restore-Install; break }
+
 # Always write the extractor (used for cli.js and/or .node modules)
 $extractorPath = Join-Path $ClawDir "extract-natives.mjs"
 @'
@@ -854,25 +898,6 @@ function main() {
 main();
 '@ | Set-Content $extractorPath -Encoding UTF8
 
-# --- Snapshot existing installation for rollback on failure ----------
-$RollbackDir = $null
-$origCjs = Join-Path $ClawDir "cli.original.cjs"
-$sourceVerFile = Join-Path $ClawDir ".source-version"
-if ((Test-Path $origCjs) -and (Test-Path $sourceVerFile)) {
-    $RollbackDir = Join-Path ([System.IO.Path]::GetTempPath()) ("clawgod-rollback-" + [System.Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $RollbackDir -Force | Out-Null
-    Copy-Item -Path $origCjs -Destination $RollbackDir -Force -ErrorAction SilentlyContinue
-    Copy-Item -Path $sourceVerFile -Destination $RollbackDir -Force -ErrorAction SilentlyContinue
-    $sbJson = Join-Path $ClawDir "source-backup.json"
-    if (Test-Path $sbJson) { Copy-Item -Path $sbJson -Destination $RollbackDir -Force -ErrorAction SilentlyContinue }
-    $patchesJson = Join-Path $ClawDir "patches.json"
-    if (Test-Path $patchesJson) { Copy-Item -Path $patchesJson -Destination $RollbackDir -Force -ErrorAction SilentlyContinue }
-    $bunfs = Join-Path $ClawDir "bunfs"
-    if (Test-Path $bunfs) { Copy-Item -Path $bunfs -Destination $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue }
-    $vendor = Join-Path $ClawDir "vendor"
-    if (Test-Path $vendor) { Copy-Item -Path $vendor -Destination $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue }
-}
-
 # --- Extract cli.js + native modules from Bun binary ------------------
 
 # Single extractor pass: writes cli.original.js to $ClawDir and creates
@@ -890,8 +915,9 @@ if (Test-Path $dstCli) { Remove-Item -Force $dstCli }
 
 Write-Dim "Extracting cli.js + napi modules from $NativeBinLabel ..."
 & node $extractorPath $NativeBin $ClawDir 2>&1 | ForEach-Object { Write-Host "  $_" }
-if (-not (Test-Path $dstCli)) {
+if (($LASTEXITCODE -ne 0) -or -not (Test-Path $dstCli)) {
     Write-Err "Failed to extract cli.js from native binary"
+    Restore-Install
     exit 1
 }
 
@@ -996,8 +1022,9 @@ if (isChunked) {
 }
 '@ | Set-Content $postProc -Encoding UTF8
 & node $postProc 2>&1 | ForEach-Object { Write-Host "  $_" }
-if (-not (Test-Path (Join-Path $ClawDir "cli.original.cjs"))) {
+if (($LASTEXITCODE -ne 0) -or -not (Test-Path (Join-Path $ClawDir "cli.original.cjs"))) {
     Write-Err "Post-process failed"
+    Restore-Install
     exit 1
 }
 
@@ -1022,6 +1049,11 @@ if ($NativeBinTmpDir -and (Test-Path $NativeBinTmpDir)) {
 Write-OK "cli.original.cjs ready ($NativeBinLabel)"
 
 }  # end -NoUpgrade skip
+
+# A failed earlier upgrade may have left a newer native binary staged.
+if ($NoUpgrade) {
+    Remove-Item -LiteralPath (Join-Path $ClawDir "claude.staged.exe") -Force -ErrorAction SilentlyContinue
+}
 
 # --- Write re-patch helper (used by wrapper on version drift) ---------
 
@@ -3474,38 +3506,23 @@ Write-OK "Patcher created (patch.mjs)"
 
 if (-not $NoUpgrade) {
     node (Join-Path $ClawDir "patch.mjs") --capture-clean-source
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE; Restore-Install; exit $exitCode }
 }
 Write-Dim "Applying patches ..."
 node (Join-Path $ClawDir "patch.mjs")
 if ($LASTEXITCODE -ne 0) {
     $exitCode = $LASTEXITCODE
     Write-Err "Patching failed (node exit $exitCode). Installation aborted."
-    if ($RollbackDir -and (Test-Path (Join-Path $RollbackDir "cli.original.cjs"))) {
-        Write-Dim "Rolling back to previous working installation ..."
-        Remove-Item -Path (Join-Path $ClawDir "bunfs") -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $ClawDir "vendor") -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $ClawDir "cli.original.cjs") -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $ClawDir ".source-version") -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $ClawDir "source-backup.json") -Force -ErrorAction SilentlyContinue
-        Copy-Item -Path (Join-Path $RollbackDir "*") -Destination $ClawDir -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue
-        $prevVer = ""
-        if (Test-Path $sourceVerFile) { $prevVer = (Get-Content $sourceVerFile -Raw).Trim() }
-        Write-OK "Restored previous working installation ($prevVer)."
-    } else {
+    if (-not $NoUpgrade) { Restore-Install }
+    if (-not $RollbackDir) {
         Write-Err "No previous working installation found to roll back."
     }
     Write-Err ""
     Write-Err "The new Claude Code build ($NativeBinLabel) is not yet supported by this ClawGod release."
     Write-Err "To install or roll back to a known compatible version, run:"
-    Write-Err "  irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex -ArgumentList '--version <version>'"
+    Write-Err "  & ([scriptblock]::Create((irm 'https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1'))) -Version <version>"
     Write-Err "(Note: 'claude update --version' will fail on unpatched Claude Code with 'unknown option --version')"
     exit $exitCode
-}
-
-if ($RollbackDir -and (Test-Path $RollbackDir)) {
-    Remove-Item -Path $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --- Report which renderer runtime this Claude Code build needs -------
@@ -3683,15 +3700,19 @@ if ($sanityOut -match "Expected CommonJS module to have a function wrapper") {
     Write-Err "    bun upgrade --canary"
     Write-Err ""
     Write-Err "  Then re-run .\install.ps1 -- this sanity check will pass."
+    if (-not $NoUpgrade) { Restore-Install }
     exit 1
 }
 if ($sanityExitCode -ne 0) {
     Write-Host ""
     Write-Err "Patched Claude failed its startup check (exit $sanityExitCode):"
     Write-Err "$sanityOut"
+    if (-not $NoUpgrade) { Restore-Install }
     exit $sanityExitCode
 }
 Write-OK "Bun loads cli.original.cjs"
+$script:RollbackPending = $false
+if ($RollbackDir) { Remove-Item -LiteralPath $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue }
 
 # --- Replace claude command -------------------------------------------
 
