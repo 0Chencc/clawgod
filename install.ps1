@@ -73,7 +73,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","startup-check.cjs","startup-check.log","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs","startup-check.cjs","startup-check.log","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe","claude.staged.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -984,6 +984,15 @@ if (-not (Test-Path (Join-Path $ClawDir "cli.original.cjs"))) {
 
 # Stamp source version so wrapper can detect drift on next launch
 Set-Content -Path (Join-Path $ClawDir ".source-version") -Value $NativeBinLabel -Encoding ASCII
+
+# Keep the binary we just extracted from. cli.cjs points process.execPath at
+# claude.orig.exe, so everything Claude re-spawns from execPath (daemon,
+# background and forked sessions) runs that file, not the patched bundle. The
+# launcher section below swaps it in; staging through $ClawDir keeps that
+# section independent of the download above.
+if ($NativeBin -and (Test-Path $NativeBin)) {
+    Move-Item -Force $NativeBin (Join-Path $ClawDir "claude.staged.exe")
+}
 
 # If we pulled the binary from npm into a tmpdir, clean up -- extraction
 # is done; drift detection only consults %USERPROFILE%\.local\share\claude\versions\.
@@ -3676,6 +3685,42 @@ $claudeCmd = Join-Path $BinDir "claude.cmd"
 $claudeExe = Join-Path $BinDir "claude.exe"
 $claudeOrigCmd = Join-Path $BinDir "claude.orig.cmd"
 $claudeOrigExe = Join-Path $BinDir "claude.orig.exe"
+
+# Refresh claude.orig.exe from the binary this run extracted. The backup below
+# is only taken once, so without this it stays at whatever version was on disk
+# at first install while cli.original.cjs moves on. Sessions spawned from
+# process.execPath then report the old version to the API, which rejects
+# models that need a newer client ("Claude Code 2.1.270 does not support this
+# model") -- seen as a failed auto-compaction in background sessions.
+$stagedNative = Join-Path $ClawDir "claude.staged.exe"
+if (Test-Path $stagedNative) {
+    $origInUse = $false
+    if (Test-Path $claudeOrigExe) {
+        try {
+            Remove-Item -Force $claudeOrigExe
+        } catch {
+            # A running daemon holds the old exe. Same approach as claude.exe
+            # below: rename it aside, the claude.*.exe sweep removes it on a
+            # later install once nothing uses it.
+            $origInUse = $true
+            try {
+                Rename-Item $claudeOrigExe "claude.$([Guid]::NewGuid().ToString('N')).exe" -ErrorAction Stop
+            } catch {}
+        }
+    }
+    if (Test-Path $claudeOrigExe) {
+        # Not fatal: the patched CLI itself is fine, only spawned sessions lag.
+        Remove-Item -Force $stagedNative -ErrorAction SilentlyContinue
+        Write-Warn "Could not replace claude.orig.exe (in use). Background sessions stay on the old version."
+        Write-Warn "Close all Claude Code sessions and rerun this installer."
+    } else {
+        Move-Item -Force $stagedNative $claudeOrigExe
+        Write-OK "Native binary refreshed -> claude.orig.exe"
+        if ($origInUse) {
+            Write-Dim "Sessions started before this update keep the old binary until restarted."
+        }
+    }
+}
 
 # Check multiple locations for original claude
 $originalFound = $false

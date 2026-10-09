@@ -11,6 +11,8 @@ $savedPath = $env:PATH
 $node = (Get-Command node.exe).Source
 $script:messages = New-Object 'System.Collections.Generic.List[string]'
 function Write-OK($message) { $script:messages.Add($message) }
+function Write-Warn($message) { $script:messages.Add($message) }
+function Write-Dim($message) { $script:messages.Add($message) }
 function Assert($condition, $message) { if (-not $condition) { throw $message } }
 
 try {
@@ -18,6 +20,9 @@ try {
     $env:LOCALAPPDATA = Join-Path $root 'AppData\Local'
     $BinDir = Join-Path $root '.local\bin'
     New-Item -ItemType Directory -Force $BinDir | Out-Null
+    $ClawDir = Join-Path $root '.clawgod'
+    New-Item -ItemType Directory -Force $ClawDir | Out-Null
+    $staged = Join-Path $ClawDir 'claude.staged.exe'
     $env:PATH = "$BinDir;$savedPath"
     $exe = Join-Path $BinDir 'claude.exe'
     $backup = Join-Path $BinDir 'claude.orig.exe'
@@ -41,6 +46,46 @@ try {
         Assert ((Get-Command claude).Source -eq $cmd) 'PowerShell does not resolve claude.cmd'
         Assert ((& cmd.exe /d /c 'claude --version') -match 'clawgod-launcher-marker') 'cmd.exe bypassed launcher'
     }
+
+    # An upgrade stages the binary it extracted from. The backup must follow
+    # it, otherwise sessions spawned from execPath stay on the old version.
+    # One trailing byte is enough to tell the "new" binary from the old one.
+    function New-StagedNative {
+        Copy-Item $node $staged -Force
+        $stream = [IO.File]::Open($staged, [IO.FileMode]::Append)
+        try { $stream.WriteByte(0) } finally { $stream.Dispose() }
+        (Get-FileHash $staged).Hash
+    }
+    $upgradedHash = New-StagedNative
+    Assert ($upgradedHash -ne $originalHash) 'Staged fixture does not differ from the backup'
+    $script:messages.Clear()
+    & $install
+    Assert ((Get-FileHash $backup).Hash -eq $upgradedHash) 'Upgrade left the old native backup'
+    Assert (-not (Test-Path $staged)) 'Staged native binary was not consumed'
+    Assert ($script:messages -match 'Native binary refreshed') 'Refresh was not reported'
+
+    # The daemon usually still runs the old backup during `claude update`.
+    Copy-Item $node $backup -Force
+    $upgradedHash = New-StagedNative
+    $running = Start-Process $backup -ArgumentList '-e', 'setInterval(()=>{},1000)' -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Milliseconds 300
+        Assert (-not $running.HasExited) 'Running backup fixture did not start'
+        $script:messages.Clear()
+        & $install
+        Assert ((Get-FileHash $backup).Hash -eq $upgradedHash) 'Running backup blocked the refresh'
+        Assert (-not $running.HasExited) 'Refresh killed the running session'
+        Assert ($script:messages -match 'until restarted') 'In-use backup was not mentioned'
+    } finally {
+        if (-not $running.HasExited) { Stop-Process -Id $running.Id -Force; $running.WaitForExit() }
+        $running.Dispose()
+    }
+    # The renamed-aside copy is swept once nothing holds it, and a run with
+    # nothing staged (-NoUpgrade) leaves the refreshed backup alone.
+    & $install
+    Assert (@(Get-ChildItem $BinDir -Filter 'claude.*.exe' | Where-Object Name -ne 'claude.orig.exe').Count -eq 0) 'Old backup was not swept'
+    Assert ((Get-FileHash $backup).Hash -eq $upgradedHash) 'Install without a staged binary changed the backup'
+    Copy-Item $node $backup -Force
 
     # A running Windows executable rejects deletion but normally allows rename.
     Copy-Item $node $exe
@@ -85,7 +130,7 @@ try {
     Set-Content $cmd '@echo original-launcher' -Encoding Ascii
     & $install
     Assert ((Get-Content (Join-Path $BinDir 'claude.orig.cmd') -Raw) -match 'original-launcher') 'Original cmd was not preserved'
-    Write-Host '[launchers.test] repeated installs, native repair, running/locked exe, and backup preservation passed'
+    Write-Host '[launchers.test] repeated installs, native repair, upgrade refresh, running/locked exe, and backup preservation passed'
 } finally {
     $env:USERPROFILE = $savedHome
     $env:LOCALAPPDATA = $savedLocal
