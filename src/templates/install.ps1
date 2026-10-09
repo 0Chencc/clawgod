@@ -374,6 +374,25 @@ $extractorPath = Join-Path $ClawDir "extract-natives.mjs"
 {{CLAWGOD:extract-natives.mjs}}
 '@ | Set-Content $extractorPath -Encoding UTF8
 
+# --- Snapshot existing installation for rollback on failure ----------
+$RollbackDir = $null
+$origCjs = Join-Path $ClawDir "cli.original.cjs"
+$sourceVerFile = Join-Path $ClawDir ".source-version"
+if ((Test-Path $origCjs) -and (Test-Path $sourceVerFile)) {
+    $RollbackDir = Join-Path ([System.IO.Path]::GetTempPath()) ("clawgod-rollback-" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $RollbackDir -Force | Out-Null
+    Copy-Item -Path $origCjs -Destination $RollbackDir -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path $sourceVerFile -Destination $RollbackDir -Force -ErrorAction SilentlyContinue
+    $sbJson = Join-Path $ClawDir "source-backup.json"
+    if (Test-Path $sbJson) { Copy-Item -Path $sbJson -Destination $RollbackDir -Force -ErrorAction SilentlyContinue }
+    $patchesJson = Join-Path $ClawDir "patches.json"
+    if (Test-Path $patchesJson) { Copy-Item -Path $patchesJson -Destination $RollbackDir -Force -ErrorAction SilentlyContinue }
+    $bunfs = Join-Path $ClawDir "bunfs"
+    if (Test-Path $bunfs) { Copy-Item -Path $bunfs -Destination $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue }
+    $vendor = Join-Path $ClawDir "vendor"
+    if (Test-Path $vendor) { Copy-Item -Path $vendor -Destination $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 # --- Extract cli.js + native modules from Bun binary ------------------
 
 # Single extractor pass: writes cli.original.js to $ClawDir and creates
@@ -511,8 +530,33 @@ if (-not $NoUpgrade) {
 Write-Dim "Applying patches ..."
 node (Join-Path $ClawDir "patch.mjs")
 if ($LASTEXITCODE -ne 0) {
-    Write-Err "Patching failed (node exit $LASTEXITCODE). Installation aborted."
-    exit $LASTEXITCODE
+    $exitCode = $LASTEXITCODE
+    Write-Err "Patching failed (node exit $exitCode). Installation aborted."
+    if ($RollbackDir -and (Test-Path (Join-Path $RollbackDir "cli.original.cjs"))) {
+        Write-Dim "Rolling back to previous working installation ..."
+        Remove-Item -Path (Join-Path $ClawDir "bunfs") -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $ClawDir "vendor") -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $ClawDir "cli.original.cjs") -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $ClawDir ".source-version") -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $ClawDir "source-backup.json") -Force -ErrorAction SilentlyContinue
+        Copy-Item -Path (Join-Path $RollbackDir "*") -Destination $ClawDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue
+        $prevVer = ""
+        if (Test-Path $sourceVerFile) { $prevVer = (Get-Content $sourceVerFile -Raw).Trim() }
+        Write-OK "Restored previous working installation ($prevVer)."
+    } else {
+        Write-Err "No previous working installation found to roll back."
+    }
+    Write-Err ""
+    Write-Err "The new Claude Code build ($NativeBinLabel) is not yet supported by this ClawGod release."
+    Write-Err "To install or roll back to a known compatible version, run:"
+    Write-Err "  irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | iex -ArgumentList '--version <version>'"
+    Write-Err "(Note: 'claude update --version' will fail on unpatched Claude Code with 'unknown option --version')"
+    exit $exitCode
+}
+
+if ($RollbackDir -and (Test-Path $RollbackDir)) {
+    Remove-Item -Path $RollbackDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --- Report which renderer runtime this Claude Code build needs -------

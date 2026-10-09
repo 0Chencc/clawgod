@@ -709,6 +709,18 @@ function main() {
 main();
 EXTRACTOR_EOF
 
+# ─── Snapshot existing installation for rollback on failure ──────────
+PREV_BACKUP_DIR=""
+if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
+  PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
+  cp -a "$CLAWGOD_DIR/cli.original.cjs" "$PREV_BACKUP_DIR/" 2>/dev/null || true
+  cp -a "$CLAWGOD_DIR/.source-version" "$PREV_BACKUP_DIR/" 2>/dev/null || true
+  [ -f "$CLAWGOD_DIR/source-backup.json" ] && cp -a "$CLAWGOD_DIR/source-backup.json" "$PREV_BACKUP_DIR/" 2>/dev/null || true
+  [ -f "$CLAWGOD_DIR/patches.json" ] && cp -a "$CLAWGOD_DIR/patches.json" "$PREV_BACKUP_DIR/" 2>/dev/null || true
+  [ -d "$CLAWGOD_DIR/bunfs" ] && cp -a "$CLAWGOD_DIR/bunfs" "$PREV_BACKUP_DIR/" 2>/dev/null || true
+  [ -d "$CLAWGOD_DIR/vendor" ] && cp -a "$CLAWGOD_DIR/vendor" "$PREV_BACKUP_DIR/" 2>/dev/null || true
+fi
+
 # ─── Extract cli.js + native modules from Bun binary ──────────
 # Note: extract-natives.mjs and post-process.mjs are kept around (NOT deleted)
 # so the wrapper's drift detector can re-run them when the user upgrades
@@ -3322,8 +3334,25 @@ node "$CLAWGOD_DIR/patch.mjs" 2>&1 | while IFS= read -r line; do echo "  $line";
 patch_status=${PIPESTATUS[0]}
 if [ "$patch_status" -ne 0 ]; then
   warn "Patching failed (node exit $patch_status). Installation aborted."
+  if [ -n "$PREV_BACKUP_DIR" ] && [ -f "$PREV_BACKUP_DIR/cli.original.cjs" ]; then
+    dim "Rolling back to previous working installation ..."
+    rm -rf "$CLAWGOD_DIR/bunfs" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/.source-version" "$CLAWGOD_DIR/source-backup.json" 2>/dev/null || true
+    cp -a "$PREV_BACKUP_DIR"/. "$CLAWGOD_DIR/" 2>/dev/null || true
+    rm -rf "$PREV_BACKUP_DIR"
+    PREV_VER=$(cat "$CLAWGOD_DIR/.source-version" 2>/dev/null || echo "previous")
+    info "Restored previous working installation ($PREV_VER)."
+  else
+    warn "No previous working installation found to roll back."
+  fi
+  warn ""
+  warn "The new Claude Code build (${NATIVE_BIN_LABEL:-unknown}) is not yet supported by this ClawGod release."
+  warn "To install or roll back to a known compatible version, run:"
+  warn "  curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s -- --version <version>"
+  warn "(Note: 'claude update --version' will fail on unpatched Claude Code with \"unknown option '--version'\")"
   exit "$patch_status"
 fi
+
+[ -n "$PREV_BACKUP_DIR" ] && rm -rf "$PREV_BACKUP_DIR" 2>/dev/null || true
 
 # ─── Report which renderer runtime this Claude Code build needs ────────
 # 2.1.271+ renders through Bun.ant.CellSegmenter, an Anthropic-private Bun
