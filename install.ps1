@@ -3229,6 +3229,11 @@ const verify = args.includes('--verify');
 const revert = args.includes('--revert');
 const dumpFeatures = args.includes('--dump-features');
 const captureCleanSource = args.includes('--capture-clean-source');
+// Opt-in: report a stale patch and keep going instead of aborting the whole
+// install. A single drifted regex still fails the run by default, because
+// "patched minus one" is only safe when the caller asked for it: the skipped
+// patch leaves upstream behavior in place for its own gate. See issue #224.
+const tolerateStale = args.includes('--tolerate-stale');
 
 // Build-time export: `patch.mjs --dump-features` prints the inverted
 // registry (patch id \u2192 owning feature ids) as JSON and exits. build.js
@@ -3368,7 +3373,7 @@ if (revert) {
 console.log(`\n${'\u2550'.repeat(55)}`);
 console.log(`  ClawGod (universal)`);
 console.log(`  Target: cli.original.cjs (v${version}) ${isGraph ? `[graph: ${Object.keys(files).length} files]` : ''}`);
-console.log(`  Mode: ${dryRun ? 'DRY RUN' : verify ? 'VERIFY' : 'APPLY'}`);
+console.log(`  Mode: ${dryRun ? 'DRY RUN' : verify ? 'VERIFY' : 'APPLY'}${tolerateStale ? ' (stale tolerated)' : ''}`);
 console.log(`${'\u2550'.repeat(55)}\n`);
 
 // unified search: gather all matches of a pattern across every loaded file.
@@ -3388,7 +3393,8 @@ function collectMatches(p) {
   return out;
 }
 
-let applied = 0, skipped = 0, failed = 0;
+let applied = 0, skipped = 0, failed = 0, tolerated = 0;
+const toleratedNames = [];
 
 for (const p of patches) {
   const fileMatches = collectMatches(p);
@@ -3421,8 +3427,15 @@ for (const p of patches) {
       const sentinels = Array.isArray(p.sentinel) ? p.sentinel : [p.sentinel];
       const stillPresent = sentinels.filter((s) => Object.values(files).some((c) => c.includes(s)));
       if (stillPresent.length > 0) {
-        console.log(`  \u274c ${p.name} \u2014 regex stale, sentinel still in source: ${stillPresent.map((s) => JSON.stringify(s)).join(', ')}`);
-        failed++;
+        const detail = stillPresent.map((s) => JSON.stringify(s)).join(', ');
+        if (tolerateStale) {
+          console.log(`  \u26a0\ufe0f  ${p.name} \u2014 regex stale, sentinel still in source: ${detail} (tolerated)`);
+          tolerated++;
+          toleratedNames.push(p.name);
+        } else {
+          console.log(`  \u274c ${p.name} \u2014 regex stale, sentinel still in source: ${detail}`);
+          failed++;
+        }
         continue;
       }
       console.log(`  \u2705 ${p.name} (already applied, sentinel absent)`);
@@ -3476,11 +3489,20 @@ for (const p of patches) {
 }
 
 console.log(`\n${'\u2500'.repeat(55)}`);
-console.log(`  Result: ${applied} applied, ${skipped} skipped, ${failed} failed`);
+console.log(`  Result: ${applied} applied, ${skipped} skipped, ${failed} failed${tolerated > 0 ? `, ${tolerated} tolerated` : ''}`);
+if (tolerated > 0) {
+  console.log(`  Tolerated (skipped, upstream behavior kept): ${toleratedNames.join('; ')}`);
+}
 
 if (failed > 0) {
   console.error('Patching failed; source files were not changed.');
   process.exit(1);
+}
+
+if (tolerated > 0) {
+  console.warn('  \u26a0\ufe0f  --tolerate-stale: the patches listed above were not applied, so their');
+  console.warn('     upstream gates stay in force. Re-run without the flag once the patcher');
+  console.warn('     has been updated for this Claude Code build.');
 }
 
 if (!dryRun && !verify && applied > 0) {
