@@ -1591,6 +1591,9 @@ const CLAWGOD_FEATURES_META = {
   ],
   "message-filter-s8": [
     "message-filter"
+  ],
+  "remote-settings-off": [
+    "remote-settings"
   ]
 };
 
@@ -9092,6 +9095,8 @@ const FEATURES = {
                       patchIds: ['remove-not-logged-in'] },
   'message-filter': { desc: 'Bypass non-ant message/attachment filters',
                       patchIds: ['attachment-filter-bypass', 'message-filter-legacy', 'message-filter-s8'] },
+  'remote-settings': { desc: 'Ignore enterprise-managed remote settings',
+                      patchIds: ['remote-settings-off'] },
 };
 
 // Runtime gate expression baked into every toggleable replacer. Evaluates
@@ -9743,6 +9748,23 @@ const patches = [
     replacer: (m, prefix, suffix) => `${prefix}"claude.orig.exe":"claude.orig"${suffix}`,
     sentinel: '?"claude.exe":"claude")',
     optional: true,  // v2.1.88-era bundles compute the path differently
+  },
+  {
+    // Claude Code fetches org-managed "remote settings" from the API and
+    // caches them in ~/.claude/remote-settings.json. When eligible, the
+    // fetched policy is merged into policySettings and forces permission
+    // rules (ask/deny), disableRemoteControl, allowManagedPermissionRulesOnly,
+    // requiredMinimumVersion, etc. \u2014 the "Managed by enterprise settings"
+    // rules shown under /permissions. Forcing the eligibility gate to always
+    // return false makes the API fetch and the on-disk cache unused, so no
+    // enterprise rules apply. The gate short-circuits before the original
+    // body, so the OFF branch (feature disabled) is byte-identical upstream.
+    id: 'remote-settings-off',
+    toggleable: true,
+    name: 'Ignore enterprise-managed remote settings',
+    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\);if\([\w$]+!==void 0\)return [\w$]+;let\{eligible:/g,
+    replacer: (m, fn) => `function ${fn}(){if(${gate('remote-settings-off')})return!1;` + m.slice(`function ${fn}(){`.length),
+    optional: true,  // eligibility gate shape may drift across versions
   },
 ];
 

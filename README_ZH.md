@@ -62,6 +62,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **URL 限制** | "禁止生成或猜测 URL" 指令 |
 | **操作审慎** | 破坏性操作前的强制确认 |
 | **登录提示** | 启动时的"未登录"提醒 |
+| **企业远程设置** | 组织托管的远程设置（`~/.claude/remote-settings.json`）——强制权限规则、`disableRemoteControl`、`allowManagedPermissionRulesOnly`、版本锁定。可用 `CLAWGOD_FEATURE_REMOTE_SETTINGS=false` 关闭 |
 
 ### 地区隐写中和
 

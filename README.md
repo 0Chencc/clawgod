@@ -62,6 +62,7 @@ Green logo = patched. Orange logo = original.
 | **URL Restriction** | "NEVER generate or guess URLs" instruction |
 | **Cautious Actions** | Forced confirmation before destructive operations |
 | **Login Notice** | "Not logged in" startup reminder |
+| **Enterprise Remote Settings** | Org-managed remote settings (`~/.claude/remote-settings.json`) — forced permission rules, `disableRemoteControl`, `allowManagedPermissionRulesOnly`, version pinning. Disable with `CLAWGOD_FEATURE_REMOTE_SETTINGS=false` |
 
 ### Geo-Steganography Neutralization
 
