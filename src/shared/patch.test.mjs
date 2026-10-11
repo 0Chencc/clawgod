@@ -115,6 +115,39 @@ try {
     }
   }
 
+  // --tolerate-stale (#224): a single drifted regex must not be able to abort
+  // the whole install once the caller opts in. The stale patch keeps upstream
+  // behavior, every other patch still lands, and the default run is unchanged
+  // — no flag, no write, exit 1.
+  for (const graph of [false, true]) {
+    rmSync(join(testDir, 'bunfs'), { recursive: true, force: true });
+    if (graph) mkdirSync(join(testDir, 'bunfs'));
+    const target = join(testDir, graph ? 'bunfs/mixed.js' : 'cli.original.cjs');
+    if (graph) writeFileSync(join(testDir, 'cli.original.cjs'), '// entry');
+    const source =
+      'var command={name:"ultraplan",description:"Cloud command stub"};' +
+      'function isThirdParty(){return provider!=="firstParty"&&!isAws(provider)}' +
+      'function isAws(value){return value==="anthropicAws"}' +
+      'function supports(model){if(isThirdParty()&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku")))return!1;return!0}';
+    const layout = graph ? 'graph' : 'legacy';
+
+    writeFileSync(target, source);
+    const strict = spawnSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+    assert.equal(strict.status, 1, `${layout}: stale patch still aborts by default`);
+    assert.match(strict.stdout, /Ultraplan enable — regex stale/);
+    assert.equal(readFileSync(target, 'utf8'), source, `${layout}: default run writes nothing`);
+
+    const lenient = spawnSync(process.execPath, [join(testDir, 'patch.mjs'), '--tolerate-stale'], { encoding: 'utf8' });
+    assert.equal(lenient.status, 0, `${layout}: --tolerate-stale completes the install`);
+    assert.match(lenient.stdout, /\d+ applied, \d+ skipped, 0 failed, 1 tolerated/);
+    assert.match(lenient.stdout, /Ultraplan enable — regex stale.*\(tolerated\)/);
+    assert.match(lenient.stdout, /Tolerated \(skipped, upstream behavior kept\): Ultraplan enable/);
+
+    const patched = readFileSync(target, 'utf8');
+    assert.match(patched, /name:"ultraplan",description:"Cloud command stub"/, `${layout}: stale patch kept upstream behavior`);
+    assert.match(patched, /globalThis\.__clawgodPatches\?\.\["auto-mode-inline-gate"\]/, `${layout}: remaining patches still applied`);
+  }
+
   // The provider check moved into a no-argument helper in Claude 2.1.280.
   // Both forms must keep the upstream restriction when the feature is off.
   for (const graph of [false, true]) {
