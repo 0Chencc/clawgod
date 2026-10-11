@@ -67,7 +67,9 @@ const ultraplanFixtures = [
 ];
 const testDir = mkdtempSync(join(tmpdir(), 'clawgod-patch-test-'));
 try {
-  copyFileSync(new URL('./patch.mjs', import.meta.url), join(testDir, 'patch.mjs'));
+  for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+    copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
+  }
   for (const graph of [false, true]) {
     if (graph) mkdirSync(join(testDir, 'bunfs'));
     for (const fixture of ultraplanFixtures) {
@@ -79,7 +81,7 @@ try {
       assert.match(output, /Ultraplan enable \(1 replacement in 1 file\)/, fixture.label);
       const patched = readFileSync(target, 'utf8');
       const enabled = `isEnabled:()=>${fixture.original}`;
-      assert.equal(patched, source.replace(enabled, `isEnabled:()=>(globalThis.__clawgodPatches?.["ultraplan"]!==!1?!0:${fixture.original})`));
+      assert.equal(patched, source.replace(enabled, `isEnabled:()=>(globalThis.__clawgodPatches?.["ultraplan"]!==!1?!0:(${fixture.original}))`));
       for (const toggle of [undefined, true, false]) {
         for (const upstream of [false, true]) {
           let calls = 0;
@@ -102,7 +104,7 @@ try {
     // An unsupported shape must stay visible as a failure, even if a nearby
     // command happens to contain the old argumentHint/isEnabled sequence.
     for (const body of [
-      'description:"Future gate",argumentHint:"<prompt>",newMetadata:!0,isEnabled:()=>$flag()',
+      'description:"Future gate",argumentHint:"<prompt>",newMetadata:!0,isEnabled:futureGate',
       'description:"Cloud command stub"',
     ]) {
       const source = `var command={name:"ultraplan",${body}};var neighbor={name:"other",argumentHint:"<prompt>",isEnabled:()=>!1};`;
@@ -110,7 +112,7 @@ try {
       writeFileSync(target, source);
       const result = spawnSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
       assert.equal(result.status, 1);
-      assert.match(result.stdout, /Ultraplan enable — regex stale/);
+      assert.match(result.stdout, /Ultraplan enable — AST matcher stale/);
       assert.equal(readFileSync(target, 'utf8'), source);
     }
   }
@@ -134,13 +136,13 @@ try {
     writeFileSync(target, source);
     const strict = spawnSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
     assert.equal(strict.status, 1, `${layout}: stale patch still aborts by default`);
-    assert.match(strict.stdout, /Ultraplan enable — regex stale/);
+    assert.match(strict.stdout, /Ultraplan enable — AST matcher stale/);
     assert.equal(readFileSync(target, 'utf8'), source, `${layout}: default run writes nothing`);
 
     const lenient = spawnSync(process.execPath, [join(testDir, 'patch.mjs'), '--tolerate-stale'], { encoding: 'utf8' });
     assert.equal(lenient.status, 0, `${layout}: --tolerate-stale completes the install`);
     assert.match(lenient.stdout, /\d+ applied, \d+ skipped, 0 failed, 1 tolerated/);
-    assert.match(lenient.stdout, /Ultraplan enable — regex stale.*\(tolerated\)/);
+    assert.match(lenient.stdout, /Ultraplan enable — AST matcher stale.*\(tolerated\)/);
     assert.match(lenient.stdout, /Tolerated \(skipped, upstream behavior kept\): Ultraplan enable/);
 
     const patched = readFileSync(target, 'utf8');

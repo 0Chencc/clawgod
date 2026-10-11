@@ -37,6 +37,8 @@ try {
     Set-Content (Join-Path $ClawDir 'cli.original.cjs') '// old source'
     Set-Content (Join-Path $ClawDir '.source-version') '2.1.280'
     Set-Content (Join-Path $ClawDir 'cli.cjs') '// old wrapper'
+    $astPayloads = @('ast-patches.mjs','acorn.mjs','acorn.LICENSE')
+    foreach ($name in $astPayloads) { Set-Content (Join-Path $ClawDir $name) "old $name" }
     New-Item -ItemType Directory -Path (Join-Path $ClawDir 'bunfs') | Out-Null
     Set-Content (Join-Path $ClawDir 'bunfs\commands.js') '// old graph'
     . $snapshot
@@ -44,11 +46,15 @@ try {
     Set-Content (Join-Path $ClawDir 'cli.original.cjs') '// new source'
     Set-Content (Join-Path $ClawDir '.source-version') '2.1.299'
     Set-Content (Join-Path $ClawDir 'cli.cjs') '// new wrapper'
+    foreach ($name in $astPayloads) { Set-Content (Join-Path $ClawDir $name) "new $name" }
     Set-Content (Join-Path $ClawDir 'claude.staged.exe') 'new binary'
     Restore-Install
     Assert (((Get-Content (Join-Path $ClawDir 'cli.original.cjs') -Raw).Trim()) -eq '// old source') 'Source rollback failed'
     Assert (((Get-Content (Join-Path $ClawDir '.source-version') -Raw).Trim()) -eq '2.1.280') 'Version rollback failed'
     Assert (((Get-Content (Join-Path $ClawDir 'cli.cjs') -Raw).Trim()) -eq '// old wrapper') 'Wrapper rollback failed'
+    foreach ($name in $astPayloads) {
+        Assert (((Get-Content (Join-Path $ClawDir $name) -Raw).Trim()) -eq "old $name") "AST payload rollback failed: $name"
+    }
     Assert (((Get-Content (Join-Path $ClawDir 'bunfs\commands.js') -Raw).Trim()) -eq '// old graph') 'Graph rollback failed'
     Assert (-not (Test-Path (Join-Path $ClawDir 'claude.staged.exe'))) 'Staged binary was not cleaned up'
     $applySection = [regex]::Match($template, '(?s)# --- Apply patches.*?(?=# --- Report which renderer)').Value

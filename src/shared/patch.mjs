@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * ClawGod Universal Patcher — 正则模式匹配, 跨版本兼容
+ * ClawGod Universal Patcher — AST semantic patches + legacy regex patches
  */
 import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, renameSync } from 'fs';
 import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
+import { AST_PATCH_IDS, scanAstPatches, applyAstEdits, parsePatchSource } from './ast-patches.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGET = join(__dirname, 'cli.original.cjs');
@@ -76,7 +77,7 @@ const FEATURES = {
 // to true unless feature-gates.cjs explicitly computed false for this id.
 const gate = (id) => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 
-// ─── Regex-based patches (version-agnostic) ──────────────
+// ─── Patches: semantic AST sites and legacy regex matchers ──
 
 const patches = [
   {
@@ -95,9 +96,7 @@ const patches = [
   {
     id: 'user-type-ant',
     name: 'USER_TYPE → ant',
-    pattern: /function ([\w$]+)\(\)\{return"external"\}/g,
-    replacer: (m, fn) => `function ${fn}(){return"ant"}`,
-    sentinel: 'return"external"',
+    ast: true,
   },
   {
     // Bun.isStandaloneExecutable is false under clawgod (plain Bun runtime,
@@ -110,11 +109,10 @@ const patches = [
     // v2.1.236+ wraps the guard in a typeof-Bun check:
     //   function fv(){return Bun.isStandaloneExecutable===!0}        ≤v2.1.235
     //   function kw(){return typeof Bun<"u"&&Bun.isStandaloneExecutable===!0}  v2.1.236+
-    // Match both via an optional `typeof Bun<"u"&&` prefix.
+    // The AST matcher accepts both forms and quoted member keys.
     id: 'bun-standalone-executable',
     name: 'Bun.isStandaloneExecutable → true',
-    pattern: /function ([\w$]+)\(\)\{return (?:typeof Bun<"u"&&)?Bun\.isStandaloneExecutable===!0\}/g,
-    replacer: (m, fn) => `function ${fn}(){return!0}`,
+    ast: true,
   },
   {
     id: 'growthbook-env-overrides',
@@ -132,13 +130,11 @@ const patches = [
     //
     // v2.1.246 shape (chunk graph, _668.js):
     //   getEnvironmentOverrides(){if(this.environmentOverridesParsed)return this.environmentOverrides;return this.environmentOverridesParsed=!0,this.environmentOverrides;let e=this.deps.readEnvironmentOverrides();if(!e)return this.environmentOverrides;try{this.environmentOverrides=Ce(e),p(`GrowthBook: Using env var overrides for ${...}`)}catch{p(`GrowthBook: Failed to parse CLAUDE_INTERNAL_FC_OVERRIDES: ${e}`,...)}return this.environmentOverrides}
-    // Patch removes the short-circuit second return so the body reaches the
-    // env-var read. Cross-version: match the lazy-parse idiom (flag=!0,value).
+    // Replace the dead return with the parsed-flag assignment so the body
+    // reaches the reader once. Locate it only in getEnvironmentOverrides.
     id: 'growthbook-env-overrides-graph',
     name: 'GrowthBook env overrides (graph dead-code fix)',
-    pattern: /return this\.environmentOverridesParsed=!0,this\.environmentOverrides;(?=let e=this\.deps\.readEnvironmentOverrides\(\);)/g,
-    replacer: () => '',
-    sentinel: 'environmentOverridesParsed=!0,this.environmentOverrides',
+    ast: true,
     optional: true,
   },
   {
@@ -186,24 +182,16 @@ const patches = [
     id: 'computer-use-default',
     toggleable: true,
     name: 'Computer Use default enabled',
-    pattern: /([\w$]+=)\{enabled:!1,pixelValidation/g,
-    replacer: (m, prefix) => `${prefix}{enabled:${gate('computer-use-default')}?!0:!1,pixelValidation`,
+    ast: true,
   },
   {
-    // v2.1.92+ shape: name:"ultraplan",get description(){...},argumentHint:"<prompt>",isEnabled:()=>fnRef()
-    // Older shape  : name:"ultraplan",description:`...`,argumentHint:"<prompt>",isEnabled:()=>!1
-    // The middle metadata block changed from a literal description to a getter,
-    // and the gate switched from a literal !1 to a GrowthBook-flag-check function call.
-    // v2.1.268 adds availability:["claude-ai"] between argumentHint and
-    // isEnabled. Preserve that metadata along with the original gate.
-    // Stop at the first argumentHint or another command's name so a changed
-    // gate cannot make the match spill into a neighboring command.
+    // Locate the command object by its exact name property, then edit only
+    // the isEnabled function body. Preserve all metadata and the original
+    // body when the runtime feature gate is disabled.
     id: 'ultraplan',
     toggleable: true,
     name: 'Ultraplan enable',
-    pattern: /(name:"ultraplan",(?:(?!\b(?:name|argumentHint):)[\s\S]){1,500}?argumentHint:"<prompt>",(?:availability:\[[^\]\r\n]*\],)?isEnabled:\(\)=>)(!1|[\w$]+\(\))/g,
-    replacer: (m, prefix, orig) => `${prefix}(${gate('ultraplan')}?!0:${orig})`,
-    sentinel: 'name:"ultraplan"',
+    ast: true,
   },
   {
     // ≤v2.1.110: function X(){return Y("tengu_review_bughunter_config",null)?.enabled===!0}
@@ -244,8 +232,7 @@ const patches = [
     id: 'voice-mode',
     toggleable: true,
     name: 'Voice Mode enable (bypass GrowthBook kill)',
-    pattern: /function ([\w$]+)\(\)\{return![\w$]+\("tengu_amber_quartz_disabled",!1\)\}/g,
-    replacer: (m, fn) => `function ${fn}(){return ${gate('voice-mode')}?!0:(${m.slice(`function ${fn}(){return`.length, -1)})}`,
+    ast: true,
   },
   {
     // Auto-mode classifier stage1 (xml_s1) deadline formula (v2.1.251+):
@@ -565,15 +552,7 @@ const patches = [
     id: 'geo-stego-date',
     toggleable: true,
     name: 'Neutralize geo-steganography in date string (qla)',
-    pattern: /function ([\w$]+)\([\w$]+\)\{let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+\([\w$]+\?\.[\w$]+\?\?!1,[\w$]+\?\.[\w$]+\?\?!1\),[\w$]+=[\w$]+\?\.[\w$]+\?[\w$]+\.replaceAll\("-","\/"\):[\w$]+;return`Today\$\{[\w$]+\}s date is \$\{[\w$]+\}\.`\}/g,
-    replacer: (m) => {
-      // Extract function name and parameter name from the match
-      const fnMatch = m.match(/^function ([\w$]+)\(([\w$]+)\)/);
-      if (!fnMatch) return m;
-      const [, fn, param] = fnMatch;
-      return `function ${fn}(${param}){if(${gate('geo-stego-date')})return\`Today's date is \${${param}}.\`;` + m.slice(fnMatch[0].length, -1) + `}`;
-    },
-    sentinel: 'replaceAll("-","/")',
+    ast: true,
   },
   {
     // v2.1.197+: rdp() performs three-axis geo detection:
@@ -922,8 +901,39 @@ function collectMatches(p) {
 let applied = 0, skipped = 0, failed = 0, tolerated = 0;
 const toleratedNames = [];
 
-for (const p of patches) {
-  const fileMatches = collectMatches(p);
+const astMatches = new Map(AST_PATCH_IDS.map(id => [id, []]));
+const astPresent = new Set();
+const astPatched = new Set();
+const astEdits = new Map();
+try {
+  for (const [file, content] of Object.entries(files)) {
+    const result = scanAstPatches(content);
+    for (const id of AST_PATCH_IDS) {
+      if (result[id].present) astPresent.add(id);
+      if (result[id].patched) astPatched.add(id);
+      if (result[id].matches.length) astMatches.get(id).push({ file, content, matches: result[id].matches });
+    }
+  }
+} catch (error) {
+  console.error(`AST scan failed: ${error.message}. Source files were not changed.`);
+  process.exit(1);
+}
+
+let astFlushed = false;
+for (const p of [...patches.filter(p => p.ast), ...patches.filter(p => !p.ast)]) {
+  if (!p.ast && !astFlushed) {
+    try {
+      for (const [file, edits] of astEdits) {
+        files[file] = applyAstEdits(files[file], edits);
+        parsePatchSource(files[file]);
+      }
+    } catch (error) {
+      console.error(`AST rewrite failed: ${error.message}. Source files were not changed.`);
+      process.exit(1);
+    }
+    astFlushed = true;
+  }
+  const fileMatches = p.ast ? astMatches.get(p.id) : collectMatches(p);
 
   /*
    * Patch semantics per file:
@@ -944,22 +954,27 @@ for (const p of patches) {
   for (const fm of fileMatches) totalMatches += fm.matches.length;
 
   if (relevantFiles.length === 0) {
+    if (p.ast && astPatched.has(p.id) && !astPresent.has(p.id)) {
+      console.log(`  ✅ ${p.name} (already applied, AST gate present)`);
+      applied++;
+      continue;
+    }
     if (p.optional) {
       console.log(`  ⏭  ${p.name} (not present in this version)`);
       skipped++;
       continue;
     }
-    if (p.sentinel !== undefined) {
-      const sentinels = Array.isArray(p.sentinel) ? p.sentinel : [p.sentinel];
-      const stillPresent = sentinels.filter((s) => Object.values(files).some((c) => c.includes(s)));
+    if (p.sentinel !== undefined || (p.ast && astPresent.has(p.id))) {
+      const sentinels = p.ast ? [p.id] : (Array.isArray(p.sentinel) ? p.sentinel : [p.sentinel]);
+      const stillPresent = p.ast ? sentinels : sentinels.filter((s) => Object.values(files).some((c) => c.includes(s)));
       if (stillPresent.length > 0) {
         const detail = stillPresent.map((s) => JSON.stringify(s)).join(', ');
         if (tolerateStale) {
-          console.log(`  ⚠️  ${p.name} — regex stale, sentinel still in source: ${detail} (tolerated)`);
+          console.log(`  ⚠️  ${p.name} — ${p.ast ? 'AST matcher' : 'regex'} stale, sentinel still in source: ${detail} (tolerated)`);
           tolerated++;
           toleratedNames.push(p.name);
         } else {
-          console.log(`  ❌ ${p.name} — regex stale, sentinel still in source: ${detail}`);
+          console.log(`  ❌ ${p.name} — ${p.ast ? 'AST matcher' : 'regex'} stale, sentinel still in source: ${detail}`);
           failed++;
         }
         continue;
@@ -988,9 +1003,13 @@ for (const p of patches) {
     let changed = false;
     let count = 0;
     for (const m of fm.matches) {
-      const replacement = p.replacer(m[0], ...m.slice(1));
-      if (replacement !== m[0]) {
-        if (!dryRun) {
+      const original = p.ast ? fm.content.slice(m.start, m.end) : m[0];
+      const replacement = p.ast ? m.replacement : p.replacer(m[0], ...m.slice(1));
+      if (replacement !== original) {
+        if (p.ast) {
+          if (!astEdits.has(fm.file)) astEdits.set(fm.file, []);
+          astEdits.get(fm.file).push(m);
+        } else if (!dryRun) {
           files[fm.file] = files[fm.file].replace(m[0], () => replacement);
         } else {
           // in dry-run mutate the local copy only for counting

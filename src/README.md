@@ -12,7 +12,40 @@ The build must remain byte-for-byte reproducible. CI runs `--check` and fails
 when either generated installer is missing or differs from its sources.
 `.gitattributes` pins the complete build graph to LF on every platform.
 
+## Semantic patching
+
+The patcher uses Acorn AST nodes for `user-type-ant`,
+`bun-standalone-executable`, `growthbook-env-overrides-graph`,
+`computer-use-default`, `ultraplan`, `voice-mode`, and `geo-stego-date`.
+It parses each candidate file once, locates stable property/string names and grammar nodes, and splices
+only those node ranges. Metadata order, quote style, whitespace, and supported
+function forms do not determine the location. Comments and text inside strings
+are not patch sites. The remaining patches retain their existing regex matchers;
+this is an incremental migration, with no new feature unlocks.
+
+AST edits are checked for overlap and reparsed before the regex phase. Parse
+failures abort without writing runtime source, even with `--tolerate-stale`.
+An unsupported Ultraplan command shape is a stale matcher; the opt-in stale
+policy and runtime feature toggles work as before. The scanner accepts extracted
+CommonJS and ESM chunks, including top-level return and import/export statements.
+The date patch also fixes an unbalanced brace in the former regex replacement
+that made the 2.1.143 single-file bundle fail at startup. Its original body is
+preserved when the feature is disabled.
+
+`shared/acorn.mjs` is the unmodified distribution from **Acorn 8.18.0**, vendored
+with its MIT license in `shared/acorn.LICENSE`. Its SHA-256 is
+`953573b8fdab71599749ea5f2b33d3e760c2116178f9423ee7458dbe39d59453`.
+Both installers embed the parser, matcher, and license, so patching and
+`--no-upgrade` require no npm dependency installation. Include these payloads
+when copying the patcher, and preserve them in installation rollback snapshots.
+
 ## Testing
+
+`node src/shared/ast-patches.test.mjs` checks semantic locations, property
+reordering, quoted/computed keys, function forms, directive preservation,
+unchanged neighboring code, runtime toggles, repeated patching, dry-run/verify,
+clean-source restoration, stale policy, and syntax-failure safety in both legacy
+and chunk layouts. CI runs this suite alongside the existing patch tests.
 
 `src/shared/patch.test.mjs` tests the classifier-timeout helper in
 `runtime-helpers.cjs` and runs the patcher on Ultraplan fixtures for legacy

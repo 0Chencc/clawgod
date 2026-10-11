@@ -12,7 +12,9 @@ try {
   for (const graph of [false, true]) {
     const dir = join(root, graph ? 'graph' : 'legacy');
     mkdirSync(dir);
-    copyFileSync(new URL('./patch.mjs', import.meta.url), join(dir, 'patch.mjs'));
+    for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+      copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
+    }
     const entry = join(dir, 'cli.original.cjs');
     if (graph) mkdirSync(join(dir, 'bunfs'));
     const target = graph ? join(dir, 'bunfs/commands.js') : entry;
@@ -160,6 +162,8 @@ try {
     writeFileSync(join(rollbackDir, '.source-version'), '2.1.280\n');
     writeFileSync(join(rollbackDir, 'cli.cjs'), '// old wrapper');
     writeFileSync(join(rollbackDir, 'patch.mjs'), '// old patcher');
+    const astPayloads = ['ast-patches.mjs', 'acorn.mjs', 'acorn.LICENSE'];
+    for (const name of astPayloads) writeFileSync(join(rollbackDir, name), `old ${name}`);
     writeFileSync(join(rollbackDir, 'broken-patch.mjs'), "if(process.argv.includes('--capture-clean-source')) process.exit(0); process.exit(9);");
     const rollbackEnv = { ...env, CLAWGOD_DIR: rollbackDir, TMPDIR: rollbackTmp, NO_UPGRADE: '0', NATIVE_BIN_LABEL: '2.1.299', NATIVE_BIN: 'missing' };
     const rollbackShell = body => spawnSync('bash', ['-c', 'set -e\ninfo() { echo "$*"; }; warn() { echo "$*"; }; dim() { :; }; err() { echo "$*"; };\n' + body], { env: rollbackEnv, encoding: 'utf8' });
@@ -170,7 +174,8 @@ try {
     assert.equal(readdirSync(rollbackTmp).length, 0);
 
     const broken = '\nrm -rf "$CLAWGOD_DIR/bunfs"\nprintf "%s\\n" "// Broken candidate 2.1.299" > "$CLAWGOD_DIR/cli.original.cjs"\nprintf "%s\\n" 2.1.299 > "$CLAWGOD_DIR/.source-version"\nprintf "%s\\n" "// new wrapper" > "$CLAWGOD_DIR/cli.cjs"\nprintf "%s\\n" "native 2.1.299" > "$CLAWGOD_DIR/claude.staged"\ncp "$CLAWGOD_DIR/broken-patch.mjs" "$CLAWGOD_DIR/patch.mjs"\n';
-    result = rollbackShell(snapshotInstall + broken + apply);
+    const replaceAst = astPayloads.map(name => `printf '%s' new > "$CLAWGOD_DIR/${name}"`).join('\n') + '\n';
+    result = rollbackShell(snapshotInstall + broken + replaceAst + apply);
     assert.equal(result.status, 9, result.stderr + result.stdout);
     assert.match(result.stdout, /Restored previous working installation \(2.1.280\)/);
     assert.match(result.stdout, /The new Claude Code build \(2.1.299\) is not yet supported/);
@@ -178,6 +183,7 @@ try {
     assert.equal(readFileSync(join(rollbackDir, 'cli.original.cjs'), 'utf8'), '// Old working 2.1.280');
     assert.equal(readFileSync(join(graphDir, 'commands.js'), 'utf8'), '// old graph');
     assert.equal(readFileSync(join(rollbackDir, 'cli.cjs'), 'utf8'), '// old wrapper');
+    for (const name of astPayloads) assert.equal(readFileSync(join(rollbackDir, name), 'utf8'), `old ${name}`);
     assert.equal(existsSync(join(rollbackDir, 'claude.staged')), false);
     assert.equal(readdirSync(rollbackTmp).length, 0, 'rollback temp dir cleaned up');
   }
