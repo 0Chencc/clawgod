@@ -259,6 +259,10 @@ jobs:
         shell: bash
         run: CLAWGOD_TEST_BUN="$(command -v bun)" node src/shared/startup-check.test.mjs
 
+      - name: Verify extracted text assets under Bun
+        shell: bash
+        run: CLAWGOD_TEST_BUN="$(command -v bun)" node src/shared/post-process.test.mjs
+
       - name: Assert all patches applied (parse install log)
         # patch.mjs prints "Result: A applied, S skipped, F failed".
         # F must be 0 — otherwise upstream has shifted enough that one of
@@ -687,6 +691,13 @@ jobs:
         shell: powershell
         run: |
           bun test src/shared/openai-proxy.test.mjs src/shared/openai-proxy.integration.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify extracted text assets under Bun
+        shell: powershell
+        run: |
+          $env:CLAWGOD_TEST_BUN = (Get-Command bun).Source
+          node src/shared/post-process.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Assert all patches applied

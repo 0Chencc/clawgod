@@ -928,11 +928,12 @@ if (($LASTEXITCODE -ne 0) -or -not (Test-Path $dstCli)) {
 Write-Dim "Rewriting bunfs paths and IIFE invocation ..."
 $postProc = Join-Path $ClawDir "post-process.mjs"
 @'
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, realpathSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
-const here = dirname(fileURLToPath(import.meta.url));
+// Generate paths in the OS's canonical form, including Windows 8.3 aliases.
+const here = realpathSync.native(dirname(fileURLToPath(import.meta.url)));
 const src = `${here}/cli.original.js`;
 const dst = `${here}/cli.original.cjs`;
 const pathMapFile = `${here}/pathmap.json`;
@@ -953,6 +954,25 @@ function fixFileURLs(c) {
   return c.replace(
     /[\w$]+\.fileURLToPath\("file:\/\/\/home\/runner\/work\/claude-cli-internal\/claude-cli-internal\/[^"]*"\)/g,
     () => '__filename',
+  );
+}
+
+// Embedded text requires return strings in the native bundle. Bun's disk
+// loader returns a module namespace, so read extracted text assets as UTF-8.
+function fixTextRequires(c) {
+  const textRoot = JSON.stringify(join(here, 'bunfs'));
+  return c.replace(/\b([\w$]+)=import\.meta\.require(?=[,;])/g, (_match, name) =>
+    `${name} = (id) => {
+      if (/\\.(?:txt|md)$/.test(id)) {
+        const fs = import.meta.require('node:fs');
+        const path = import.meta.require('node:path');
+        const relative = path.relative(fs.realpathSync(${textRoot}), fs.realpathSync(id));
+        if (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) {
+          return fs.readFileSync(id, 'utf8');
+        }
+      }
+      return import.meta.require(id);
+    }`,
   );
 }
 
@@ -983,6 +1003,7 @@ if (isChunked) {
   code = stripPragma(code);
   code = rewriteGraph(code);
   code = fixFileURLs(code);
+  code = fixTextRequires(code);
   writeFileSync(dst, code);
   unlinkSync(src);
 
@@ -996,6 +1017,7 @@ if (isChunked) {
     fc = stripPragma(fc);
     fc = rewriteGraph(fc);
     fc = fixFileURLs(fc);
+    fc = fixTextRequires(fc);
     writeFileSync(fp, fc);
     n++;
   }
