@@ -3,6 +3,7 @@ import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { runInNewContext } from 'node:vm';
 
 const root = mkdtempSync(join(tmpdir(), 'clawgod-source-backup-'));
 const command = '.command("update").alias("upgrade").description("Update").action(s(async(A)=>{original()}))';
@@ -38,6 +39,24 @@ try {
     const first = succeeds();
     const patched = readFileSync(target, 'utf8');
     assert.match(patched, /clawgod self-update/);
+    for (const platform of ['linux', 'win32']) {
+      const stop = new Error('update redirected');
+      const env = {};
+      const body = patched.replace(/^\/\/ Version:[^\n]*\n/, '').split('const color=')[0];
+      const redirect = runInNewContext(`const cmd={command(){return this},alias(){return this},description(){return this},allowUnknownOption(){return this},action(fn){this.run=fn;return this}};cmd${body};cmd.run()`, {
+        process: { argv: ['bun', 'cli', 'update', '--tolerate-stale'], env, platform, stderr: { write() {} }, exit() { throw stop; } },
+        require(name) {
+          assert.equal(name, 'child_process');
+          return { spawnSync(_command, _args, options) {
+            assert.equal(options.env.CLAWGOD_TOLERATE_STALE, '1');
+            return { status: 0 };
+          } };
+        },
+        s: fn => fn,
+      });
+      await assert.rejects(redirect, error => error === stop);
+      assert.equal(env.CLAWGOD_TOLERATE_STALE, '1');
+    }
     assert.notEqual(patched, clean);
     for (let attempt = 0; attempt < 3; attempt++) {
       const output = succeeds();
@@ -93,7 +112,7 @@ try {
     const dir = join(root, 'shell');
     mkdirSync(dir);
     const env = { ...process.env, CLAWGOD_DIR: dir, BIN_DIR: join(dir, 'bin'), NO_UPGRADE: '1', VERSION: 'latest' };
-    const shell = body => spawnSync('bash', ['-c', 'set -e\ninfo() { echo "$*"; }; warn() { echo "$*"; }; dim() { :; };\n' + body], { env, encoding: 'utf8' });
+    const shell = (body, extraEnv = {}) => spawnSync('bash', ['-c', 'set -e\ninfo() { echo "$*"; }; warn() { echo "$*"; }; dim() { :; };\n' + body], { env: { ...env, ...extraEnv }, encoding: 'utf8' });
     writeFileSync(join(dir, 'cli.original.cjs'), '// Version: 2.1.272');
     writeFileSync(join(dir, '.source-version'), '2.1.283\n');
     let result = shell(selection + '\necho "CHOICE=$NO_UPGRADE,$VERSION"');
@@ -121,6 +140,12 @@ try {
     assert.match(result.stdout, /No previous working installation found to roll back/);
     assert.match(result.stdout, /To install or roll back to a known compatible version/);
     assert.doesNotMatch(result.stdout, /UNEXPECTED_SUCCESS/);
+    writeFileSync(join(dir, 'patch.mjs'), "console.log('PATCH_ARGS=' + JSON.stringify(process.argv.slice(2)))");
+    for (const [enabled, expected] of [['', '[]'], ['1', '["--tolerate-stale"]']]) {
+      result = shell(apply, { TOLERATE_STALE: enabled });
+      assert.equal(result.status, 0, result.stderr + result.stdout);
+      assert.ok(result.stdout.includes(`PATCH_ARGS=${expected}`), result.stdout);
+    }
 
     // The real snapshot and EXIT handler must restore a working graph after
     // either extraction or patching fails, including the staged native binary.

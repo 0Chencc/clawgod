@@ -51,6 +51,16 @@ try {
     Assert (((Get-Content (Join-Path $ClawDir 'cli.cjs') -Raw).Trim()) -eq '// old wrapper') 'Wrapper rollback failed'
     Assert (((Get-Content (Join-Path $ClawDir 'bunfs\commands.js') -Raw).Trim()) -eq '// old graph') 'Graph rollback failed'
     Assert (-not (Test-Path (Join-Path $ClawDir 'claude.staged.exe'))) 'Staged binary was not cleaned up'
+    $applySection = [regex]::Match($template, '(?s)# --- Apply patches.*?(?=# --- Report which renderer)').Value
+    Assert $applySection 'Patch application section not found'
+    Set-Content (Join-Path $ClawDir 'patch.mjs') 'console.log("PATCH_ARGS=" + JSON.stringify(process.argv.slice(2)))' -Encoding ASCII
+    foreach ($enabled in @($false, $true)) {
+        $NoUpgrade = [switch]$true
+        $TolerateStale = [switch]$enabled
+        $output = & ([ScriptBlock]::Create($applySection)) 6>&1 | Out-String
+        $expected = if ($enabled) { 'PATCH_ARGS=["--tolerate-stale"]' } else { 'PATCH_ARGS=[]' }
+        Assert ($output.Contains($expected)) "Patch arguments did not match -TolerateStale=$enabled`: $output"
+    }
     $staleCleanup = [regex]::Match($template, '(?s)# A failed earlier upgrade may have left a newer native binary staged\..*?(?=# --- Write re-patch helper)').Value
     Assert $staleCleanup 'Stale native cleanup section not found'
     Set-Content (Join-Path $ClawDir 'claude.staged.exe') 'stale newer binary'

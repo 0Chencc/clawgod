@@ -202,9 +202,12 @@ Extra options:
 ```bash
 claude update --version 2.1.180   # Pin to a specific Claude Code version
 claude update --no-upgrade        # Re-patch the installed Claude version
+claude update --tolerate-stale    # Continue if a patch regex is stale; affected gates keep upstream behavior
 ```
 
 `--version` is useful when a new release has issues and you want to stay on a known-good version. `--no-upgrade` re-applies the latest patches to a complete clean-source backup of the installed version. Older installations without that backup download the same Claude version once to recover it; subsequent re-patches reuse the local backup.
+
+`--tolerate-stale` is an explicit fallback for a future Claude Code update that changes a patch pattern. The installer lists each skipped patch and keeps its upstream behavior. Without the flag, a stale pattern still aborts the install without writing partially patched source.
 
 If you'd rather invoke the installer directly (same effect, both paths fetch the same upstream release and re-patch):
 

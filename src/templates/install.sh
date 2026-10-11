@@ -9,13 +9,14 @@ set -e
 #  用法:
 #    curl -fsSL https://raw.githubusercontent.com/0Chencc/clawgod/main/install.sh | bash
 #    # 或
-#    bash install.sh [--version 2.1.89] [--no-upgrade]
+#    bash install.sh [--version 2.1.89] [--no-upgrade] [--tolerate-stale]
 # ─────────────────────────────────────────────────────────
 
 CLAWGOD_DIR="$HOME/.clawgod"
 BIN_DIR="$HOME/.local/bin"
 VERSION="${CLAWGOD_VERSION:-latest}"
 NO_UPGRADE="${CLAWGOD_NO_UPGRADE:-}"
+TOLERATE_STALE="${CLAWGOD_TOLERATE_STALE:-}"
 LEAN_OFF="${CLAWGOD_LEAN_OFF:-}"
 LEAN_ON="${CLAWGOD_LEAN_ON:-}"
 LEAN_MAX="${CLAWGOD_LEAN_MAX:-}"
@@ -26,6 +27,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --version) VERSION="$2"; shift 2 ;;
     --no-upgrade) NO_UPGRADE=1; shift ;;
+    --tolerate-stale) TOLERATE_STALE=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --lean-off) LEAN_OFF=1; shift ;;
     --lean-on) LEAN_ON=1; shift ;;
@@ -456,7 +458,9 @@ if [ "$NO_UPGRADE" != "1" ]; then
   node "$CLAWGOD_DIR/patch.mjs" --capture-clean-source
 fi
 dim "Applying patches ..."
-node "$CLAWGOD_DIR/patch.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
+patch_args=()
+if [ "$TOLERATE_STALE" = "1" ]; then patch_args+=(--tolerate-stale); fi
+node "$CLAWGOD_DIR/patch.mjs" "${patch_args[@]}" 2>&1 | while IFS= read -r line; do echo "  $line"; done
 patch_status=${PIPESTATUS[0]}
 if [ "$patch_status" -ne 0 ]; then
   warn "Patching failed (node exit $patch_status). Installation aborted."
@@ -465,6 +469,8 @@ if [ "$patch_status" -ne 0 ]; then
   fi
   warn ""
   warn "The new Claude Code build (${NATIVE_BIN_LABEL:-unknown}) is not yet supported by this ClawGod release."
+  warn "If the log says 'regex stale', retry with --tolerate-stale to keep the affected gates upstream:"
+  warn "  curl -fsSL https://raw.githubusercontent.com/0Chencc/clawgod/main/install.sh | bash -s -- --tolerate-stale"
   warn "To install or roll back to a known compatible version, run:"
   warn "  curl -fsSL https://github.com/0Chencc/clawgod/releases/latest/download/install.sh | bash -s -- --version <version>"
   warn "(Note: 'claude update --version' will fail on unpatched Claude Code with \"unknown option '--version'\")"
@@ -793,6 +799,7 @@ dim "  Just run it as usual — pulls latest Anthropic release + re-patches"
 dim "  in one step. Extra options:"
 dim "    claude update --version 2.1.180   (install a specific version)"
 dim "    claude update --no-upgrade        (re-patch the installed version)"
+dim "    claude update --tolerate-stale    (continue past stale patches; affected gates stay upstream)"
 dim "  To leave clawgod and use vanilla update:"
 dim "    bash ~/.clawgod/install.sh --uninstall"
 echo ""

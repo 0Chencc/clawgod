@@ -11,11 +11,13 @@
     .\install.ps1
     .\install.ps1 -Version 2.1.89
     .\install.ps1 -NoUpgrade
+    .\install.ps1 -TolerateStale
     .\install.ps1 -Uninstall
 #>
 param(
     [string]$Version = "latest",
     [switch]$NoUpgrade,
+    [switch]$TolerateStale,
     [switch]$Uninstall,
     [switch]$LeanOff,
     [switch]$LeanOn,
@@ -26,6 +28,7 @@ $ErrorActionPreference = "Stop"
 
 if ($env:CLAWGOD_VERSION -and $Version -eq "latest") { $Version = $env:CLAWGOD_VERSION }
 if ($env:CLAWGOD_NO_UPGRADE -eq "1") { $NoUpgrade = [switch]$true }
+if ($env:CLAWGOD_TOLERATE_STALE -eq "1") { $TolerateStale = [switch]$true }
 if ($env:CLAWGOD_LEAN_OFF -eq "1") { $LeanOff = [switch]$true }
 if ($env:CLAWGOD_LEAN_ON -eq "1") { $LeanOn = [switch]$true }
 if ($env:CLAWGOD_LEAN_MAX -eq "1") { $LeanMax = [switch]$true }
@@ -560,7 +563,9 @@ if (-not $NoUpgrade) {
     if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE; Restore-Install; exit $exitCode }
 }
 Write-Dim "Applying patches ..."
-node (Join-Path $ClawDir "patch.mjs")
+$patchArgs = @()
+if ($TolerateStale) { $patchArgs += '--tolerate-stale' }
+node (Join-Path $ClawDir "patch.mjs") @patchArgs
 if ($LASTEXITCODE -ne 0) {
     $exitCode = $LASTEXITCODE
     Write-Err "Patching failed (node exit $exitCode). Installation aborted."
@@ -570,6 +575,8 @@ if ($LASTEXITCODE -ne 0) {
     }
     Write-Err ""
     Write-Err "The new Claude Code build ($NativeBinLabel) is not yet supported by this ClawGod release."
+    Write-Err "If the log says 'regex stale', retry with -TolerateStale to keep the affected gates upstream:"
+    Write-Err "  & ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/0Chencc/clawgod/main/install.ps1'))) -TolerateStale"
     Write-Err "To install or roll back to a known compatible version, run:"
     Write-Err "  & ([scriptblock]::Create((irm 'https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1'))) -Version <version>"
     Write-Err "(Note: 'claude update --version' will fail on unpatched Claude Code with 'unknown option --version')"
@@ -898,6 +905,7 @@ Write-Dim "  Just run it as usual -- pulls latest Anthropic release + re-patches
 Write-Dim "  in one step. Extra options:"
 Write-Dim "    claude update --version 2.1.180   (install a specific version)"
 Write-Dim "    claude update --no-upgrade        (re-patch the installed version)"
+Write-Dim "    claude update --tolerate-stale    (continue past stale patches; affected gates stay upstream)"
 Write-Dim "  To leave clawgod and use vanilla update:"
 Write-Dim "    bash ~/.clawgod/install.sh --uninstall"
 Write-Host ""

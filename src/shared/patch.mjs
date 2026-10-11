@@ -396,6 +396,7 @@ const patches = [
         `const _vi=_ua.indexOf("--version");` +
         `if(_vi>=0&&_ua[_vi+1])process.env.CLAWGOD_VERSION=_ua[_vi+1];` +
         `if(_ua.includes("--no-upgrade"))process.env.CLAWGOD_NO_UPGRADE="1";` +
+        `if(_ua.includes("--tolerate-stale"))process.env.CLAWGOD_TOLERATE_STALE="1";` +
         `if(_ua.includes("--lean-off"))process.env.CLAWGOD_LEAN_OFF="1";` +
         `if(_ua.includes("--lean-on"))process.env.CLAWGOD_LEAN_ON="1";` +
         `if(_ua.includes("--lean-max"))process.env.CLAWGOD_LEAN_MAX="1";` +
