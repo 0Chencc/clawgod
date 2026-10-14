@@ -62,6 +62,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **URL制限** | 「URLを生成・推測してはならない」指示 |
 | **慎重操作** | 破壊的操作前の強制確認 |
 | **ログイン通知** | 起動時の「未ログイン」リマインダー |
+| **エンタープライズリモート設定** | 組織管理のリモート設定（`~/.claude/remote-settings.json`）——強制パーミッションルール、`disableRemoteControl`、`allowManagedPermissionRulesOnly`、バージョン固定。`CLAWGOD_FEATURE_REMOTE_SETTINGS=false` で無効化 |
 
 ### 地域ステガノグラフィー無効化
 

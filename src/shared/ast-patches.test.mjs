@@ -30,7 +30,8 @@ const unrelated={method(){return this.environmentOverridesParsed=true,this.envir
 `;
 const dateSource = 'function dateText (input) {let info=probe(),mark=apostrophe(info?.known??false,info?.labKw??false),formatted=info?.cnTZ?input.replaceAll("-","/"):input;return`Today${mark}s date is ${formatted}.`}';
 const scanned = scanAstPatches(source + dateSource);
-for (const id of AST_PATCH_IDS) assert.equal(scanned[id].matches.length, 1, id);
+for (const id of AST_PATCH_IDS) assert.equal(scanned[id].matches.length,
+  id === 'remote-settings-off' ? 0 : 1, id);
 const edits = Object.values(scanned).flatMap(result => result.matches);
 const patched = applyAstEdits(source + dateSource, edits);
 parsePatchSource(patched);
@@ -56,6 +57,46 @@ for (const toggle of [undefined, true, false]) {
 }
 assert.equal(applyAstEdits(patched, Object.values(scanAstPatches(patched)).flatMap(r => r.matches)), patched,
   'repeated patching without a snapshot must not nest gates');
+
+// The remote-settings gate has the same cache/`{eligible}` shape as ordinary
+// feature checks. It is only a patch site when its helper carries remote
+// settings context; a look-alike must remain untouched.
+const remoteSettingsSource = `
+function remoteEligibilityDetails(){remoteLog('Remote settings: checking eligibility');return{eligible:remoteUpstream(),ineligibleReason:'no_auth'}}
+function remoteSettingsEligibility(){let cached=readRemoteCache();if(cached!==void 0)return cached;let{eligible,ineligibleReason}=remoteEligibilityDetails();if(eligible)recordRemoteSettings();return saveRemoteEligibility(eligible,ineligibleReason)}
+function ordinaryEligibilityDetails(){return{eligible:ordinaryUpstream()}}
+function ordinaryEligibility(){let cached=readOrdinaryCache();if(cached!==void 0)return cached;let{eligible}=ordinaryEligibilityDetails();return eligible}
+`;
+const remoteScan = scanAstPatches(remoteSettingsSource);
+assert.equal(remoteScan['remote-settings-off'].matches.length, 1);
+assert.equal(remoteScan['remote-settings-off'].present, false);
+const remotePatched = applyAstEdits(remoteSettingsSource, remoteScan['remote-settings-off'].matches);
+assert.match(remotePatched, /function ordinaryEligibility\(\)\{let cached=readOrdinaryCache\(\)/);
+for (const enabled of [true, false]) {
+  let reads = 0, details = 0, records = 0;
+  const result = runInNewContext(`${remotePatched};[remoteSettingsEligibility(),ordinaryEligibility()]`, {
+    __clawgodPatches: { 'remote-settings-off': enabled },
+    readRemoteCache: () => { reads++; return undefined; },
+    remoteUpstream: () => { details++; return true; }, remoteLog: () => {},
+    recordRemoteSettings: () => { records++; }, saveRemoteEligibility: value => value,
+    readOrdinaryCache: () => undefined, ordinaryUpstream: () => false,
+  });
+  assert.deepEqual(Array.from(result), [enabled ? false : true, false]);
+  assert.equal(reads, enabled ? 0 : 1);
+  assert.equal(details, enabled ? 0 : 1);
+  assert.equal(records, enabled ? 0 : 1);
+}
+assert.equal(applyAstEdits(remotePatched, scanAstPatches(remotePatched)['remote-settings-off'].matches), remotePatched,
+  'remote-settings patch must be idempotent');
+
+// Remote context without the cache/eligibility structure is matcher drift,
+// not an older Claude version where remote settings do not exist.
+const remoteDrift = "function remoteEligibilityDetails(){log('Remote settings: checking eligibility');return{eligible:true}}function changedGate(){let{eligible}=remoteEligibilityDetails();return eligible}";
+const driftScan = scanAstPatches(remoteDrift)['remote-settings-off'];
+assert.equal(driftScan.matches.length, 0);
+assert.equal(driftScan.present, true);
+assert.equal(scanAstPatches("function remoteLogOnly(){log('Remote settings: background refresh')}")['remote-settings-off'].present, false,
+  'unrelated remote-settings chunks must not make a reapply look stale');
 assert.throws(() => applyAstEdits('abcd', [
   { start: 0, end: 3, replacement: '' }, { start: 1, end: 4, replacement: '' },
 ]), /Overlapping/);
