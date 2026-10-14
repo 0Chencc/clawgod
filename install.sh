@@ -8699,11 +8699,12 @@ import { parse } from './acorn.mjs';
 export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
   'computer-use-default', 'ultraplan', 'voice-mode',
-  'geo-stego-date',
+  'geo-stego-date', 'remote-settings-off',
 ];
 
 const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
-  'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is '];
+  'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
+  'Remote settings:', 'remote-settings.json'];
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -8714,6 +8715,8 @@ const member = (node, name) => node?.type === 'MemberExpression' &&
 const thisMember = (node, name) => member(node, name) && node.object.type === 'ThisExpression';
 const boolean = (node, value) => literal(node, value) ||
   (node?.type === 'UnaryExpression' && node.operator === '!' && literal(node.argument, value ? 0 : 1));
+const isUndefined = node => node?.type === 'UnaryExpression' && node.operator === 'void' &&
+  literal(node.argument, 0);
 
 export const parsePatchSource = code => parse(code, {
   ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true,
@@ -8740,6 +8743,16 @@ function hasGate(node, id) {
   walk(node, child => {
     if (member(child, id) && member(child.object, '__clawgodPatches') &&
         child.object.object.name === 'globalThis') found = true;
+  });
+  return found;
+}
+
+function hasRemoteSettingsContext(node) {
+  let found = false;
+  walk(node, child => {
+    const strings = child.type === 'Literal' && typeof child.value === 'string' ? [child.value]
+      : child.type === 'TemplateLiteral' ? child.quasis.map(quasi => quasi.value.cooked ?? '') : [];
+    if (strings.some(value => value.includes('Remote settings:') || value.includes('remote-settings.json'))) found = true;
   });
   return found;
 }
@@ -8771,6 +8784,15 @@ export function scanAstPatches(code) {
     edit(id, body, `${original.slice(0, offset)};if(${gate(id)})return ${value};${original.slice(offset)}`);
   };
 
+  // Remote settings are identified by the eligibility helper's diagnostics,
+  // not a minified name or the common cache/`{eligible}` prefix. Keep this
+  // local to one chunk: cross-chunk imports are not a stable contract.
+  const functions = new Map();
+  walk(tree, node => {
+    if (node.type === 'FunctionDeclaration' && node.id?.type === 'Identifier') {
+      functions.set(node.id.name, node);
+    }
+  });
   walk(tree, node => {
     if (node.type === 'ObjectExpression') {
       // Spreads, accessors and duplicate keys can change which value is used.
@@ -8836,6 +8858,37 @@ export function scanAstPatches(code) {
           value.argument.arguments.length === 2 && literal(value.argument.arguments[0], 'tengu_amber_quartz_disabled') &&
           boolean(value.argument.arguments[1], false)) {
         edit('voice-mode', value, `(${gate('voice-mode')}?!0:(${code.slice(value.start, value.end)}))`);
+      }
+    }
+
+    if (node.type === 'FunctionDeclaration' && node.params.length === 0 &&
+        !node.async && !node.generator) {
+      const statements = node.body.body;
+      const cached = statements.find(statement => statement.type === 'VariableDeclaration' &&
+        statement.declarations.length === 1 && statement.declarations[0].id.type === 'Identifier' &&
+        statement.declarations[0].init?.type === 'CallExpression');
+      const cachedName = cached?.declarations[0].id.name;
+      const cachedReturn = cachedName && statements.find(statement =>
+        statement.type === 'IfStatement' && statement.test.type === 'BinaryExpression' &&
+        statement.test.operator === '!==' && statement.test.left.type === 'Identifier' &&
+        statement.test.left.name === cachedName && isUndefined(statement.test.right) &&
+        statement.consequent.type === 'ReturnStatement' && statement.consequent.argument?.type === 'Identifier' &&
+        statement.consequent.argument.name === cachedName);
+      const eligibility = statements.find(statement => statement.type === 'VariableDeclaration' &&
+        statement.declarations.length === 1 && statement.declarations[0].id.type === 'ObjectPattern' &&
+        statement.declarations[0].init?.type === 'CallExpression' &&
+        statement.declarations[0].init.callee.type === 'Identifier' &&
+        statement.declarations[0].id.properties.some(property => property.type === 'Property' &&
+          propertyName(property) === 'eligible'));
+      const helper = eligibility && functions.get(eligibility.declarations[0].init.callee.name);
+      if (helper && hasRemoteSettingsContext(helper)) {
+        const id = 'remote-settings-off';
+        if (!cachedReturn) results[id].present = true;
+        else {
+          results[id].present = false;
+          if (hasGate(node, id)) results[id].patched = true;
+          else injectReturn(id, node, '!1');
+        }
       }
     }
 
@@ -9617,9 +9670,7 @@ const patches = [
     id: 'remote-settings-off',
     toggleable: true,
     name: 'Ignore enterprise-managed remote settings',
-    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\);if\([\w$]+!==void 0\)return [\w$]+;let\{eligible:/g,
-    replacer: (m, fn) => `function ${fn}(){if(${gate('remote-settings-off')})return!1;` + m.slice(`function ${fn}(){`.length),
-    optional: true,  // eligibility gate shape may drift across versions
+    ast: true,
   },
 ];
 

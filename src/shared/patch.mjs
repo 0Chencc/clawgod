@@ -738,9 +738,7 @@ const patches = [
     id: 'remote-settings-off',
     toggleable: true,
     name: 'Ignore enterprise-managed remote settings',
-    pattern: /function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\);if\([\w$]+!==void 0\)return [\w$]+;let\{eligible:/g,
-    replacer: (m, fn) => `function ${fn}(){if(${gate('remote-settings-off')})return!1;` + m.slice(`function ${fn}(){`.length),
-    optional: true,  // eligibility gate shape may drift across versions
+    ast: true,
   },
 ];
 
