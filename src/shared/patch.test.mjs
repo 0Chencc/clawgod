@@ -296,3 +296,58 @@ try {
   rmSync(privacyDir, { recursive: true, force: true });
 }
 console.log('[patch.test] wiggly-dove collection, request capture, toggles, idempotence, and stale gates ok');
+
+// tool-result-pairing-recovery patch tests
+{
+  const testDir = mkdtempSync(join(tmpdir(), 'clawgod-pairing-test-'));
+  try {
+    for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs', 'feature-gates.cjs', 'runtime-helpers.cjs']) {
+      copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
+    }
+    const source = `
+      function permissionErrors(history, ids) {
+        void history.length;
+        return ids.map(item => ({
+          type: "tool_result", tool_use_id: item,
+          content: "Permission denied", is_error: true
+        }));
+      }
+      function ensureToolResultPairing(conversationHistory, runtimeOpts) {
+        let count = conversationHistory.length;
+        let Re = ["call_1", "call_missing"];
+        let kks = "[Tool result missing due to internal error]";
+        let De=Re.map((ze)=>({type:"tool_result",tool_use_id:ze,content:kks,is_error:!0}));
+        return De;
+      }
+    `;
+    const target = join(testDir, 'cli.original.cjs');
+    writeFileSync(target, source);
+    const output = execFileSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+    assert.match(output, /Recover orphaned tool results from history in ensureToolResultPairing \(1 replacement in 1 file\)/);
+    const patched = readFileSync(target, 'utf8');
+    assert.ok(patched.includes('for(let _m of conversationHistory)'), 'binds dynamically to conversationHistory');
+    assert.ok(patched.includes('content: "Permission denied"'), 'negative case: non-target error function remains untouched in integration run');
+    const mockHistory = [
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_1', content: 'BUILD SUCCESSFUL in 1m 21s', is_error: false }
+          ]
+        }
+      }
+    ];
+    const context = { mockHistory };
+    const result = runInNewContext(`${patched};ensureToolResultPairing(mockHistory, {})`, context);
+    assert.equal(result.length, 2);
+    assert.equal(result[0].tool_use_id, 'call_1');
+    assert.equal(result[0].content, 'BUILD SUCCESSFUL in 1m 21s');
+    assert.equal(result[0].is_error, false);
+    assert.equal(result[1].tool_use_id, 'call_missing');
+    assert.equal(result[1].content, '[Tool result missing due to internal error]');
+    assert.equal(result[1].is_error, true);
+  } finally {
+    rmSync(testDir, { recursive: true, force: true });
+  }
+  console.log('[patch.test] tool-result-pairing-recovery compatibility and recovery semantics ok');
+}

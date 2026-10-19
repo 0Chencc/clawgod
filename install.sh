@@ -8703,11 +8703,13 @@ export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
   'computer-use-default', 'ultraplan', 'voice-mode',
   'geo-stego-date', 'remote-settings-off', 'wiggly-dove',
+  'tool-result-pairing-recovery',
 ];
 
 const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
   'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
-  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove'];
+  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove',
+  '[Tool result missing due to internal error]'];
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -8740,6 +8742,36 @@ function walk(root, visit) {
     }
   }
 }
+// Iterative traversal bounded to the current function scope.
+// Stops descending at nested function boundaries to prevent outer scopes from
+// claiming inner statements or creating overlapping edits.
+function walkScope(root, visit) {
+  const pending = [root];
+  while (pending.length) {
+    const node = pending.pop();
+    visit(node);
+    for (const value of Object.values(node)) {
+      if (!value) continue;
+      if (value.type) {
+        if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(value.type)) {
+          visit(value);
+        } else {
+          pending.push(value);
+        }
+      } else if (Array.isArray(value)) {
+        for (const child of value) {
+          if (!child?.type) continue;
+          if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(child.type)) {
+            visit(child);
+          } else {
+            pending.push(child);
+          }
+        }
+      }
+    }
+  }
+}
+
 
 function hasGate(node, id) {
   let found = false;
@@ -8792,6 +8824,29 @@ export function scanAstPatches(code) {
   // local to one chunk: cross-chunk imports are not a stable contract.
   const functions = new Map();
   const wigglyLiterals = new Set(), wigglyHandled = new Set();
+  let pairingHandled = false;
+  const MISSING_SENTINEL = '[Tool result missing due to internal error]';
+  const sentinelIdentifiers = new Set();
+  walk(tree, n => {
+    if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && literal(n.init, MISSING_SENTINEL)) {
+      sentinelIdentifiers.add(n.id.name);
+    } else if (n.type === 'AssignmentExpression' && n.left?.type === 'Identifier' && literal(n.right, MISSING_SENTINEL)) {
+      sentinelIdentifiers.add(n.left.name);
+    }
+  });
+  const resolvesToMissingSentinel = (expr, scopeNode) => {
+    if (literal(expr, MISSING_SENTINEL)) return true;
+    if (expr?.type === 'Identifier') {
+      if (sentinelIdentifiers.has(expr.name)) return true;
+      let localFound = false;
+      walkScope(scopeNode, s => {
+        if (s.type === 'VariableDeclarator' && s.id?.type === 'Identifier' && s.id.name === expr.name &&
+            literal(s.init, MISSING_SENTINEL)) localFound = true;
+      });
+      return localFound;
+    }
+    return false;
+  };
   walk(tree, node => {
     if (node.type === 'FunctionDeclaration' && node.id?.type === 'Identifier') {
       functions.set(node.id.name, node);
@@ -8926,6 +8981,83 @@ export function scanAstPatches(code) {
       }
     }
 
+    if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type) &&
+        node.params.length > 0 && node.params[0].type === 'Identifier') {
+      const historyParam = node.params[0].name;
+      let isHistoryArray = false;
+      walkScope(node.body, inner => {
+        if (inner.type === 'MemberExpression' && inner.object?.type === 'Identifier' && inner.object.name === historyParam) {
+          if (inner.property?.name === 'length' || inner.computed) isHistoryArray = true;
+        }
+      });
+      if (isHistoryArray) {
+        const id = 'tool-result-pairing-recovery';
+        if (hasGate(node, id)) {
+          results[id].patched = true;
+          pairingHandled = true;
+        } else {
+          walkScope(node.body, inner => {
+            if (inner.type === 'CallExpression' && inner.callee?.type === 'MemberExpression' &&
+                inner.callee.property?.name === 'map' && inner.arguments.length >= 1) {
+              const cb = inner.arguments[0];
+              if (!['ArrowFunctionExpression', 'FunctionExpression'].includes(cb?.type)) return;
+              const idParam = cb.params[0];
+              if (idParam?.type !== 'Identifier') return;
+              const returnObj = cb.body.type === 'ObjectExpression' ? cb.body
+                : cb.body.type === 'BlockStatement' ? cb.body.body.find(s => s.type === 'ReturnStatement')?.argument
+                : null;
+              if (returnObj?.type !== 'ObjectExpression') return;
+              const props = returnObj.properties.filter(p => p.type === 'Property');
+              const hasType = props.some(p => propertyName(p) === 'type' && literal(p.value, 'tool_result'));
+              const hasToolUseId = props.some(p => propertyName(p) === 'tool_use_id' && p.value?.type === 'Identifier' && p.value.name === idParam.name);
+              const hasIsError = props.some(p => propertyName(p) === 'is_error' && boolean(p.value, true));
+              const contentProp = props.find(p => propertyName(p) === 'content');
+              if (hasType && hasToolUseId && hasIsError && contentProp && resolvesToMissingSentinel(contentProp.value, node)) {
+                // Collect all identifiers across the entire function tree to guarantee no variable shadowing or collisions
+                const usedNames = new Set();
+                walk(node, n => {
+                  if (n.type === 'Identifier') usedNames.add(n.name);
+                });
+                const freshId = base => {
+                  let name = base;
+                  let counter = 1;
+                  while (usedNames.has(name)) {
+                    name = `${base}${counter++}`;
+                  }
+                  usedNames.add(name);
+                  return name;
+                };
+                const pVar = freshId('_p');
+                const mVar = freshId('_m');
+                const bVar = freshId('_b');
+                const mapTarget = code.slice(inner.callee.object.start, inner.callee.object.end);
+                const contentExpr = code.slice(contentProp.value.start, contentProp.value.end);
+                const replacement =
+                  `${mapTarget}.map((${idParam.name})=>{` +
+                  `let ${pVar};` +
+                  `if(${gate(id)}){` +
+                  `for(let ${mVar} of ${historyParam}){` +
+                  `if(${mVar}?.message?.content&&Array.isArray(${mVar}.message.content)){` +
+                  `for(let ${bVar} of ${mVar}.message.content){` +
+                  `if(${bVar}?.type==="tool_result"&&${bVar}.tool_use_id===${idParam.name}&&${bVar}.content!==${contentExpr}){` +
+                  `${pVar}=${bVar};break;` +
+                  `}` +
+                  `}` +
+                  `}` +
+                  `if(${pVar})break;` +
+                  `}` +
+                  `}` +
+                  `return ${pVar}?{...${pVar}}:{type:"tool_result",tool_use_id:${idParam.name},content:${contentExpr},is_error:!0}` +
+                  `})`;
+                edit(id, inner, replacement);
+                pairingHandled = true;
+              }
+            }
+          });
+        }
+      }
+    }
+
     if ((node.type === 'MethodDefinition' || node.type === 'Property') &&
         propertyName(node) === 'getEnvironmentOverrides' && node.value?.body?.type === 'BlockStatement') {
       const statements = node.value.body.body;
@@ -8949,6 +9081,10 @@ export function scanAstPatches(code) {
   if ([...wigglyLiterals].some(start => !wigglyHandled.has(start))) {
     results['wiggly-dove'].present = true;
     results['wiggly-dove'].matches = [];
+  }
+  if (code.includes('[Tool result missing due to internal error]') && !pairingHandled) {
+    results['tool-result-pairing-recovery'].present = true;
+    results['tool-result-pairing-recovery'].matches = [];
   }
   return results;
 }
@@ -9720,6 +9856,28 @@ const patches = [
     id: 'remote-settings-off',
     toggleable: true,
     name: 'Ignore enterprise-managed remote settings',
+    ast: true,
+  },
+
+  {
+    // Recover orphaned tool_result entries from message history.
+    // In DRn(e, n) / oyn(e, n) (ensureToolResultPairing), when assistant messages contain tool_use
+    // entries that are not answered in the immediate next user message (e[y+1]), upstream
+    // synthesizes a tool_result with content: uvs ("[Tool result missing due to internal error]")
+    // and is_error: true.
+    //
+    // This happens frequently when:
+    // 1. Third-party OpenAI-compatible proxies emit static chunk IDs or flat assistant messages,
+    //    causing multi-turn tool_use items to be merged into a single assistant message;
+    // 2. Downstream history flattening splits or separates tool_use from its tool_result across turns.
+    //
+    // Upstream blindly flags these as internal errors, causing Claude to believe previous
+    // commands (like build, lint, git, edit) failed and loop repeatedly or fail on subsequent edits.
+    //
+    // The AST patch inspects the full conversation history for the original tool_result before
+    // falling back to synthesizing a missing error result.
+    id: 'tool-result-pairing-recovery',
+    name: 'Recover orphaned tool results from history in ensureToolResultPairing',
     ast: true,
   },
 ];
