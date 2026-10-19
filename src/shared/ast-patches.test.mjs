@@ -31,7 +31,7 @@ const unrelated={method(){return this.environmentOverridesParsed=true,this.envir
 const dateSource = 'function dateText (input) {let info=probe(),mark=apostrophe(info?.known??false,info?.labKw??false),formatted=info?.cnTZ?input.replaceAll("-","/"):input;return`Today${mark}s date is ${formatted}.`}';
 const scanned = scanAstPatches(source + dateSource);
 for (const id of AST_PATCH_IDS) assert.equal(scanned[id].matches.length,
-  id === 'remote-settings-off' ? 0 : 1, id);
+  ['remote-settings-off', 'wiggly-dove'].includes(id) ? 0 : 1, id);
 const edits = Object.values(scanned).flatMap(result => result.matches);
 const patched = applyAstEdits(source + dateSource, edits);
 parsePatchSource(patched);
@@ -57,6 +57,34 @@ for (const toggle of [undefined, true, false]) {
 }
 assert.equal(applyAstEdits(patched, Object.values(scanAstPatches(patched)).flatMap(r => r.matches)), patched,
   'repeated patching without a snapshot must not nest gates');
+
+const privacyGate = `function allowed () {'use strict';if (!firstParty()) return false;
+  if (!lookup(rollout, false)) return false;return routeAllowed();}`;
+const shadowedGate = `function neighbor(){const rollout='other';if(!firstParty())return false;
+  if(!lookup(rollout,false))return false;return routeAllowed()}`;
+for (const declaration of ['var', 'let', 'const']) {
+  const source = `(function(){${declaration} rollout = 'tengu_wiggly_dove';${privacyGate}${shadowedGate}})();`;
+  const scanned = scanAstPatches(source)['wiggly-dove'];
+  assert.equal(scanned.matches.length, 1, `${declaration}: match the enclosing flag binding`);
+  const patched = applyAstEdits(source, scanned.matches);
+  parsePatchSource(patched);
+  assert.ok(patched.includes(shadowedGate), 'a shadowed flag remains untouched');
+  assert.ok(patched.includes("'use strict';;if(globalThis.__clawgodPatches"), 'keep the directive first');
+  assert.equal(scanAstPatches(patched)['wiggly-dove'].patched, true);
+  assert.equal(scanAstPatches(patched)['wiggly-dove'].matches.length, 0);
+}
+for (const source of [
+  `const rollout='tengu_wiggly_dove';function unknown(){return lookup(rollout,false)}`,
+  `function unknown(){return lookup('tengu_wiggly_dove',false)}`,
+  `const rollout='tengu_wiggly_dove';${privacyGate}function unknown(){return lookup('tengu_wiggly_dove',false)}`,
+  `const rollout='tengu_wiggly_dove';${privacyGate}${privacyGate.replace('allowed', 'ambiguous')}`,
+]) {
+  const result = scanAstPatches(source)['wiggly-dove'];
+  assert.equal(result.present, true, 'unhandled or ambiguous flag uses are stale');
+  assert.equal(result.matches.length, 0, 'do not claim partial privacy protection');
+}
+assert.equal(scanAstPatches(`// const rollout='tengu_wiggly_dove';\nconst text="function f(){return 'tengu_wiggly_dove'}";`)['wiggly-dove'].present, false,
+  'comments and source text are not flag bindings');
 
 // The remote-settings gate has the same cache/`{eligible}` shape as ordinary
 // feature checks. It is only a patch site when its helper carries remote

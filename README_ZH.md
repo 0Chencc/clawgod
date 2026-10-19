@@ -64,13 +64,14 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **登录提示** | 启动时的"未登录"提醒 |
 | **企业远程设置** | 组织托管的远程设置（`~/.claude/remote-settings.json`）——强制权限规则、`disableRemoteControl`、`allowManagedPermissionRulesOnly`、版本锁定。可用 `CLAWGOD_FEATURE_REMOTE_SETTINGS=false` 关闭 |
 
-### 地区隐写中和
+### 隐私保护
 
 | 补丁 | 中和内容 |
 |------|---------|
 | **日期字符串 (qla)** | 系统提示词通过 Unicode 撇号变体（U+0027 / U+2019 / U+02BC / U+02B9）和日期分隔符（中国时区 `-` → `/`）编码用户地理位置。Patch 后始终使用 ASCII `'` 和原始日期格式 |
 | **地区检测探针 (rdp)** | 客户端三维检测：时区（`Asia/Shanghai` / `Asia/Urumqi`）、代理域名与 XOR 混淆的 100+ 域名黑名单比对、base URL 中的国产大模型关键词。Patch 后始终返回 null |
 | **撇号选择器 (odp)** | 根据检测结果选择四种 Unicode 撇号之一。Patch 后始终返回 ASCII `'`（纵深防御） |
+| **Git/环境信息字段** | 在 header 生成前阻断 `x-claude-code-wiggly-dove` 的自动采集，包括 Git origin 和环境信息。默认开启；已核对 Claude Code 2.1.299、2.1.301 和 2.1.303 |
 
 ### 视觉
 
@@ -166,6 +167,7 @@ claude.orig         # 原版未修改版本（自动备份）
 | `classifier-tuning` | Auto-mode 分类器覆盖：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline 下限；未设置=按上下文 60-120s，需 v2.1.251+）、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`（未设置=4） |
 | `theme` | 绿色品牌/Logo 配色 |
 | `geo-neutralize` | 中和 system prompt 中的地区/代理隐写 |
+| `wiggly-dove` | 阻断 `x-claude-code-wiggly-dove` 自动采集 Git/环境信息；关闭此保护会恢复上游行为 |
 | `cyber-risk` | 移除 system prompt 中的 CYBER_RISK_INSTRUCTION |
 | `url-restriction` | 移除 URL 生成限制 |
 | `cautious-actions` | 移除 "Executing actions with care" 段落 |

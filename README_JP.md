@@ -64,13 +64,14 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **ログイン通知** | 起動時の「未ログイン」リマインダー |
 | **エンタープライズリモート設定** | 組織管理のリモート設定（`~/.claude/remote-settings.json`）——強制パーミッションルール、`disableRemoteControl`、`allowManagedPermissionRulesOnly`、バージョン固定。`CLAWGOD_FEATURE_REMOTE_SETTINGS=false` で無効化 |
 
-### 地域ステガノグラフィー無効化
+### プライバシー保護
 
 | パッチ | 無効化される内容 |
 |--------|-----------------|
 | **日付文字列 (qla)** | システムプロンプトが Unicode アポストロフィ変体（U+0027 / U+2019 / U+02BC / U+02B9）と日付区切り文字（CN タイムゾーンでは `-` → `/`）でユーザーの地理情報をエンコード。パッチにより常に ASCII `'` と元の日付形式を使用 |
 | **地域検出プローブ (rdp)** | クライアント側の3軸検出：タイムゾーン（`Asia/Shanghai` / `Asia/Urumqi`）、プロキシホスト名の XOR 難読化 100+ ドメインブロックリスト照合、ベース URL 内の中国 LLM ベンダーキーワード。パッチにより常に null を返却 |
 | **アポストロフィセレクター (odp)** | 検出結果に基づき4種の Unicode アポストロフィから1つを選択。パッチにより常に ASCII `'` を返却（多層防御） |
+| **Git/環境情報ヘッダー** | Git origin と環境情報を含む `x-claude-code-wiggly-dove` の自動収集を、ヘッダー生成前にブロック。デフォルトで有効。Claude Code 2.1.299、2.1.301、2.1.303 で確認済み |
 
 ### ビジュアル
 
@@ -165,6 +166,7 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 | `classifier-tuning` | auto-mode 分類器の上書き：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline の下限；未設定=コンテキストにより 60-120s、v2.1.251+ 必要）、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`（未設定=4） |
 | `theme` | 緑色ブランド/ロゴ配色 |
 | `geo-neutralize` | system prompt の地域/プロキシステガノグラフィ中和 |
+| `wiggly-dove` | `x-claude-code-wiggly-dove` の Git/環境情報の自動収集をブロック。無効化すると上流の動作に戻る |
 | `cyber-risk` | system prompt から CYBER_RISK_INSTRUCTION を削除 |
 | `url-restriction` | URL 生成制限を削除 |
 | `cautious-actions` | "Executing actions with care" セクションを削除 |

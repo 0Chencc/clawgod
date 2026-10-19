@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
+import { createServer, request } from 'node:http';
 
 // legal values → parsed as the floor (injected Math.max applies it)
 assert.equal(floor('200000'), 200000);
@@ -182,3 +183,116 @@ try {
 }
 console.log('[patch.test] ultraplan bundle/graph compatibility and toggle semantics ok');
 console.log('[patch.test] auto-mode provider gate compatibility and toggle semantics ok');
+
+// Exercise the collection -> header -> request chain with the flag bindings
+// seen in official bundles. No real repository metadata or API credentials.
+const privacyDir = mkdtempSync(join(tmpdir(), 'clawgod-wiggly-dove-test-'));
+const fixtures = [
+  ['2.1.299', 'rw', 'mm'],
+  ['2.1.301', 'tw', 'pm'],
+  ['2.1.303', 'aw', '_m'],
+  ['renamed', '$flag', '$gate'],
+];
+function privacyFixture(version, flag, check) {
+  return `var ${flag}="tengu_wiggly_dove";var other="tengu_other";` +
+    'function neighbor(){if(!isFirstParty())return!1;if(!feature(other,!1))return!1;return routeAllowed()}' +
+    `function ${check}(){if(!isFirstParty())return!1;if(!feature(${flag},!1))return!1;return routeAllowed()}` +
+    `async function collect(){if(!${check}())return;return 'jy="'+readOrigin()+'", ob="${version}"'}` +
+    'function header(value){if(value===void 0)return{};return{"x-claude-code-wiggly-dove":value}}' +
+    'async function buildRequest(){return{headers:{"x-unrelated":"preserved",...header(await collect())},body:{messages:[{role:"user",content:"hello"}]}}}';
+}
+try {
+  for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+    copyFileSync(new URL(`./${name}`, import.meta.url), join(privacyDir, name));
+  }
+  let lastPatched;
+  for (const graph of [false, true]) {
+    if (graph) mkdirSync(join(privacyDir, 'bunfs'));
+    const target = join(privacyDir, graph ? 'bunfs/privacy.js' : 'cli.original.cjs');
+    if (graph) writeFileSync(join(privacyDir, 'cli.original.cjs'), '// graph entry');
+    for (const [version, flag, check] of fixtures) {
+      const source = privacyFixture(version, flag, check);
+      writeFileSync(target, source);
+      const output = execFileSync(process.execPath, [join(privacyDir, 'patch.mjs')], { encoding: 'utf8' });
+      assert.match(output, /Block wiggly-dove Git\/environment collection \(1 replacement in 1 file\)/);
+      const patched = readFileSync(target, 'utf8');
+      assert.equal(patched, source.replace(`function ${check}(){`,
+        `function ${check}(){;if(globalThis.__clawgodPatches?.["wiggly-dove"]!==!1)return !1;`));
+      execFileSync(process.execPath, [join(privacyDir, 'patch.mjs')]);
+      assert.equal(readFileSync(target, 'utf8'), patched, 'repatch without a snapshot is idempotent');
+      for (const toggle of [undefined, true, false]) {
+        for (const firstParty of [false, true]) {
+          for (const upstreamFlag of [false, true]) {
+            for (const route of [false, true]) {
+              let reads = 0, evaluations = 0;
+              const result = await runInNewContext(`${patched};buildRequest()`, {
+                ...(toggle === undefined ? {} : { __clawgodPatches: { 'wiggly-dove': toggle } }),
+                isFirstParty: () => firstParty,
+                feature: (key) => { assert.equal(key, 'tengu_wiggly_dove'); evaluations++; return upstreamFlag; },
+                routeAllowed: () => route,
+                readOrigin: () => { reads++; return 'git.example.test/team/private-repo'; },
+              });
+              const expected = toggle === false && firstParty && upstreamFlag && route;
+              assert.equal(reads, Number(expected), 'blocked before collecting Git metadata');
+              assert.equal(evaluations, Number(toggle === false && firstParty), 'does not consult the rollout when blocked');
+              assert.equal('x-claude-code-wiggly-dove' in result.headers, expected);
+              assert.equal(result.headers['x-unrelated'], 'preserved');
+              assert.equal(JSON.stringify(result.body), '{"messages":[{"role":"user","content":"hello"}]}');
+            }
+          }
+        }
+      }
+      lastPatched = patched;
+    }
+    // Older bundles have no collector. An unfamiliar gate in a newer bundle
+    // must abort the whole patch transaction, including unrelated changes.
+    writeFileSync(target, '// no wiggly-dove in this version');
+    execFileSync(process.execPath, [join(privacyDir, 'patch.mjs')]);
+    for (const declaration of ['var', 'let', 'const']) {
+      const stale = `function userType(){return"external"}${declaration} flag="tengu_wiggly_dove";function changed(){return feature(flag,!1)}`;
+      writeFileSync(target, stale);
+      const result = spawnSync(process.execPath, [join(privacyDir, 'patch.mjs')], { encoding: 'utf8' });
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /Block wiggly-dove Git\/environment collection — AST matcher stale/);
+      assert.equal(readFileSync(target, 'utf8'), stale, 'failure writes no partially patched source');
+    }
+  }
+
+  // Capture actual HTTP traffic on loopback. With the upstream rollout on,
+  // the private Git marker appears only when the privacy patch is disabled.
+  const received = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => { received.push({ headers: req.headers, body }); res.end('ok'); });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const toggle of [undefined, true, false]) {
+      const outgoing = await runInNewContext(`${lastPatched};buildRequest()`, {
+        ...(toggle === undefined ? {} : { __clawgodPatches: { 'wiggly-dove': toggle } }),
+        isFirstParty: () => true, feature: () => true, routeAllowed: () => true,
+        readOrigin: () => 'git.example.test/team/private-repo',
+      });
+      await new Promise((resolve, reject) => {
+        const req = request({ hostname: '127.0.0.1', port: server.address().port,
+          method: 'POST', headers: outgoing.headers, agent: false }, res => { res.resume(); res.on('end', resolve); });
+        req.on('error', reject);
+        req.setTimeout(5000, () => req.destroy(new Error('loopback capture timed out')));
+        req.end(JSON.stringify(outgoing.body));
+      });
+      const captured = received.at(-1);
+      assert.equal('x-claude-code-wiggly-dove' in captured.headers, toggle === false);
+      assert.equal(captured.headers['x-unrelated'], 'preserved');
+      assert.equal(captured.body, JSON.stringify(outgoing.body));
+      if (toggle === false) assert.match(captured.headers['x-claude-code-wiggly-dove'], /git\.example\.test\/team\/private-repo/);
+      else assert.ok(!JSON.stringify(captured).includes('git.example.test'));
+    }
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+} finally {
+  rmSync(privacyDir, { recursive: true, force: true });
+}
+console.log('[patch.test] wiggly-dove collection, request capture, toggles, idempotence, and stale gates ok');

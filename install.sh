@@ -1427,6 +1427,9 @@ const CLAWGOD_FEATURES_META = {
   "geo-apostrophe-stego": [
     "geo-neutralize"
   ],
+  "wiggly-dove": [
+    "wiggly-dove"
+  ],
   "remove-cyber-risk": [
     "cyber-risk"
   ],
@@ -8699,12 +8702,12 @@ import { parse } from './acorn.mjs';
 export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
   'computer-use-default', 'ultraplan', 'voice-mode',
-  'geo-stego-date', 'remote-settings-off',
+  'geo-stego-date', 'remote-settings-off', 'wiggly-dove',
 ];
 
 const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
   'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
-  'Remote settings:', 'remote-settings.json'];
+  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove'];
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -8788,12 +8791,43 @@ export function scanAstPatches(code) {
   // not a minified name or the common cache/`{eligible}` prefix. Keep this
   // local to one chunk: cross-chunk imports are not a stable contract.
   const functions = new Map();
+  const wigglyLiterals = new Set(), wigglyHandled = new Set();
   walk(tree, node => {
     if (node.type === 'FunctionDeclaration' && node.id?.type === 'Identifier') {
       functions.set(node.id.name, node);
     }
   });
   walk(tree, node => {
+    if (literal(node, 'tengu_wiggly_dove')) wigglyLiterals.add(node.start);
+    if (node.type === 'Program' || node.type === 'BlockStatement') {
+      const flags = node.body.filter(s => s.type === 'VariableDeclaration')
+        .flatMap(s => s.declarations).filter(d => literal(d.init, 'tengu_wiggly_dove'));
+      for (const flag of flags) {
+        const id = 'wiggly-dove';
+        const candidates = node.body.filter(fn => {
+          if (fn.type !== 'FunctionDeclaration' || fn.params.length || fn.async || fn.generator) return false;
+          // Only the boolean eligibility helper, never a collector or a
+          // nested function with a shadowed flag binding.
+          const statements = fn.body.body.filter(s => !s.directive && s.type !== 'EmptyStatement');
+          const guards = statements.slice(0, -1);
+          const last = statements.at(-1);
+          if (!guards.length || !guards.every(s => s.type === 'IfStatement' && !s.alternate &&
+              s.consequent.type === 'ReturnStatement' && boolean(s.consequent.argument, false)) ||
+              last?.type !== 'ReturnStatement' || last.argument?.type !== 'CallExpression') return false;
+          return flag.id.type === 'Identifier' && guards.some(s => {
+            const call = s.test.type === 'UnaryExpression' && s.test.operator === '!' ? s.test.argument : null;
+            return call?.type === 'CallExpression' && call.arguments.length === 2 &&
+              call.arguments[0].type === 'Identifier' && call.arguments[0].name === flag.id.name &&
+              boolean(call.arguments[1], false);
+          });
+        });
+        if (candidates.length !== 1) continue;
+        wigglyHandled.add(flag.init.start);
+        if (hasGate(candidates[0], id)) results[id].patched = true;
+        else injectReturn(id, candidates[0], '!1');
+      }
+    }
+
     if (node.type === 'ObjectExpression') {
       // Spreads, accessors and duplicate keys can change which value is used.
       const props = node.properties;
@@ -8912,6 +8946,10 @@ export function scanAstPatches(code) {
       }
     }
   });
+  if ([...wigglyLiterals].some(start => !wigglyHandled.has(start))) {
+    results['wiggly-dove'].present = true;
+    results['wiggly-dove'].matches = [];
+  }
   return results;
 }
 
@@ -8993,6 +9031,8 @@ const FEATURES = {
                       ] },
   'geo-neutralize': { desc: 'Neutralize geo/proxy steganography in system prompt',
                       patchIds: ['geo-stego-date', 'geo-detect-probe', 'geo-apostrophe-stego'] },
+  'wiggly-dove':    { desc: 'Block automatic Git/environment collection in x-claude-code-wiggly-dove',
+                      patchIds: ['wiggly-dove'] },
   'cyber-risk':     { desc: 'Remove CYBER_RISK_INSTRUCTION from system prompt',
                       patchIds: ['remove-cyber-risk'] },
   'url-restriction':{ desc: 'Remove URL generation restriction from system prompt',
@@ -9467,6 +9507,16 @@ const patches = [
       `function ${fn}(){if(!${envCheck}(process.env.EMBEDDED_SEARCH_TOOLS))return!1;if(typeof globalThis.__dpBinOk>"u"){try{var _w=process.platform==="win32"?"where":"which";require("child_process").execFileSync(_w,["bfs"],{timeout:2e3});require("child_process").execFileSync(_w,["ugrep"],{timeout:2e3});globalThis.__dpBinOk=!0}catch{globalThis.__dpBinOk=!1}}if(!globalThis.__dpBinOk)return!1;return process.env.CLAUDE_CODE_ENTRYPOINT!=="local-agent"}`,
     sentinel: 'ct("true")',
     optional: true,
+  },
+
+  {
+    // 2.1.299–303: this gate runs before both the Git/environment collector
+    // and header generation. Follow its flag binding in the same lexical
+    // block, without relying on GrowthBook overrides being available.
+    id: 'wiggly-dove',
+    toggleable: true,
+    name: 'Block wiggly-dove Git/environment collection',
+    ast: true,
   },
 
   // ── 地区隐写中和 (v2.1.197+) ──

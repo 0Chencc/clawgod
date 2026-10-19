@@ -64,13 +64,14 @@ Green logo = patched. Orange logo = original.
 | **Login Notice** | "Not logged in" startup reminder |
 | **Enterprise Remote Settings** | Org-managed remote settings (`~/.claude/remote-settings.json`) — forced permission rules, `disableRemoteControl`, `allowManagedPermissionRulesOnly`, version pinning. Disable with `CLAWGOD_FEATURE_REMOTE_SETTINGS=false` |
 
-### Geo-Steganography Neutralization
+### Privacy Protections
 
 | Patch | What's neutralized |
 |-------|-------------------|
 | **Date String (qla)** | System prompt encodes user location via Unicode apostrophe variants (U+0027 / U+2019 / U+02BC / U+02B9) and date separator (`-` vs `/` for CN timezone). Patched to always use ASCII `'` and unmodified date format |
 | **Geo-Detection Probe (rdp)** | Client-side three-axis detection: timezone (`Asia/Shanghai` / `Asia/Urumqi`), proxy hostname against XOR-obfuscated 100+ domain blocklist, CN-LLM vendor keywords in base URL. Patched to always return null |
 | **Apostrophe Selector (odp)** | Selects one of four Unicode apostrophes based on detection results. Patched to always return ASCII `'` (defense-in-depth) |
+| **Git/Environment Header** | Blocks automatic `x-claude-code-wiggly-dove` collection, including Git origin and environment metadata, before the header is generated. Enabled by default; verified against Claude Code 2.1.299, 2.1.301 and 2.1.303 |
 
 ### Visual
 
@@ -166,6 +167,7 @@ For an endpoint that exposes `/v1/chat/completions`, configure:
 | `classifier-tuning` | Auto-mode classifier overrides: `CLAWGOD_CLASSIFIER_TIMEOUT_MS` (min deadline; unset = 60-120s by context, v2.1.251+), `CLAWGOD_CLASSIFIER_MODEL`, `CLAWGOD_CLASSIFIER_RETRIES` (unset = 4) |
 | `theme` | Green brand/logo color scheme |
 | `geo-neutralize` | Geo/proxy steganography neutralization in system prompt |
+| `wiggly-dove` | Blocks automatic Git/environment metadata collection for `x-claude-code-wiggly-dove`; disabling this protection restores upstream behavior |
 | `cyber-risk` | Removes CYBER_RISK_INSTRUCTION from system prompt |
 | `url-restriction` | Removes URL generation restriction from system prompt |
 | `cautious-actions` | Removes "Executing actions with care" section from system prompt |

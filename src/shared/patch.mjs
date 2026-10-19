@@ -61,6 +61,8 @@ const FEATURES = {
                       ] },
   'geo-neutralize': { desc: 'Neutralize geo/proxy steganography in system prompt',
                       patchIds: ['geo-stego-date', 'geo-detect-probe', 'geo-apostrophe-stego'] },
+  'wiggly-dove':    { desc: 'Block automatic Git/environment collection in x-claude-code-wiggly-dove',
+                      patchIds: ['wiggly-dove'] },
   'cyber-risk':     { desc: 'Remove CYBER_RISK_INSTRUCTION from system prompt',
                       patchIds: ['remove-cyber-risk'] },
   'url-restriction':{ desc: 'Remove URL generation restriction from system prompt',
@@ -535,6 +537,16 @@ const patches = [
       `function ${fn}(){if(!${envCheck}(process.env.EMBEDDED_SEARCH_TOOLS))return!1;if(typeof globalThis.__dpBinOk>"u"){try{var _w=process.platform==="win32"?"where":"which";require("child_process").execFileSync(_w,["bfs"],{timeout:2e3});require("child_process").execFileSync(_w,["ugrep"],{timeout:2e3});globalThis.__dpBinOk=!0}catch{globalThis.__dpBinOk=!1}}if(!globalThis.__dpBinOk)return!1;return process.env.CLAUDE_CODE_ENTRYPOINT!=="local-agent"}`,
     sentinel: 'ct("true")',
     optional: true,
+  },
+
+  {
+    // 2.1.299–303: this gate runs before both the Git/environment collector
+    // and header generation. Follow its flag binding in the same lexical
+    // block, without relying on GrowthBook overrides being available.
+    id: 'wiggly-dove',
+    toggleable: true,
+    name: 'Block wiggly-dove Git/environment collection',
+    ast: true,
   },
 
   // ── 地区隐写中和 (v2.1.197+) ──

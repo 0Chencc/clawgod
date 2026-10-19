@@ -16,8 +16,8 @@ when either generated installer is missing or differs from its sources.
 
 The patcher uses Acorn AST nodes for `user-type-ant`,
 `bun-standalone-executable`, `growthbook-env-overrides-graph`,
-`computer-use-default`, `ultraplan`, `voice-mode`, `geo-stego-date`, and
-`remote-settings-off`.
+`computer-use-default`, `ultraplan`, `voice-mode`, `geo-stego-date`,
+`remote-settings-off`, and `wiggly-dove`.
 It parses each candidate file once, locates stable property/string names and grammar nodes, and splices
 only those node ranges. Metadata order, quote style, whitespace, and supported
 function forms do not determine the location. Comments and text inside strings
@@ -57,6 +57,14 @@ No Claude bundle is needed. Run locally with Node:
 ```bash
 node src/shared/patch.test.mjs
 ```
+
+The same suite checks the `wiggly-dove` privacy gate with renamed flag
+bindings, legacy/chunk layouts, runtime toggles, repeated patching, and stale
+matcher rejection. A bounded loopback HTTP capture verifies that automatic
+Git metadata never reaches the request while the protection is enabled.
+The patch covers this automatic metadata channel; prompts and tool results
+keep their usual behavior. `--tolerate-stale` can explicitly skip this patch
+if a future upstream shape is unsupported, as with other stale patches.
 
 `src/shared/bun-ant-shim.test.mjs` tests the `Bun.ant.CellSegmenter`
 implementation in `bun-ant-shim.cjs`: escape scanning, grapheme widths, style
