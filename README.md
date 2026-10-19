@@ -12,6 +12,8 @@
 
 **This is NOT a third-party Claude Code client.** ClawGod is a runtime patch applied on top of the official Claude Code. It works with any version — as Claude Code updates, ClawGod automatically re-extracts and re-patches against the new version on the next launch.
 
+**Privacy protections are enabled by default:** ClawGod neutralizes known location/proxy signals embedded in the date prompt and, since v2.3.0, blocks automatic Git origin and environment collection for `x-claude-code-wiggly-dove`. See [Privacy Protections](#privacy-protections) for coverage and configuration.
+
 ## Prerequisites
 
 Install these **before** running the ClawGod installer:
@@ -66,12 +68,26 @@ Green logo = patched. Orange logo = original.
 
 ### Privacy Protections
 
+ClawGod targets identified paths that attach extra metadata to model requests. The protections below run locally in the patched client and are enabled by default on versions containing those paths.
+
 | Patch | What's neutralized |
 |-------|-------------------|
 | **Date String (qla)** | System prompt encodes user location via Unicode apostrophe variants (U+0027 / U+2019 / U+02BC / U+02B9) and date separator (`-` vs `/` for CN timezone). Patched to always use ASCII `'` and unmodified date format |
 | **Geo-Detection Probe (rdp)** | Client-side three-axis detection: timezone (`Asia/Shanghai` / `Asia/Urumqi`), proxy hostname against XOR-obfuscated 100+ domain blocklist, CN-LLM vendor keywords in base URL. Patched to always return null |
 | **Apostrophe Selector (odp)** | Selects one of four Unicode apostrophes based on detection results. Patched to always return ASCII `'` (defense-in-depth) |
 | **Git/Environment Header** | Blocks automatic `x-claude-code-wiggly-dove` collection, including Git origin and environment metadata, before the header is generated. Enabled by default; verified against Claude Code 2.1.299, 2.1.301 and 2.1.303 |
+
+The `wiggly-dove` patch makes the shared eligibility gate return false before the collector runs. This prevents that path from reading Git origin or collecting container, sandbox and other environment metadata, and from generating the header. Git origin can identify the repository host and organization/project path. The patch works even when the upstream `tengu_wiggly_dove` rollout is enabled and does not depend on GrowthBook configuration overrides.
+
+No configuration is needed for the defaults. To explicitly keep both protections enabled, merge these keys into `~/.clawgod/patches.json`:
+
+```json
+{ "geo-neutralize": true, "wiggly-dove": true }
+```
+
+Setting either key to `false` restores the corresponding upstream behavior. Per-launch environment overrides such as `CLAWGOD_FEATURE_WIGGLY_DOVE` take precedence over the file; see [Feature Toggles](#feature-toggles).
+
+Coverage is limited to the identified metadata paths above. Prompts, tool results and code included in normal model requests still go to the configured endpoint. Other telemetry, gateway data handling and newly introduced collection paths require separate review. If the `wiggly-dove` matcher no longer recognizes an upstream implementation, patching aborts before writing source by default; explicitly using `--tolerate-stale` can skip the protection and preserve upstream behavior.
 
 ### Visual
 

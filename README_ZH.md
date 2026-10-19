@@ -12,6 +12,8 @@
 
 **这不是第三方 Claude Code 客户端。** ClawGod 是作用在官方 Claude Code 之上的运行时补丁。它兼容任何版本——当 Claude Code 升级，ClawGod 会在下次启动时自动从新版本重新抽取并重新打补丁。
 
+**默认启用隐私保护：** 中和日期提示词中已识别的地区/代理隐写，并从 v2.3.0 起阻断 `x-claude-code-wiggly-dove` 自动采集 Git origin 和环境信息。保护范围和配置见[隐私保护](#隐私保护)。
+
 ## 前置依赖
 
 运行 ClawGod 安装脚本**之前**先装好：
@@ -66,12 +68,26 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 
 ### 隐私保护
 
+ClawGod 针对已识别的额外元数据附加路径，在本地 patched 客户端中实施保护。对于包含相应路径的上游版本，以下保护均默认开启。
+
 | 补丁 | 中和内容 |
 |------|---------|
 | **日期字符串 (qla)** | 系统提示词通过 Unicode 撇号变体（U+0027 / U+2019 / U+02BC / U+02B9）和日期分隔符（中国时区 `-` → `/`）编码用户地理位置。Patch 后始终使用 ASCII `'` 和原始日期格式 |
 | **地区检测探针 (rdp)** | 客户端三维检测：时区（`Asia/Shanghai` / `Asia/Urumqi`）、代理域名与 XOR 混淆的 100+ 域名黑名单比对、base URL 中的国产大模型关键词。Patch 后始终返回 null |
 | **撇号选择器 (odp)** | 根据检测结果选择四种 Unicode 撇号之一。Patch 后始终返回 ASCII `'`（纵深防御） |
 | **Git/环境信息字段** | 在 header 生成前阻断 `x-claude-code-wiggly-dove` 的自动采集，包括 Git origin 和环境信息。默认开启；已核对 Claude Code 2.1.299、2.1.301 和 2.1.303 |
+
+`wiggly-dove` 补丁会在采集器运行前，让共用的资格 gate 返回 false，阻止这条路径读取 Git origin、采集容器/沙箱等环境信息及生成 header。Git origin 可能暴露仓库主机名和组织/项目路径。即使上游开启 `tengu_wiggly_dove` 灰度，保护仍然生效，也不依赖 GrowthBook 配置覆盖。
+
+默认无需配置。如需明确保持两项保护开启，将以下字段合并到现有的 `~/.clawgod/patches.json`：
+
+```json
+{ "geo-neutralize": true, "wiggly-dove": true }
+```
+
+将任一项设为 `false` 会恢复对应的上游行为。`CLAWGOD_FEATURE_WIGGLY_DOVE` 等单次启动环境变量优先于文件配置，详见[功能开关](#功能开关)。
+
+保护范围限于上表列出的已识别元数据路径。正常模型请求中包含的提示词、工具结果和代码仍会发送至配置的端点；其他遥测、网关的数据处理方式及新出现的采集路径需要单独核查。上游实现变化、`wiggly-dove` matcher 无法确认补丁位置时，默认会在写入源码前中止；显式使用 `--tolerate-stale` 可能跳过此保护并保留上游行为。
 
 ### 视觉
 
