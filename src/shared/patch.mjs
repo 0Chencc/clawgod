@@ -752,6 +752,28 @@ const patches = [
     name: 'Ignore enterprise-managed remote settings',
     ast: true,
   },
+
+  {
+    // Recover orphaned tool_result entries from message history.
+    // In DRn(e, n) / oyn(e, n) (ensureToolResultPairing), when assistant messages contain tool_use
+    // entries that are not answered in the immediate next user message (e[y+1]), upstream
+    // synthesizes a tool_result with content: uvs ("[Tool result missing due to internal error]")
+    // and is_error: true.
+    //
+    // This happens frequently when:
+    // 1. Third-party OpenAI-compatible proxies emit static chunk IDs or flat assistant messages,
+    //    causing multi-turn tool_use items to be merged into a single assistant message;
+    // 2. Downstream history flattening splits or separates tool_use from its tool_result across turns.
+    //
+    // Upstream blindly flags these as internal errors, causing Claude to believe previous
+    // commands (like build, lint, git, edit) failed and loop repeatedly or fail on subsequent edits.
+    //
+    // The AST patch inspects the full conversation history for the original tool_result before
+    // falling back to synthesizing a missing error result.
+    id: 'tool-result-pairing-recovery',
+    name: 'Recover orphaned tool results from history in ensureToolResultPairing',
+    ast: true,
+  },
 ];
 
 // ─── Main ─────────────────────────────────────────────────

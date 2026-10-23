@@ -4,11 +4,13 @@ export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
   'computer-use-default', 'ultraplan', 'voice-mode',
   'geo-stego-date', 'remote-settings-off', 'wiggly-dove',
+  'tool-result-pairing-recovery',
 ];
 
 const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
   'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
-  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove'];
+  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove',
+  '[Tool result missing due to internal error]'];
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -93,6 +95,7 @@ export function scanAstPatches(code) {
   // local to one chunk: cross-chunk imports are not a stable contract.
   const functions = new Map();
   const wigglyLiterals = new Set(), wigglyHandled = new Set();
+  let pairingHandled = false;
   walk(tree, node => {
     if (node.type === 'FunctionDeclaration' && node.id?.type === 'Identifier') {
       functions.set(node.id.name, node);
@@ -227,6 +230,66 @@ export function scanAstPatches(code) {
       }
     }
 
+    if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type) &&
+        node.params.length > 0 && node.params[0].type === 'Identifier') {
+      const historyParam = node.params[0].name;
+      let isHistoryArray = false;
+      walk(node.body, inner => {
+        if (inner.type === 'MemberExpression' && inner.object?.type === 'Identifier' && inner.object.name === historyParam) {
+          if (inner.property?.name === 'length' || inner.computed) isHistoryArray = true;
+        }
+      });
+      if (isHistoryArray) {
+        const id = 'tool-result-pairing-recovery';
+        if (hasGate(node, id)) {
+          results[id].patched = true;
+          pairingHandled = true;
+        } else {
+          walk(node.body, inner => {
+            if (inner.type === 'CallExpression' && inner.callee?.type === 'MemberExpression' &&
+                inner.callee.property?.name === 'map' && inner.arguments.length >= 1) {
+              const cb = inner.arguments[0];
+              if (!['ArrowFunctionExpression', 'FunctionExpression'].includes(cb?.type)) return;
+              const idParam = cb.params[0];
+              if (idParam?.type !== 'Identifier') return;
+              const returnObj = cb.body.type === 'ObjectExpression' ? cb.body
+                : cb.body.type === 'BlockStatement' ? cb.body.body.find(s => s.type === 'ReturnStatement')?.argument
+                : null;
+              if (returnObj?.type !== 'ObjectExpression') return;
+              const props = returnObj.properties.filter(p => p.type === 'Property');
+              const hasType = props.some(p => propertyName(p) === 'type' && literal(p.value, 'tool_result'));
+              const hasToolUseId = props.some(p => propertyName(p) === 'tool_use_id' && p.value?.type === 'Identifier' && p.value.name === idParam.name);
+              const hasIsError = props.some(p => propertyName(p) === 'is_error' && boolean(p.value, true));
+              const contentProp = props.find(p => propertyName(p) === 'content');
+              if (hasType && hasToolUseId && hasIsError && contentProp) {
+                const mapTarget = code.slice(inner.callee.object.start, inner.callee.object.end);
+                const contentExpr = code.slice(contentProp.value.start, contentProp.value.end);
+                const replacement =
+                  `${mapTarget}.map((${idParam.name})=>{` +
+                  `let _p;` +
+                  `if(${gate(id)}){` +
+                  `for(let _m of ${historyParam}){` +
+                  `if(_m?.message?.content&&Array.isArray(_m.message.content)){` +
+                  `for(let _b of _m.message.content){` +
+                  `if(_b?.type==="tool_result"&&_b.tool_use_id===${idParam.name}&&_b.content!==${contentExpr}){` +
+                  `_p=_b;break;` +
+                  `}` +
+                  `}` +
+                  `}` +
+                  `if(_p)break;` +
+                  `}` +
+                  `}` +
+                  `return _p?{..._p}:{type:"tool_result",tool_use_id:${idParam.name},content:${contentExpr},is_error:!0}` +
+                  `})`;
+                edit(id, inner, replacement);
+                pairingHandled = true;
+              }
+            }
+          });
+        }
+      }
+    }
+
     if ((node.type === 'MethodDefinition' || node.type === 'Property') &&
         propertyName(node) === 'getEnvironmentOverrides' && node.value?.body?.type === 'BlockStatement') {
       const statements = node.value.body.body;
@@ -250,6 +313,10 @@ export function scanAstPatches(code) {
   if ([...wigglyLiterals].some(start => !wigglyHandled.has(start))) {
     results['wiggly-dove'].present = true;
     results['wiggly-dove'].matches = [];
+  }
+  if (code.includes('[Tool result missing due to internal error]') && !pairingHandled) {
+    results['tool-result-pairing-recovery'].present = true;
+    results['tool-result-pairing-recovery'].matches = [];
   }
   return results;
 }

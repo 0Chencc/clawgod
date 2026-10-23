@@ -31,7 +31,7 @@ const unrelated={method(){return this.environmentOverridesParsed=true,this.envir
 const dateSource = 'function dateText (input) {let info=probe(),mark=apostrophe(info?.known??false,info?.labKw??false),formatted=info?.cnTZ?input.replaceAll("-","/"):input;return`Today${mark}s date is ${formatted}.`}';
 const scanned = scanAstPatches(source + dateSource);
 for (const id of AST_PATCH_IDS) assert.equal(scanned[id].matches.length,
-  ['remote-settings-off', 'wiggly-dove'].includes(id) ? 0 : 1, id);
+  ['remote-settings-off', 'wiggly-dove', 'tool-result-pairing-recovery'].includes(id) ? 0 : 1, id);
 const edits = Object.values(scanned).flatMap(result => result.matches);
 const patched = applyAstEdits(source + dateSource, edits);
 parsePatchSource(patched);
@@ -231,4 +231,68 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+// tool-result-pairing-recovery AST patch tests:
+// Verifies renamed history array bindings, real result recovery, missing fallback,
+// idempotence, and stale sentinel detection when structures drift.
+{
+  const renamedSource = `
+    function ensureToolResultPairing(conversationHistory, options) {
+      let count = conversationHistory.length;
+      let missingIds = ["call_cached", "call_missing"];
+      let defaultErr = "[Tool result missing due to internal error]";
+      let results = missingIds.map((item) => ({
+        type: "tool_result",
+        tool_use_id: item,
+        content: defaultErr,
+        is_error: !0
+      }));
+      return results;
+    }
+  `;
+  const scannedPairing = scanAstPatches(renamedSource)['tool-result-pairing-recovery'];
+  assert.equal(scannedPairing.matches.length, 1, 'matches map with renamed history parameter');
+  assert.equal(scannedPairing.present, false);
+  assert.equal(scannedPairing.patched, false);
+
+  const patchedPairing = applyAstEdits(renamedSource, scannedPairing.matches);
+  parsePatchSource(patchedPairing);
+  assert.ok(patchedPairing.includes('for(let _m of conversationHistory)'), 'binds to the renamed parameter name');
+
+  // Verify execution: real result recovery vs missing fallback
+  const mockHistory = [
+    {
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_cached', content: 'PASS: suite verified', is_error: false }
+        ]
+      }
+    }
+  ];
+  const evalResult = runInNewContext(`${patchedPairing};ensureToolResultPairing(mockHistory, {})`, { mockHistory });
+  assert.equal(evalResult.length, 2);
+  assert.equal(evalResult[0].tool_use_id, 'call_cached');
+  assert.equal(evalResult[0].content, 'PASS: suite verified');
+  assert.equal(evalResult[0].is_error, false);
+  assert.equal(evalResult[1].tool_use_id, 'call_missing');
+  assert.equal(evalResult[1].content, '[Tool result missing due to internal error]');
+  assert.equal(evalResult[1].is_error, true);
+
+  // Idempotence
+  const secondScan = scanAstPatches(patchedPairing)['tool-result-pairing-recovery'];
+  assert.equal(secondScan.matches.length, 0);
+  assert.equal(secondScan.patched, true);
+  assert.equal(secondScan.present, false);
+
+  // Stale detection
+  const staleSource = `
+    const err = "[Tool result missing due to internal error]";
+    function driftedFunction(unrelated) { return unrelated; }
+  `;
+  const staleScan = scanAstPatches(staleSource)['tool-result-pairing-recovery'];
+  assert.equal(staleScan.matches.length, 0);
+  assert.equal(staleScan.present, true);
+  assert.equal(staleScan.patched, false);
+}
+
 console.log('[ast-patches.test] semantic ranges, gates, drift, backups and failure safety passed');
