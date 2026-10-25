@@ -31,7 +31,7 @@ const unrelated={method(){return this.environmentOverridesParsed=true,this.envir
 const dateSource = 'function dateText (input) {let info=probe(),mark=apostrophe(info?.known??false,info?.labKw??false),formatted=info?.cnTZ?input.replaceAll("-","/"):input;return`Today${mark}s date is ${formatted}.`}';
 const scanned = scanAstPatches(source + dateSource);
 for (const id of AST_PATCH_IDS) assert.equal(scanned[id].matches.length,
-  ['remote-settings-off', 'wiggly-dove'].includes(id) ? 0 : 1, id);
+  ['remote-settings-off', 'wiggly-dove', 'tool-result-pairing-recovery'].includes(id) ? 0 : 1, id);
 const edits = Object.values(scanned).flatMap(result => result.matches);
 const patched = applyAstEdits(source + dateSource, edits);
 parsePatchSource(patched);
@@ -231,4 +231,358 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+// tool-result-pairing-recovery AST patch tests:
+// Verifies renamed history array bindings, real result recovery, missing fallback,
+// idempotence, and stale sentinel detection when structures drift.
+{
+  const renamedSource = `
+    function ensureToolResultPairing(conversationHistory, options) {
+      let count = conversationHistory.length;
+      let missingIds = ["call_cached", "call_missing"];
+      let defaultErr = "[Tool result missing due to internal error]";
+      let results = missingIds.map((item) => ({
+        type: "tool_result",
+        tool_use_id: item,
+        content: defaultErr,
+        is_error: !0
+      }));
+      return results;
+    }
+  `;
+  const scannedPairing = scanAstPatches(renamedSource)['tool-result-pairing-recovery'];
+  assert.equal(scannedPairing.matches.length, 1, 'matches map with renamed history parameter');
+  assert.equal(scannedPairing.present, false);
+  assert.equal(scannedPairing.patched, false);
+
+  const patchedPairing = applyAstEdits(renamedSource, scannedPairing.matches);
+  parsePatchSource(patchedPairing);
+  assert.ok(patchedPairing.includes('for(let _m of conversationHistory)'), 'binds to the renamed parameter name');
+
+  // Verify execution: real result recovery vs missing fallback
+  const mockHistory = [
+    {
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_cached', content: 'PASS: suite verified', is_error: false }
+        ]
+      }
+    }
+  ];
+  const evalResult = runInNewContext(`${patchedPairing};ensureToolResultPairing(mockHistory, {})`, { mockHistory });
+  assert.equal(evalResult.length, 2);
+  assert.equal(evalResult[0].tool_use_id, 'call_cached');
+  assert.equal(evalResult[0].content, 'PASS: suite verified');
+  assert.equal(evalResult[0].is_error, false);
+  assert.equal(evalResult[1].tool_use_id, 'call_missing');
+  assert.equal(evalResult[1].content, '[Tool result missing due to internal error]');
+  assert.equal(evalResult[1].is_error, true);
+
+  // Idempotence
+  const secondScan = scanAstPatches(patchedPairing)['tool-result-pairing-recovery'];
+  assert.equal(secondScan.matches.length, 0);
+  assert.equal(secondScan.patched, true);
+  assert.equal(secondScan.present, false);
+
+  // Stale detection
+  const staleSource = `
+    const err = "[Tool result missing due to internal error]";
+    function driftedFunction(unrelated) { return unrelated; }
+  `;
+  const staleScan = scanAstPatches(staleSource)['tool-result-pairing-recovery'];
+  assert.equal(staleScan.matches.length, 0);
+  assert.equal(staleScan.present, true);
+  assert.equal(staleScan.patched, false);
+}
+
+// Non-target error generation function negative test:
+// A function generating non-missing errors (e.g. permission errors) in the same
+// file with sentinel must not be modified, and should be reported as stale.
+{
+  const nonTargetSource = `
+    const sentinel = "[Tool result missing due to internal error]";
+    function permissionErrors(history, ids) {
+      void history.length;
+      return ids.map(item => ({
+        type: "tool_result", tool_use_id: item,
+        content: "Permission denied", is_error: true
+      }));
+    }
+  `;
+  const nonTargetScan = scanAstPatches(nonTargetSource)['tool-result-pairing-recovery'];
+  assert.equal(nonTargetScan.matches.length, 0, 'negative case: non-target error function is not matched');
+  assert.equal(nonTargetScan.present, true, 'sentinel present in source triggers stale strategy');
+  assert.equal(nonTargetScan.patched, false);
+}
+
+// Variable collision avoidance tests:
+// 1. History parameter renamed to _m: should not emit `for(let _m of _m)` which causes ReferenceError.
+{
+  const shadowedHistorySource = `
+    function ensureToolResultPairing(_m, ids) {
+      void _m.length;
+      const missingErr = "[Tool result missing due to internal error]";
+      return ids.map(item => ({
+        type: "tool_result", tool_use_id: item,
+        content: missingErr, is_error: true
+      }));
+    }
+  `;
+  const scan = scanAstPatches(shadowedHistorySource)['tool-result-pairing-recovery'];
+  assert.equal(scan.matches.length, 1);
+  const patched = applyAstEdits(shadowedHistorySource, scan.matches);
+  parsePatchSource(patched);
+  // Ensure we didn't declare let _m of _m
+  assert.ok(!patched.includes('for(let _m of _m)'), 'fresh variable avoids history parameter name collision');
+
+  // Must execute without ReferenceError on missing fallback
+  const mockHistory = [];
+  const evalResult = runInNewContext(`${patched};ensureToolResultPairing(mockHistory, ["call_none"])`, { mockHistory });
+  assert.equal(evalResult.length, 1);
+  assert.equal(evalResult[0].tool_use_id, 'call_none');
+  assert.equal(evalResult[0].content, '[Tool result missing due to internal error]');
+  assert.equal(evalResult[0].is_error, true);
+}
+
+// 2. Callback parameter renamed to _p: should not emit `(_p)=>{let _p;...}` which causes SyntaxError.
+{
+  const shadowedCallbackSource = `
+    function ensureToolResultPairing(history, ids) {
+      void history.length;
+      const missingErr = "[Tool result missing due to internal error]";
+      return ids.map(_p => ({
+        type: "tool_result", tool_use_id: _p,
+        content: missingErr, is_error: true
+      }));
+    }
+  `;
+  const scan = scanAstPatches(shadowedCallbackSource)['tool-result-pairing-recovery'];
+  assert.equal(scan.matches.length, 1);
+  const patched = applyAstEdits(shadowedCallbackSource, scan.matches);
+  parsePatchSource(patched);
+  assert.ok(!patched.includes('(_p)=>{let _p;'), 'fresh variable avoids callback parameter name collision');
+
+  // Must execute and recover correctly
+  const mockHistory = [
+    {
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'call_rec', content: 'RECOVERED_OK', is_error: false }]
+      }
+    }
+  ];
+  const evalResult = runInNewContext(`${patched};ensureToolResultPairing(mockHistory, ["call_rec", "call_miss"])`, { mockHistory });
+  assert.equal(evalResult.length, 2);
+  assert.equal(evalResult[0].content, 'RECOVERED_OK');
+  assert.equal(evalResult[0].is_error, false);
+  assert.equal(evalResult[1].content, '[Tool result missing due to internal error]');
+  assert.equal(evalResult[1].is_error, true);
+}
+
+// Nested functions and parameter shadowing tests:
+// Outer wrapper accessing config[0] must not be mistaken for history array,
+// and must not create overlapping edits on inner function's map call.
+{
+  const nestedSource = `
+    function outerWrapper(config) {
+      void config[0];
+      function ensureToolResultPairing(innerHistory, missingIds) {
+        let count = innerHistory.length;
+        let defaultErr = "[Tool result missing due to internal error]";
+        return missingIds.map(item => ({
+          type: "tool_result",
+          tool_use_id: item,
+          content: defaultErr,
+          is_error: !0
+        }));
+      }
+      return ensureToolResultPairing;
+    }
+  `;
+  const scan = scanAstPatches(nestedSource)['tool-result-pairing-recovery'];
+  assert.equal(scan.matches.length, 1, 'exactly one match without outer scope claiming inner statement');
+  const patched = applyAstEdits(nestedSource, scan.matches); // Throws if overlapping
+  parsePatchSource(patched);
+  assert.ok(patched.includes('for(let _m of innerHistory)'), 'binds to innerHistory, not outer config');
+  assert.ok(!patched.includes('for(let _m of config)'), 'does not bind to outer wrapper parameter');
+
+  const mockHistory = [
+    {
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'inner ok', is_error: false }]
+      }
+    }
+  ];
+  const evalResult = runInNewContext(`${patched};outerWrapper({})(mockHistory, ["c1", "c2"])`, { mockHistory });
+  assert.equal(evalResult.length, 2);
+  assert.equal(evalResult[0].content, 'inner ok');
+  assert.equal(evalResult[1].content, '[Tool result missing due to internal error]');
+}
+
+// End-to-end orphan detection pipeline test:
+// Tests a full pairing repair function that models the real upstream deduplication,
+// orphan check, and synthesis logic.
+// Validates:
+// 1. Before patch: synthesis injects missing errors for missing tool results.
+// 2. After patch: recovers authentic results from message history.
+// 3. True failure preservation: real errors retain is_error: true and original error content.
+// 4. Fallback: unseen tool_use correctly synthesizes missing error.
+// 5. Pairing constraints: every assistant tool_use has exactly one tool_result in the following user message.
+{
+  const fullPairingSource = `
+    const SENTINEL = "[Tool result missing due to internal error]";
+    function ensureToolResultPairing(messages) {
+      let repaired = [];
+      let modified = false;
+      let seen = new Set();
+      for (let i = 0; i < messages.length; i++) {
+        let msg = messages[i];
+        if (msg.type !== "assistant") {
+          repaired.push(msg);
+          continue;
+        }
+        let assistantIds = new Set();
+        let valid = msg.message.content.filter(b => {
+          if (b.type === "tool_use") {
+            if (seen.has(b.id)) { modified = true; return false; }
+            seen.add(b.id);
+            assistantIds.add(b.id);
+          }
+          return true;
+        });
+        repaired.push(valid.length !== msg.message.content.length ? { ...msg, message: { ...msg.message, content: valid } } : msg);
+        let nextMsg = messages[i + 1];
+        let userIds = new Set();
+        if (nextMsg?.type === "user" && Array.isArray(nextMsg.message.content)) {
+          for (let b of nextMsg.message.content) {
+            if (b?.type === "tool_result") userIds.add(b.tool_use_id);
+          }
+        }
+        let missing = [...assistantIds].filter(id => !userIds.has(id));
+        let unexpected = [...userIds].filter(id => !assistantIds.has(id));
+        if (missing.length === 0 && unexpected.length === 0) continue;
+        modified = true;
+        let synthetic = missing.map(id => ({
+          type: "tool_result",
+          tool_use_id: id,
+          content: SENTINEL,
+          is_error: true
+        }));
+        if (nextMsg?.type === "user") {
+          let content = Array.isArray(nextMsg.message.content) ? nextMsg.message.content : [{ type: "text", text: nextMsg.message.content }];
+          if (unexpected.length > 0) {
+            let unexpSet = new Set(unexpected);
+            content = content.filter(b => !(b?.type === "tool_result" && unexpSet.has(b.tool_use_id)));
+          }
+          i++;
+          repaired.push({ ...nextMsg, message: { ...nextMsg.message, content: [...synthetic, ...content] } });
+        } else if (synthetic.length > 0) {
+          repaired.push({ type: "user", message: { content: synthetic } });
+        }
+      }
+      return modified ? repaired : messages;
+    }
+  `;
+
+  // Realistic sanitized sequence:
+  // Turn 1:
+  // assistant calls fetch_spec.
+  // user returns fetch_spec result, AND pre-delivers concurrent results for run_batch (success)
+  // and lint_check (failure: exit code 1) from parallel execution.
+  // Turn 2:
+  // assistant plans next step and emits run_batch, lint_check, and a totally fresh build_final.
+  // user responds with plain text "continue", missing results in immediate next turn.
+  const sampleMessages = [
+    {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', id: 'call_fetch', name: 'fetch_spec', input: {} }]
+      }
+    },
+    {
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_fetch', content: 'SPEC CONTENT OK', is_error: false },
+          { type: 'tool_result', tool_use_id: 'call_batch', content: 'PASS: 42 batch tests executed', is_error: false },
+          { type: 'tool_result', tool_use_id: 'call_lint', content: 'exit code 1: trailing whitespace in parser.js', is_error: true }
+        ]
+      }
+    },
+    {
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'call_batch', name: 'run_batch', input: {} },
+          { type: 'tool_use', id: 'call_lint', name: 'lint_check', input: {} },
+          { type: 'tool_use', id: 'call_build', name: 'build_final', input: {} }
+        ]
+      }
+    },
+    {
+      type: 'user',
+      message: {
+        content: [{ type: 'text', text: 'continue' }]
+      }
+    }
+  ];
+
+  // 1. Verify unpatched baseline: injects synthetic missing errors
+  const unpatchedResult = runInNewContext(`${fullPairingSource};ensureToolResultPairing(sampleMessages)`, {
+    sampleMessages: structuredClone(sampleMessages)
+  });
+  const unpatchedTurn2User = unpatchedResult[3];
+  const unpatchedBatchResult = unpatchedTurn2User.message.content.find(b => b.tool_use_id === 'call_batch');
+  const unpatchedLintResult = unpatchedTurn2User.message.content.find(b => b.tool_use_id === 'call_lint');
+  const unpatchedBuildResult = unpatchedTurn2User.message.content.find(b => b.tool_use_id === 'call_build');
+
+  assert.equal(unpatchedBatchResult.content, '[Tool result missing due to internal error]', 'unpatched injects missing error');
+  assert.equal(unpatchedBatchResult.is_error, true);
+  assert.equal(unpatchedLintResult.content, '[Tool result missing due to internal error]', 'unpatched overwrites real lint error');
+  assert.equal(unpatchedBuildResult.content, '[Tool result missing due to internal error]');
+
+  // 2. Scan and patch full pairing function
+  const scan = scanAstPatches(fullPairingSource)['tool-result-pairing-recovery'];
+  assert.equal(scan.matches.length, 1);
+  const patched = applyAstEdits(fullPairingSource, scan.matches);
+  parsePatchSource(patched);
+
+  // 3. Verify patched execution
+  const patchedResult = runInNewContext(`${patched};ensureToolResultPairing(sampleMessages)`, {
+    sampleMessages: structuredClone(sampleMessages)
+  });
+  const patchedTurn2User = patchedResult[3];
+  const patchedBatchResult = patchedTurn2User.message.content.find(b => b.tool_use_id === 'call_batch');
+  const patchedLintResult = patchedTurn2User.message.content.find(b => b.tool_use_id === 'call_lint');
+  const patchedBuildResult = patchedTurn2User.message.content.find(b => b.tool_use_id === 'call_build');
+
+  // Verify successful result recovery
+  assert.equal(patchedBatchResult.content, 'PASS: 42 batch tests executed', 'recovers authentic success result');
+  assert.equal(patchedBatchResult.is_error, false);
+
+  // Verify authentic failure state preservation
+  assert.equal(patchedLintResult.content, 'exit code 1: trailing whitespace in parser.js', 'preserves real error description');
+  assert.equal(patchedLintResult.is_error, true, 'strictly preserves authentic failure state (is_error: true)');
+
+  // Verify missing fallback
+  assert.equal(patchedBuildResult.content, '[Tool result missing due to internal error]', 'fallback to synthesized error when truly absent');
+  assert.equal(patchedBuildResult.is_error, true);
+
+  // 4. Verify Anthropic API pairing constraints
+  for (let i = 0; i < patchedResult.length; i++) {
+    const msg = patchedResult[i];
+    if (msg.type === 'assistant') {
+      const next = patchedResult[i + 1];
+      assert.ok(next && next.type === 'user', 'every assistant message must be followed by a user message');
+      const toolUses = msg.message.content.filter(b => b.type === 'tool_use');
+      const toolResults = next.message.content.filter(b => b.type === 'tool_result');
+      const resultIdSet = new Set(toolResults.map(r => r.tool_use_id));
+      for (const tu of toolUses) {
+        assert.ok(resultIdSet.has(tu.id), `every tool_use (${tu.id}) has a corresponding tool_result`);
+      }
+    }
+  }
+}
+
 console.log('[ast-patches.test] semantic ranges, gates, drift, backups and failure safety passed');
