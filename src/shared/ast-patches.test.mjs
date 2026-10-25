@@ -585,4 +585,66 @@ try {
   }
 }
 
+// Same-spelled identifiers must resolve to their actual lexical bindings.
+{
+  const sentinel = '[Tool result missing due to internal error]';
+  const object = '{type:"tool_result",tool_use_id:item,content:err,is_error:true}';
+  const map = `ids.map(item=>(${object}))`;
+  const outer = `const err=${JSON.stringify(sentinel)};`;
+  for (const source of [
+    `${outer}function pairing(history,ids){void history.length;const err="Permission denied";return ${map}}`,
+    `${outer}function pairing(history,ids,err){void history.length;return ${map}}`,
+    `${outer}function pairing(history,ids){void history.length;{const err="Permission denied";return ${map}}}`,
+    `${outer}function pairing(history,ids){void history.length;try{throw "Permission denied"}catch(err){return ${map}}}`,
+    `function other(){const err=${JSON.stringify(sentinel)}}function pairing(history,ids){void history.length;const err="Permission denied";return ${map}}`,
+    `let err=${JSON.stringify(sentinel)};err="Permission denied";function pairing(history,ids){void history.length;return ${map}}`,
+    `${outer}function pairing(history,ids){void history.length;{const history={};return ${map}}}`,
+    `${outer}function pairing(history,ids){void history.length;return ids.map(item=>{const err=${JSON.stringify(sentinel)};return ${object}})}`,
+    `${outer}function pairing(history,ids){void history.length;return ids.map(item=>{record(item);return ${object}})}`,
+    `${outer}function pairing(history,ids){void history.length;return ids.map(item=>({...${object},metadata:42}))}`,
+  ]) {
+    const result = scanAstPatches(source)['tool-result-pairing-recovery'];
+    assert.equal(result.matches.length, 0, source);
+    assert.equal(result.present, true, 'unsupported bindings and callback bodies must be stale');
+    assert.equal(applyAstEdits(source, result.matches), source);
+  }
+
+  // Both declaration initializers and Bun-style deferred assignments are supported.
+  for (const declaration of [outer, `var err;function initialize(){err=${JSON.stringify(sentinel)}}initialize();`]) {
+    for (const callback of [`item=>(${object})`, `function(item){return ${object}}`]) {
+      const source = `${declaration}function pairing(history,ids){void history.length;return ids.map(${callback})}`;
+      const result = scanAstPatches(source)['tool-result-pairing-recovery'];
+      assert.equal(result.matches.length, 1);
+      const patched = applyAstEdits(source, result.matches);
+      parsePatchSource(patched);
+      const history = [{type:'user',message:{content:[{type:'tool_result',tool_use_id:'cached',content:'real output',is_error:false}]}}];
+      const recovered = runInNewContext(`${patched};pairing(history,['cached','missing'])`, {history});
+      assert.equal(recovered[0].content, 'real output');
+      assert.equal(recovered[1].content, sentinel);
+    }
+  }
+
+  // The original map parameter may legally reuse the history parameter's name.
+  const source = `${outer}function pairing(history,ids){void history.length;return ids.map(history=>({type:"tool_result",tool_use_id:history,content:err,is_error:true}))}`;
+  const result = scanAstPatches(source)['tool-result-pairing-recovery'];
+  assert.equal(result.matches.length, 1);
+  const patched = applyAstEdits(source, result.matches);
+  parsePatchSource(patched);
+  const history = [{type:'user',message:{content:[
+    {type:'tool_result',tool_use_id:'cached',content:'real output',is_error:false},
+    {type:'tool_result',tool_use_id:'failed',content:'exit code 1',is_error:true},
+  ]}}];
+  for (const enabled of [true, false]) {
+    const recovered = runInNewContext(`${patched};pairing(history,['cached','failed','missing'])`, {
+      history, __clawgodPatches: {'tool-result-pairing-recovery':enabled},
+    });
+    assert.equal(recovered[0].content, enabled ? 'real output' : sentinel);
+    assert.equal(recovered[0].is_error, !enabled);
+    assert.equal(recovered[1].content, enabled ? 'exit code 1' : sentinel);
+    assert.equal(recovered[1].is_error, true);
+    assert.equal(recovered[2].content, sentinel);
+  }
+  assert.equal(scanAstPatches(patched)['tool-result-pairing-recovery'].patched, true);
+}
+
 console.log('[ast-patches.test] semantic ranges, gates, drift, backups and failure safety passed');
