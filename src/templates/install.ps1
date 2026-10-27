@@ -219,6 +219,14 @@ catch {
     exit 1
 }
 
+New-Item -ItemType Directory -Force -Path $ClawDir | Out-Null
+@'
+{{CLAWGOD:acorn.mjs}}
+'@ | Set-Content (Join-Path $ClawDir "acorn.mjs") -Encoding UTF8
+@'
+{{CLAWGOD:acorn.LICENSE}}
+'@ | Set-Content (Join-Path $ClawDir "acorn.LICENSE") -Encoding UTF8
+
 # --- Handle -NoUpgrade (re-patch the installed version) --------------
 if ($NoUpgrade) {
     New-Item -ItemType Directory -Force -Path $ClawDir | Out-Null
@@ -229,11 +237,17 @@ if ($NoUpgrade) {
         Write-Err "Run a full install first (without -NoUpgrade)."
         exit 1
     }
-    if (Test-Path (Join-Path $ClawDir 'source-backup.json')) {
+    $pathMapFile = Join-Path $ClawDir 'pathmap.json'
+    $hasLoaderMetadata = -not (Test-Path $pathMapFile)
+    if (-not $hasLoaderMetadata) {
+        $entries = (Get-Content $pathMapFile -Raw | ConvertFrom-Json).PSObject.Properties.Value
+        $hasLoaderMetadata = @($entries | Where-Object { -not $_.loader }).Count -eq 0
+    }
+    if ((Test-Path (Join-Path $ClawDir 'source-backup.json')) -and $hasLoaderMetadata) {
         Write-OK "Using complete clean-source backup (-NoUpgrade)"
     } else {
-        # Older installers backed up only the entry, not bunfs chunks. Recover
-        # clean source from the exact installed version, never from latest.
+        # Old backups lack clean chunks or asset loader metadata. Recover the exact
+        # installed version so -NoUpgrade also repairs asset loading (#233).
         $versionStamp = Join-Path $ClawDir '.source-version'
         $installedVersion = [regex]::Match('', '^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$')
         if (Test-Path $versionStamp) {
@@ -549,12 +563,6 @@ Write-OK "Bun.ant runtime shim created (bun-ant-shim.cjs)"
 # --- Write universal patcher ------------------------------------------
 # (Same Node.js patcher as bash version -- inline to avoid extra download)
 
-@'
-{{CLAWGOD:acorn.mjs}}
-'@ | Set-Content (Join-Path $ClawDir "acorn.mjs") -Encoding UTF8
-@'
-{{CLAWGOD:acorn.LICENSE}}
-'@ | Set-Content (Join-Path $ClawDir "acorn.LICENSE") -Encoding UTF8
 @'
 {{CLAWGOD:ast-patches.mjs}}
 '@ | Set-Content (Join-Path $ClawDir "ast-patches.mjs") -Encoding UTF8

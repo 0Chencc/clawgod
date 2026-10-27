@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, realpathSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, realpathSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { parse } from './acorn.mjs';
 
 // Generate paths in the OS's canonical form, including Windows 8.3 aliases.
 const here = realpathSync.native(dirname(fileURLToPath(import.meta.url)));
@@ -27,23 +28,49 @@ function fixFileURLs(c) {
   );
 }
 
-// Embedded text requires return strings in the native bundle. Bun's disk
-// loader returns a module namespace, so read extracted text assets as UTF-8.
-function fixTextRequires(c) {
-  const textRoot = JSON.stringify(join(here, 'bunfs'));
-  return c.replace(/\b([\w$]+)=import\.meta\.require(?=[,;])/g, (_match, name) =>
-    `${name} = (id) => {
-      if (/\\.(?:txt|md)$/.test(id)) {
-        const fs = import.meta.require('node:fs');
-        const path = import.meta.require('node:path');
-        const relative = path.relative(fs.realpathSync(${textRoot}), fs.realpathSync(id));
-        if (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) {
-          return fs.readFileSync(id, 'utf8');
-        }
+// The native bundle retains loader semantics even for executable extensions.
+// Disk require must never execute an embedded text/file asset (#233).
+function fixAssetRequires(c, assets) {
+  if (!c.includes('require')) return c;
+  const loader = `(() => {
+    const fs = import.meta.require('node:fs');
+    const path = import.meta.require('node:path');
+    const types = new Map(${JSON.stringify([...assets])});
+    return (id) => {
+      if (typeof id === 'string' && path.isAbsolute(id) && fs.existsSync(id)) {
+        const canonical = fs.realpathSync.native(id);
+        const key = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+        const type = types.get(key);
+        if (type === 'text') return fs.readFileSync(id, 'utf8');
+        if (type === 'file') return id;
       }
       return import.meta.require(id);
-    }`,
-  );
+    };
+  })()`;
+  const isRequire = node => node?.type === 'MemberExpression' &&
+    (node.computed ? node.property.value === 'require' : node.property.name === 'require') &&
+    node.object.type === 'MetaProperty' && node.object.meta.name === 'import';
+  const pending = [parse(c, { ecmaVersion: 'latest', sourceType: 'module' })];
+  const edits = [];
+  while (pending.length) {
+    const node = pending.pop();
+    const alias = node.type === 'VariableDeclarator' ? node.init
+      : node.type === 'AssignmentExpression' && node.operator === '=' ? node.right : null;
+    if (isRequire(alias)) edits.push(alias);
+    if (node.type === 'CallExpression' && isRequire(node.callee)) {
+      const id = node.arguments[0]?.value;
+      const key = typeof id === 'string' && process.platform === 'win32' ? id.toLowerCase() : id;
+      if (assets.has(key)) edits.push(node.callee);
+    }
+    for (const value of Object.values(node)) {
+      if (value?.type) pending.push(value);
+      else if (Array.isArray(value)) pending.push(...value.filter(child => child?.type));
+    }
+  }
+  for (const node of edits.sort((a, b) => b.start - a.start)) {
+    c = c.slice(0, node.start) + loader + c.slice(node.end);
+  }
+  return c;
 }
 
 if (isChunked) {
@@ -51,8 +78,18 @@ if (isChunked) {
   const pathMap = JSON.parse(readFileSync(pathMapFile, 'utf8'));
   // build the replace table: /$bunfs/root/X → <here>/<relative-on-disk>
   const replaceTable = new Map();
-  for (const [bunPath, rel] of Object.entries(pathMap)) {
-    replaceTable.set(bunPath, join(here, rel));
+  const assets = new Map();
+  const graphFiles = new Set();
+  for (const [bunPath, { path, loader }] of Object.entries(pathMap)) {
+    const target = join(here, path);
+    replaceTable.set(bunPath, target);
+    if (loader === 'text' || loader === 'file') {
+      const canonical = realpathSync.native(target);
+      assets.set(process.platform === 'win32' ? canonical.toLowerCase() : canonical, loader);
+    }
+    if (['js', 'jsx', 'ts', 'tsx'].includes(loader) && path.startsWith('bunfs/')) {
+      graphFiles.add(target);
+    }
   }
 
   function rewriteGraph(text) {
@@ -73,21 +110,18 @@ if (isChunked) {
   code = stripPragma(code);
   code = rewriteGraph(code);
   code = fixFileURLs(code);
-  code = fixTextRequires(code);
+  code = fixAssetRequires(code, assets);
   writeFileSync(dst, code);
   unlinkSync(src);
 
-  // rewrite every chunk/asset file in bunfs/ in place
-  const bunfsDir = join(here, 'bunfs');
+  // Rewrite code chunks only; skill templates must stay byte-for-byte intact.
   let n = 0;
-  for (const f of readdirSync(bunfsDir)) {
-    if (!f.endsWith('.js') && !f.endsWith('.mjs')) continue;
-    const fp = join(bunfsDir, f);
+  for (const fp of graphFiles) {
     let fc = readFileSync(fp, 'utf8');
     fc = stripPragma(fc);
     fc = rewriteGraph(fc);
     fc = fixFileURLs(fc);
-    fc = fixTextRequires(fc);
+    fc = fixAssetRequires(fc, assets);
     writeFileSync(fp, fc);
     n++;
   }

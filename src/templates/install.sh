@@ -166,17 +166,29 @@ info "ripgrep: $(rg --version | head -1)"
 # ─── Handle --no-upgrade (re-patch the installed version) ───────────
 mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
 
+cat > "$CLAWGOD_DIR/acorn.mjs" << 'ACORN_EOF'
+{{CLAWGOD:acorn.mjs}}
+ACORN_EOF
+cat > "$CLAWGOD_DIR/acorn.LICENSE" << 'ACORN_LICENSE_EOF'
+{{CLAWGOD:acorn.LICENSE}}
+ACORN_LICENSE_EOF
+
 if [ "$NO_UPGRADE" = "1" ]; then
   if [ ! -f "$CLAWGOD_DIR/cli.original.cjs" ]; then
     warn "--no-upgrade requires an existing installation."
     warn "Run a full install first (without --no-upgrade)."
     exit 1
   fi
-  if [ -f "$CLAWGOD_DIR/source-backup.json" ]; then
+  if [ -f "$CLAWGOD_DIR/source-backup.json" ] && {
+    [ ! -f "$CLAWGOD_DIR/pathmap.json" ] || node -e '
+const paths = require(process.argv[1]);
+process.exit(Object.values(paths).every(entry => typeof entry.loader === "string") ? 0 : 1);
+' "$CLAWGOD_DIR/pathmap.json";
+  }; then
     info "Using complete clean-source backup (--no-upgrade)"
   else
-    # Old installations have no clean chunk backup. Use the installer's version
-    # stamp, falling back to the entry header, to avoid silently upgrading.
+    # Old backups lack clean chunks or asset loader metadata. Recover the exact
+    # installed version so --no-upgrade also repairs asset loading (#233).
     VERSION=$(node -e '
 const fs = require("fs");
 const source = fs.readFileSync(process.argv[1], "utf8");
@@ -446,12 +458,6 @@ info "Bun.ant runtime shim created (bun-ant-shim.cjs)"
 
 # ─── Write universal patcher ───────────────────────────
 
-cat > "$CLAWGOD_DIR/acorn.mjs" << 'ACORN_EOF'
-{{CLAWGOD:acorn.mjs}}
-ACORN_EOF
-cat > "$CLAWGOD_DIR/acorn.LICENSE" << 'ACORN_LICENSE_EOF'
-{{CLAWGOD:acorn.LICENSE}}
-ACORN_LICENSE_EOF
 cat > "$CLAWGOD_DIR/ast-patches.mjs" << 'AST_PATCHES_EOF'
 {{CLAWGOD:ast-patches.mjs}}
 AST_PATCHES_EOF

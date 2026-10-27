@@ -24,6 +24,15 @@ try {
     $NoUpgrade = [switch]$true; $Version = 'latest'
     . $selectSource
     Assert ($NoUpgrade -and $Version -eq 'latest') 'Complete backup should avoid downloads'
+    Set-Content (Join-Path $ClawDir 'pathmap.json') '{"B:/~BUN/root/runner.mjs":"bunfs/runner.mjs"}'
+    $NoUpgrade = [switch]$true; $Version = 'latest'
+    . $selectSource
+    Assert (-not $NoUpgrade -and $Version -eq '2.1.272') 'Old asset metadata must recover the installed version'
+    Set-Content (Join-Path $ClawDir 'pathmap.json') '{"B:/~BUN/root/runner.mjs":{"path":"bunfs/runner.mjs","loader":"text"}}'
+    $NoUpgrade = [switch]$true; $Version = 'latest'
+    . $selectSource
+    Assert ($NoUpgrade -and $Version -eq 'latest') 'Current asset metadata should avoid downloads'
+    Remove-Item (Join-Path $ClawDir 'pathmap.json')
     Remove-Item (Join-Path $ClawDir 'source-backup.json')
     Set-Content (Join-Path $ClawDir 'cli.original.cjs') '// unknown version'
     $NoUpgrade = [switch]$true; $Version = 'latest'

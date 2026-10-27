@@ -166,2198 +166,6 @@ info "ripgrep: $(rg --version | head -1)"
 # ─── Handle --no-upgrade (re-patch the installed version) ───────────
 mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
 
-if [ "$NO_UPGRADE" = "1" ]; then
-  if [ ! -f "$CLAWGOD_DIR/cli.original.cjs" ]; then
-    warn "--no-upgrade requires an existing installation."
-    warn "Run a full install first (without --no-upgrade)."
-    exit 1
-  fi
-  if [ -f "$CLAWGOD_DIR/source-backup.json" ]; then
-    info "Using complete clean-source backup (--no-upgrade)"
-  else
-    # Old installations have no clean chunk backup. Use the installer's version
-    # stamp, falling back to the entry header, to avoid silently upgrading.
-    VERSION=$(node -e '
-const fs = require("fs");
-const source = fs.readFileSync(process.argv[1], "utf8");
-let stamp = "";
-try { stamp = fs.readFileSync(process.argv[2], "utf8").trim(); } catch {}
-const version = stamp.match(/^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/)?.[1] ||
-  source.match(/Version:\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
-if (!version) process.exit(1);
-console.log(version);
-' "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/.source-version") || {
-      warn "No complete source backup and installed version is unknown. Reinstall with --version <version>."
-      exit 1
-    }
-    NO_UPGRADE=0
-    info "Recovering clean source for installed version $VERSION (one-time download, no version upgrade)"
-  fi
-fi
-if [ "$NO_UPGRADE" != "1" ]; then
-
-# ─── Locate native Bun binary (cli.js source) ──────────────────────────
-# v2.1.113+ ships a Bun standalone executable as the only canonical form.
-# We extract cli.js text from this binary, patch it, then run via Bun
-# runtime. Source: npm registry (@anthropic-ai/claude-code-<platform>).
-# Local binary detection is intentionally skipped — see policy note below.
-
-mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
-
-NATIVE_BIN=""
-NATIVE_BIN_LABEL=""
-NATIVE_BIN_TMPDIR=""
-
-# Detection policy: ALWAYS pull from the npm registry @latest.
-#
-# Earlier versions of this script also probed local `node_modules` roots
-# (npm-global, bun-global) before falling back to the registry. That was
-# a stale-source trap: once clawgod is installed it patches out
-# `claude update`, so users never re-run `npm install -g` / `bun add -g`.
-# Both directories freeze at whatever version was on disk the day clawgod
-# was first installed, and `claude update` (which is now redirected here)
-# would re-detect that frozen binary forever — never reaching the
-# registry. See INCIDENT_LOG 2026-04-29 entry. The fix is to skip local
-# detection entirely; the npm tarball is ~60-90 MB compressed, fetched
-# once per upgrade, and npm's HTTP cache keeps repeats fast.
-
-# Detect platform suffix (used by the npm fetch below)
-case "$(uname -s)" in
-  Darwin) os="darwin" ;;
-  Linux)  os="linux" ;;
-  *)      os="" ;;
-esac
-case "$(uname -m)" in
-  arm64|aarch64) arch="arm64" ;;
-  x86_64|amd64)  arch="x64" ;;
-  *)             arch="" ;;
-esac
-if [ "$os" = "linux" ] && (ldd /bin/ls 2>/dev/null | grep -q musl); then
-  PLATFORM="${os}-${arch}-musl"
-else
-  PLATFORM="${os}-${arch}"
-fi
-
-# Pull the Bun standalone binary from the npm registry. Anthropic publishes
-# per-platform packages (e.g. claude-code-darwin-arm64); their tarball ships
-# the binary directly under package/.
-if [ -z "$NATIVE_BIN" ]; then
-  if ! command -v npm &>/dev/null; then
-    warn "No native Claude Code binary found locally, and npm is not installed."
-    warn "  Either install the official binary first:"
-    warn "    curl -fsSL https://claude.ai/install.sh | bash"
-    warn "  or install npm so we can fetch it from the registry."
-    exit 1
-  fi
-  if [ -z "$os" ] || [ -z "$arch" ]; then
-    warn "Unsupported platform: $(uname -s) $(uname -m)"
-    exit 1
-  fi
-  NPM_PKG="@anthropic-ai/claude-code-${PLATFORM}"
-  dim "Fetching $NPM_PKG@$VERSION from npm registry ..."
-  NATIVE_BIN_TMPDIR=$(mktemp -d)
-  if ( cd "$NATIVE_BIN_TMPDIR" && npm pack "$NPM_PKG@$VERSION" --silent >/dev/null 2>&1 ); then
-    TARBALL=$(ls "$NATIVE_BIN_TMPDIR"/*.tgz 2>/dev/null | head -1)
-    if [ -n "$TARBALL" ]; then
-      ( cd "$NATIVE_BIN_TMPDIR" && tar xzf "$TARBALL" )
-      cand="$NATIVE_BIN_TMPDIR/package/claude"
-      if [ -f "$cand" ]; then
-        sz=$(stat -f%z "$cand" 2>/dev/null || stat -c%s "$cand" 2>/dev/null || echo 0)
-        if [ "$sz" -gt 10000000 ]; then
-          NATIVE_BIN="$cand"
-          NATIVE_BIN_LABEL=$(node -e "console.log(require('$NATIVE_BIN_TMPDIR/package/package.json').version)" 2>/dev/null || echo "npm-latest")
-        fi
-      fi
-    fi
-  fi
-  if [ -z "$NATIVE_BIN" ]; then
-    rm -rf "$NATIVE_BIN_TMPDIR"
-    warn "Failed to download $NPM_PKG from npm."
-    warn "  Install the official Claude Code binary manually:"
-    warn "    curl -fsSL https://claude.ai/install.sh | bash"
-    exit 1
-  fi
-  info "Downloaded $NPM_PKG@$NATIVE_BIN_LABEL"
-fi
-
-if [ -z "$NATIVE_BIN" ]; then
-  warn "Native Claude Code binary not found"
-  warn "Install the official binary first:"
-  warn "  curl -fsSL https://claude.ai/install.sh | bash"
-  warn "Then re-run this script."
-  exit 1
-fi
-
-# ─── Snapshot existing installation for rollback on failure ──────────
-PREV_BACKUP_DIR=""
-ROLLBACK_FILES=(cli.original.cjs cli.original.cjs.bak cli.original.js .source-version
-  source-backup.json bunfs vendor pathmap.json extract-natives.mjs post-process.mjs
-  repatch.mjs openai-proxy.cjs feature-gates.cjs cli.cjs .clawgod-version
-  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs ast-patches.mjs acorn.mjs acorn.LICENSE)
-if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
-  PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
-  for f in "${ROLLBACK_FILES[@]}"; do
-    if [ -e "$CLAWGOD_DIR/$f" ]; then
-      cp -a "$CLAWGOD_DIR/$f" "$PREV_BACKUP_DIR/" || {
-        warn "Could not snapshot $f; installation was not changed."
-        rm -rf "$PREV_BACKUP_DIR"
-        exit 1
-      }
-    fi
-  done
-fi
-
-rollback_install() {
-  local status=$?
-  trap - EXIT
-  if [ "$status" -ne 0 ]; then
-    rm -f "$CLAWGOD_DIR/claude.staged"
-    if [ -n "$PREV_BACKUP_DIR" ]; then
-      dim "Rolling back to previous working installation ..."
-      for f in "${ROLLBACK_FILES[@]}"; do rm -rf "$CLAWGOD_DIR/$f"; done
-      if cp -a "$PREV_BACKUP_DIR"/. "$CLAWGOD_DIR/"; then
-        info "Restored previous working installation ($(cat "$CLAWGOD_DIR/.source-version"))."
-      else
-        warn "Rollback failed; backup kept at $PREV_BACKUP_DIR"
-        return
-      fi
-    fi
-  fi
-  [ -z "$PREV_BACKUP_DIR" ] || rm -rf "$PREV_BACKUP_DIR" || warn "Could not remove rollback snapshot at $PREV_BACKUP_DIR"
-}
-trap rollback_install EXIT
-
-# Write extractor (used both for cli.js and .node modules)
-cat > "$CLAWGOD_DIR/extract-natives.mjs" << 'EXTRACTOR_EOF'
-#!/usr/bin/env node
-/**
- * ClawGod Bun section extractor
- *
- * Parses the .bun (PE/ELF) or __BUN,__bun (Mach-O) section embedded in a
- * Bun standalone executable, walks the module graph, and extracts:
- *   - the entry-point module      → <out>/cli.original.js
- *   - every loader=napi module    → <out>/vendor/<name>/<arch>-<os>/<name>.node
- *
- * Everything else is dropped (e.g. auto-generated *.js napi shims aren't
- * needed because cli.js already inlines the require('/$bunfs/root/X.node')
- * calls that post-process.mjs rewrites to the vendor lookup).
- *
- * Adapted from /home/kaiju/code/python/parse-bun/main.js (which itself
- * implements the format documented in docs/bun-section-format.md). Lazy
- * Bun.file reads were replaced with readFileSync so the script runs under
- * the existing `node` invocation in install.sh / install.ps1.
- *
- * Usage:
- *   node extract-natives.mjs <binary-path> <output-dir>
- */
-
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, basename } from 'node:path';
-
-// ─── Format constants ────────────────────────────────────────────────
-
-const TRAILER             = Buffer.from('\n---- Bun! ----\n');
-const BUN_SECTION_NAME    = '.bun';
-const OFFSET_STRUCT_SIZE  = 32;
-const MODULE_RECORD_SIZE  = 52;
-
-// loader id → name (subset; only `napi` is acted on, rest informational)
-const LOADERS = {
-  0:'jsx', 1:'js', 2:'ts', 3:'tsx', 4:'css', 5:'file', 6:'json', 7:'jsonc',
-  8:'toml', 9:'wasm', 10:'napi', 11:'base64', 12:'dataurl', 13:'text',
-  14:'bunsh', 15:'sqlite', 16:'sqlite_embedded', 17:'html', 18:'yaml',
-  19:'json5', 20:'md',
-};
-
-// ELF
-const ELF_MAGIC_LE          = 0x464c457f; // "\x7fELF" LE u32
-const ELF_EI_CLASS          = 0x04;
-const ELF_EI_DATA           = 0x05;
-const ELF_CLASS_64          = 0x02;
-const ELF_DATA_LE           = 0x01;
-const ELF_E_MACHINE         = 0x12;       // u16
-const ELF_EHDR_SIZE         = 0x40;
-const ELF64_E_SHOFF         = 0x28;
-const ELF64_E_SHENTSIZE     = 0x3a;
-const ELF64_E_SHNUM         = 0x3c;
-const ELF64_E_SHSTRNDX      = 0x3e;
-const ELF64_SH_NAME         = 0x00;
-const ELF64_SH_OFFSET       = 0x18;
-const ELF64_SH_SIZE         = 0x20;
-const EM_X86_64             = 0x3e;
-const EM_AARCH64            = 0xb7;
-
-// Mach-O (thin LE 64-bit; fat / 32-bit / BE rejected with clear message)
-const MH_MAGIC_64           = 0xfeedfacf;
-const MH_CIGAM_64           = 0xcffaedfe;
-const MH_MAGIC              = 0xfeedface;
-const MH_CIGAM              = 0xcefaedfe;
-const MACH_CPUTYPE_OFF      = 0x04;        // u32
-const MACH_NCMDS_OFF        = 0x10;
-const MACH_SIZEOFCMDS_OFF   = 0x14;
-const MACH_HDR_SIZE_64      = 0x20;
-const LC_SEGMENT_64         = 0x19;
-const LC_CMDSIZE_OFF        = 0x04;
-const LC_SEGNAME_OFF        = 0x08;
-const LC_SEGNAME_LEN        = 0x10;
-const SEG64_NSECTS_OFF      = 0x40;
-const SEG64_SECTS_OFF       = 0x48;
-const SECT64_ENTRY_SIZE     = 0x50;
-const SECT64_SIZE_OFF       = 0x28;
-const SECT64_OFFSET_OFF     = 0x30;
-const CPU_TYPE_X86_64       = 0x01000007;
-const CPU_TYPE_ARM64        = 0x0100000c;
-
-// PE
-const PE_OFFSET_PTR         = 0x3c;
-const PE_MACHINE_OFF        = 0x04;       // relative to PE sig
-const PE_NUM_SECTIONS_OFF   = 0x06;
-const PE_OPT_HDR_SIZE_OFF   = 0x14;
-const PE_COFF_HDR_SIZE      = 0x18;
-const PE_OPT_MAGIC_OFF      = 0x18;
-const PE_OPT_MAGIC_PE32P    = 0x20b;
-const PE_SECTION_ENTRY_SIZE = 0x28;
-const PE_SECT_RAW_SIZE_OFF  = 0x10;
-const PE_SECT_RAW_OFF_OFF   = 0x14;
-const PE_SECT_NAME_LEN      = 0x08;
-const IMAGE_MACHINE_AMD64   = 0x8664;
-const IMAGE_MACHINE_ARM64   = 0xaa64;
-
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-function die(msg) { throw new Error(`error: ${msg}`); }
-
-function readU64LE(buf, off, what) {
-  const v = buf.readBigUInt64LE(off);
-  if (v > BigInt(Number.MAX_SAFE_INTEGER)) die(`${what} exceeds JS safe integer: ${v}`);
-  return Number(v);
-}
-
-function checkedSlice(buf, off, size, what) {
-  if (off < 0 || size < 0 || off + size > buf.length) {
-    die(`${what} out of bounds: offset=${off} size=${size} buf=${buf.length}`);
-  }
-  return buf.subarray(off, off + size);
-}
-
-function decodeName(buf) {
-  return buf.toString('utf8').replace(/\u0000+$/u, '');
-}
-
-// ─── Section locators (per format) ───────────────────────────────────
-
-function findSectionElf(buf) {
-  if (buf.length < ELF_EHDR_SIZE) die('ELF too small');
-  if (buf[ELF_EI_CLASS] !== ELF_CLASS_64) die('ELF: only 64-bit supported');
-  if (buf[ELF_EI_DATA]  !== ELF_DATA_LE) die('ELF: only little-endian supported');
-
-  const eMachine = buf.readUInt16LE(ELF_E_MACHINE);
-  const arch = eMachine === EM_X86_64  ? 'x64'
-             : eMachine === EM_AARCH64 ? 'arm64'
-             : die(`ELF: unsupported e_machine 0x${eMachine.toString(16)}`);
-
-  const shoff     = readU64LE(buf, ELF64_E_SHOFF, 'ELF e_shoff');
-  const shentsize = buf.readUInt16LE(ELF64_E_SHENTSIZE);
-  const shnum     = buf.readUInt16LE(ELF64_E_SHNUM);
-  const shstrndx  = buf.readUInt16LE(ELF64_E_SHSTRNDX);
-  if (shstrndx >= shnum) die('ELF e_shstrndx out of range');
-
-  const shstrEntry  = buf.subarray(shoff + shstrndx * shentsize, shoff + (shstrndx + 1) * shentsize);
-  const shstrOffset = readU64LE(shstrEntry, ELF64_SH_OFFSET, 'shstrtab offset');
-  const shstrSize   = readU64LE(shstrEntry, ELF64_SH_SIZE,   'shstrtab size');
-  const shstr       = checkedSlice(buf, shstrOffset, shstrSize, 'shstrtab');
-
-  let match = null;
-  for (let i = 0; i < shnum; i++) {
-    const entry   = buf.subarray(shoff + i * shentsize, shoff + (i + 1) * shentsize);
-    const nameIdx = entry.readUInt32LE(ELF64_SH_NAME);
-    if (nameIdx >= shstr.length) continue;
-    let nameEnd = nameIdx;
-    while (nameEnd < shstr.length && shstr[nameEnd] !== 0) nameEnd++;
-    if (shstr.toString('ascii', nameIdx, nameEnd) !== BUN_SECTION_NAME) continue;
-    if (match) die('ELF has multiple .bun sections');
-    const rawOffset = readU64LE(entry, ELF64_SH_OFFSET, '.bun sh_offset');
-    const rawSize   = readU64LE(entry, ELF64_SH_SIZE,   '.bun sh_size');
-    if (rawOffset + rawSize > buf.length) die('.bun out of file bounds');
-    match = { format: 'ELF', os: 'linux', arch, rawOffset, rawSize };
-  }
-  if (!match) die('ELF has no .bun section');
-  return match;
-}
-
-function findSectionMacho(buf) {
-  if (buf.length < MACH_HDR_SIZE_64) die('Mach-O too small');
-  const cputype = buf.readUInt32LE(MACH_CPUTYPE_OFF);
-  const arch = cputype === CPU_TYPE_X86_64 ? 'x64'
-             : cputype === CPU_TYPE_ARM64  ? 'arm64'
-             : die(`Mach-O: unsupported cputype 0x${cputype.toString(16)}`);
-
-  const ncmds      = buf.readUInt32LE(MACH_NCMDS_OFF);
-  const sizeofcmds = buf.readUInt32LE(MACH_SIZEOFCMDS_OFF);
-  if (sizeofcmds === 0 || MACH_HDR_SIZE_64 + sizeofcmds > buf.length) die('Mach-O sizeofcmds invalid');
-  const cmds = buf.subarray(MACH_HDR_SIZE_64, MACH_HDR_SIZE_64 + sizeofcmds);
-
-  let match = null;
-  let off = 0;
-  for (let i = 0; i < ncmds; i++) {
-    if (off + 8 > sizeofcmds) die(`Mach-O LC ${i} truncated`);
-    const cmd     = cmds.readUInt32LE(off);
-    const cmdsize = cmds.readUInt32LE(off + LC_CMDSIZE_OFF);
-    if (cmdsize < 8 || off + cmdsize > sizeofcmds) die(`Mach-O LC ${i} cmdsize invalid: ${cmdsize}`);
-    if (cmd === LC_SEGMENT_64) {
-      const segname = cmds.toString('ascii', off + LC_SEGNAME_OFF, off + LC_SEGNAME_OFF + LC_SEGNAME_LEN).replace(/\0+$/, '');
-      if (segname === '__BUN') {
-        const nsects = cmds.readUInt32LE(off + SEG64_NSECTS_OFF);
-        if (SEG64_SECTS_OFF + nsects * SECT64_ENTRY_SIZE > cmdsize) die(`Mach-O LC_SEGMENT_64(__BUN) sections exceed cmdsize`);
-        for (let j = 0; j < nsects; j++) {
-          const s = off + SEG64_SECTS_OFF + j * SECT64_ENTRY_SIZE;
-          const sectname = cmds.toString('ascii', s, s + LC_SEGNAME_LEN).replace(/\0+$/, '');
-          if (sectname === '__bun') {
-            const rawSize   = readU64LE(cmds, s + SECT64_SIZE_OFF, '__bun size');
-            const rawOffset = cmds.readUInt32LE(s + SECT64_OFFSET_OFF);
-            if (rawOffset + rawSize > buf.length) die('__bun out of file bounds');
-            if (match) die('Mach-O has multiple __BUN,__bun sections');
-            match = { format: 'Mach-O', os: 'darwin', arch, rawOffset, rawSize };
-          }
-        }
-      }
-    }
-    off += cmdsize;
-  }
-  if (!match) die('Mach-O has no __BUN,__bun section');
-  return match;
-}
-
-function findSectionPe(buf) {
-  if (buf.length < 0x40) die('PE too small');
-  if (buf.toString('ascii', 0, 2) !== 'MZ') die('PE missing MZ header');
-  const peOff = buf.readUInt32LE(PE_OFFSET_PTR);
-  if (buf.toString('ascii', peOff, peOff + 4) !== 'PE\0\0') die('PE missing PE signature');
-
-  const machine = buf.readUInt16LE(peOff + PE_MACHINE_OFF);
-  const arch = machine === IMAGE_MACHINE_AMD64 ? 'x64'
-             : machine === IMAGE_MACHINE_ARM64 ? 'arm64'
-             : die(`PE: unsupported machine 0x${machine.toString(16)}`);
-
-  const optMagic = buf.readUInt16LE(peOff + PE_OPT_MAGIC_OFF);
-  if (optMagic !== PE_OPT_MAGIC_PE32P) die(`PE: only 64-bit (PE32+) supported, got 0x${optMagic.toString(16)}`);
-
-  const numSect    = buf.readUInt16LE(peOff + PE_NUM_SECTIONS_OFF);
-  const optHdrSize = buf.readUInt16LE(peOff + PE_OPT_HDR_SIZE_OFF);
-  const sectTable  = peOff + PE_COFF_HDR_SIZE + optHdrSize;
-
-  let match = null;
-  for (let i = 0; i < numSect; i++) {
-    const entry  = sectTable + i * PE_SECTION_ENTRY_SIZE;
-    const rawNm  = buf.subarray(entry, entry + PE_SECT_NAME_LEN);
-    const nul    = rawNm.indexOf(0);
-    const name   = rawNm.subarray(0, nul === -1 ? rawNm.length : nul).toString('ascii');
-    if (name !== BUN_SECTION_NAME) continue;
-    if (match) die('PE has multiple .bun sections');
-    const rawSize   = buf.readUInt32LE(entry + PE_SECT_RAW_SIZE_OFF);
-    const rawOffset = buf.readUInt32LE(entry + PE_SECT_RAW_OFF_OFF);
-    if (rawOffset + rawSize > buf.length) die('.bun out of file bounds');
-    match = { format: 'PE', os: 'win32', arch, rawOffset, rawSize };
-  }
-  if (!match) die('PE has no .bun section');
-  return match;
-}
-
-function findBunSection(buf) {
-  if (buf.length < 4) die('file too small');
-  const magic = buf.readUInt32LE(0);
-  if (magic === ELF_MAGIC_LE)                       return findSectionElf(buf);
-  if (magic === MH_MAGIC_64)                        return findSectionMacho(buf);
-  if (magic === MH_CIGAM_64 || magic === MH_CIGAM)  die('Mach-O: only little-endian supported');
-  if (magic === MH_MAGIC)                           die('Mach-O: only 64-bit supported');
-  return findSectionPe(buf);
-}
-
-// ─── Payload + module records ────────────────────────────────────────
-
-function parsePayload(sectionData) {
-  if (sectionData.length < 8) die('.bun too small for length prefix');
-  const payloadSize = readU64LE(sectionData, 0, '.bun payload length');
-  if (payloadSize + 8 > sectionData.length) die('.bun payload exceeds raw section');
-  const payload = sectionData.subarray(8, 8 + payloadSize);
-  if (payload.length < OFFSET_STRUCT_SIZE + TRAILER.length) die('.bun payload too small');
-  if (!payload.subarray(payload.length - TRAILER.length).equals(TRAILER)) die('.bun trailer mismatch');
-  return payload;
-}
-
-function parseOffsets(payload) {
-  const start = payload.length - TRAILER.length - OFFSET_STRUCT_SIZE;
-  return {
-    modules_offset: payload.readUInt32LE(start + 8),
-    modules_size:   payload.readUInt32LE(start + 12),
-    entry_point_id: payload.readUInt32LE(start + 16),
-  };
-}
-
-function parseModules(payload, offsets) {
-  if (offsets.modules_size % MODULE_RECORD_SIZE !== 0) {
-    die(`modules table size not a multiple of ${MODULE_RECORD_SIZE}: ${offsets.modules_size}`);
-  }
-  const count = offsets.modules_size / MODULE_RECORD_SIZE;
-  if (offsets.entry_point_id >= count) die(`entry_point_id ${offsets.entry_point_id} >= ${count}`);
-  const table = checkedSlice(payload, offsets.modules_offset, offsets.modules_size, 'modules table');
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const rec        = table.subarray(i * MODULE_RECORD_SIZE, (i + 1) * MODULE_RECORD_SIZE);
-    const nameOff    = rec.readUInt32LE(0);
-    const nameSize   = rec.readUInt32LE(4);
-    const contentOff = rec.readUInt32LE(8);
-    const contentSize= rec.readUInt32LE(12);
-    const loaderId   = rec.readUInt8(49);
-    const name = decodeName(checkedSlice(payload, nameOff, nameSize, `module[${i}].name`));
-    const content = checkedSlice(payload, contentOff, contentSize, `module[${i}].content`);
-    out.push({
-      index: i,
-      entry: i === offsets.entry_point_id,
-      name,
-      content,
-      loader: LOADERS[loaderId] ?? `unknown(${loaderId})`,
-    });
-  }
-  return out;
-}
-
-// ─── Output dispatch ─────────────────────────────────────────────────
-
-function napiBasename(name) {
-  // Bun records may use either '/' (POSIX builds) or '\\' (PE) as separator;
-  // always normalize so basename grabs the right tail.
-  const flat = name.replaceAll('\\', '/');
-  const tail = flat.split('/').pop() ?? '';
-  return tail.replace(/\.node$/i, '');
-}
-
-// ─── Main ────────────────────────────────────────────────────────────
-
-function main() {
-  const [,, binaryPath, outputDir] = process.argv;
-  if (!binaryPath || !outputDir) {
-    console.error('Usage: extract-natives.mjs <binary-path> <output-dir>');
-    process.exit(1);
-  }
-  if (!existsSync(binaryPath)) {
-    console.error(`Binary not found: ${binaryPath}`);
-    process.exit(1);
-  }
-
-  const buf = readFileSync(binaryPath);
-  console.log(`Size:    ${(buf.length / 1024 / 1024).toFixed(1)} MB`);
-
-  const section = findBunSection(buf);
-  console.log(`Format:  ${section.format} (${section.arch}-${section.os})`);
-
-  const sectionData = checkedSlice(buf, section.rawOffset, section.rawSize, '.bun section');
-  const payload     = parsePayload(sectionData);
-  const offsets     = parseOffsets(payload);
-  const modules     = parseModules(payload, offsets);
-  console.log(`Modules: ${modules.length} (entry id=${offsets.entry_point_id})`);
-
-  mkdirSync(outputDir, { recursive: true });
-
-  const entryMod = modules.find((m) => m.entry);
-  const entryText = entryMod ? entryMod.content.toString('utf8') : '';
-  // v2.1.245+ splits the app into an ESM chunk graph: the entry is a small
-  // ~20KB ESM module static-importing sibling chunk modules + a handful of
-  // boot modules, with lazy import() of chunk-*.js. The ~1400 remaining js
-  // records and ~170 text/file assets must all be kept on disk as flat
-  // siblings, or the entry throws "Cannot find module".
-  // Bun mounts the app bundle at "/$bunfs/root" on POSIX builds and at
-  // "B:/~BUN/root" on single-drive Windows builds (both are virtual
-  // in-bundle roots, differ only by the drive-letter prefix).
-  const BUN_MOUNT_RE = /^(?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\//;
-  const bunSub = (name) => {
-    const n = name.replaceAll('\\', '/');
-    const mm = n.match(BUN_MOUNT_RE);
-    return mm ? n.slice(mm[0].length) : null;
-  };
-  const isChunked = !!entryMod &&
-    !entryText.includes('(function(exports, require, module') &&
-    (entryText.includes('import{') || BUN_MOUNT_RE.test(entryText));
-
-  // When chunked, also extract every non-napi module to a flat dir so the
-  // ESM graph resolves. We flatten <mount>/sub/path → sub__path and keep
-  // napi under vendor/. We postpone path rewriting to post-process.mjs
-  // (which knows the final install dir).
-  const platDir = `${section.arch}-${section.os}`;
-  const graphDir = join(outputDir, 'bunfs');
-
-  let cliCount = 0, napiCount = 0, dropped = 0;
-  const napiNames = new Set();
-  for (const m of modules) {
-    if (m.entry) {
-      const out = join(outputDir, 'cli.original.js');
-      writeFileSync(out, m.content);
-      console.log(`  cli.js   ${(m.content.length / 1024 / 1024).toFixed(2)} MB → ${out} (${m.name})`);
-      cliCount++;
-    } else if (m.loader === 'napi') {
-      const base = napiBasename(m.name);
-      if (!base) { console.warn(`  skip napi ${m.name}: empty basename`); dropped++; continue; }
-      const dir = join(outputDir, 'vendor', base, platDir);
-      mkdirSync(dir, { recursive: true });
-      const out = join(dir, `${base}.node`);
-      writeFileSync(out, m.content);
-      console.log(`  napi     ${(m.content.length / 1024).toFixed(0).padStart(5)} KB → ${out}`);
-      napiCount++;
-      napiNames.add(m.name.replaceAll('\\', '/'));
-    } else if (isChunked && bunSub(m.name)) {
-      // js chunk / text asset / file asset: write to flat graph dir so Bun
-      // can resolve the rewritten /$bunfs/root/ (POSIX) or B:/~BUN/root/
-      // (Windows single-drive) specifiers.
-      const sub = bunSub(m.name);
-      if (!sub) { dropped++; continue; }
-      const flat = sub.replace(/\//g, '__');
-      mkdirSync(graphDir, { recursive: true });
-      writeFileSync(join(graphDir, flat), m.content);
-      console.log(`  chunk    ${(m.content.length / 1024).toFixed(0).padStart(6)} KB → bunfs/${flat}`);
-      dropped++;  // count as dropped-from-entry (informational)
-    } else {
-      dropped++;
-    }
-  }
-  console.log(`Extracted: ${cliCount} cli.js + ${napiCount} napi + ${isChunked ? 'chunk-graph' : 'dropped'} (${dropped} other)`);
-  console.log(`  bunfs graph: ${isChunked ? 'yes (' + platDir + ')' : 'no (legacy single-bundle)'}`);
-  if (cliCount !== 1) {
-    console.error(`error: expected exactly 1 entry-point, got ${cliCount}`);
-    process.exit(2);
-  }
-  if (isChunked) {
-    // Write a path-map JSON so post-process.mjs can rewrite every
-    // /$bunfs/root/X or B:/~BUN/root/X string literal to the on-disk
-    // absolute path.
-    const pathMap = {};
-    for (const m of modules) {
-      const normName = m.name.replaceAll('\\', '/');
-      if (!BUN_MOUNT_RE.test(normName)) continue;
-      const sub = normName.replace(BUN_MOUNT_RE, '');
-      if (!sub) continue;
-      if (m.loader === 'napi') {
-        const base = napiBasename(m.name);
-        pathMap[normName] = `vendor/${base}/${platDir}/${base}.node`;
-      } else {
-        pathMap[normName] = `bunfs/${sub.replace(/\//g, '__')}`;
-      }
-    }
-    writeFileSync(join(outputDir, 'pathmap.json'), JSON.stringify(pathMap, null, 0) + '\n');
-    console.log(`Graph chunks: ${modules.filter((m) => m.loader === 'js').length} js + napi in vendor/`);
-  }
-}
-
-main();
-EXTRACTOR_EOF
-
-# ─── Extract cli.js + native modules from Bun binary ──────────
-# Note: extract-natives.mjs and post-process.mjs are kept around (NOT deleted)
-# so the wrapper's drift detector can re-run them when the user upgrades
-# their native Claude binary.
-
-# Single extractor pass: writes cli.original.js + (v2.1.245+) full chunk graph
-# to $CLAWGOD_DIR/bunfs/ and vendor/<name>/<arch>-<os>/<name>.node, plus a
-# pathmap.json for post-process path rewriting.
-rm -rf "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bunfs" "$CLAWGOD_DIR/pathmap.json" \
-  "$CLAWGOD_DIR/cli.original.js" 2>/dev/null
-
-dim "Extracting cli.js + modules from $(echo "$NATIVE_BIN_LABEL") ..."
-node "$CLAWGOD_DIR/extract-natives.mjs" "$NATIVE_BIN" "$CLAWGOD_DIR" 2>&1 | while IFS= read -r line; do echo "  $line"; done
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-  err "Failed to extract from native binary"
-  exit 1
-fi
-[ -f "$CLAWGOD_DIR/cli.original.js" ] || { err "cli.js missing after extraction"; exit 1; }
-
-# ─── Post-process cli.js for Bun runtime ──────────────────────
-# 0. Strip leading @bun pragma comments so Bun recognises the CJS wrapper
-# 1. Rewrite /$bunfs/root/X.node paths to point at extracted vendor modules
-# 2. Rewrite build-time /home/runner/.../*.ts URLs (used by ripgrep,
-#    sandbox, computer-use, etc. for asset resolution) to __filename so
-#    relative resolutions land near our cli.original.cjs
-# 3. Wrap the Bun-cjs IIFE with an actual invocation so `require()` runs it
-# 4. Save as .cjs (Bun + CJS module wrapper)
-
-dim "Rewriting bunfs paths and IIFE invocation ..."
-cat > "$CLAWGOD_DIR/post-process.mjs" << 'POSTPROC_EOF'
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, realpathSync } from 'fs';
-import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
-
-// Generate paths in the OS's canonical form, including Windows 8.3 aliases.
-const here = realpathSync.native(dirname(fileURLToPath(import.meta.url)));
-const src = `${here}/cli.original.js`;
-const dst = `${here}/cli.original.cjs`;
-const pathMapFile = `${here}/pathmap.json`;
-
-let code = readFileSync(src, 'utf8');
-
-// v2.1.245+ splits the app into an ESM chunk graph; post-process then
-// rewrites the whole bunfs/ dir too. Legacy single-bundle has no pathmap.
-const isChunked = existsSync(pathMapFile);
-
-// (0) Strip leading @bun pragma comments (e.g. "// @bun @bytecode @bun-cjs\n")
-// Bun requires the file to start directly with "(function" (CJS) or the
-// first import (ESM) — any preceding comment breaks that detection.
-function stripPragma(c) { return c.replace(/^(?:\/\/[^\n]*\n)+/, ''); }
-
-// build-time fileURLToPath() leaks → use cli.cjs's own __filename
-function fixFileURLs(c) {
-  return c.replace(
-    /[\w$]+\.fileURLToPath\("file:\/\/\/home\/runner\/work\/claude-cli-internal\/claude-cli-internal\/[^"]*"\)/g,
-    () => '__filename',
-  );
-}
-
-// Embedded text requires return strings in the native bundle. Bun's disk
-// loader returns a module namespace, so read extracted text assets as UTF-8.
-function fixTextRequires(c) {
-  const textRoot = JSON.stringify(join(here, 'bunfs'));
-  return c.replace(/\b([\w$]+)=import\.meta\.require(?=[,;])/g, (_match, name) =>
-    `${name} = (id) => {
-      if (/\\.(?:txt|md)$/.test(id)) {
-        const fs = import.meta.require('node:fs');
-        const path = import.meta.require('node:path');
-        const relative = path.relative(fs.realpathSync(${textRoot}), fs.realpathSync(id));
-        if (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) {
-          return fs.readFileSync(id, 'utf8');
-        }
-      }
-      return import.meta.require(id);
-    }`,
-  );
-}
-
-if (isChunked) {
-  // ── v2.1.245+ ESM chunk graph path ──
-  const pathMap = JSON.parse(readFileSync(pathMapFile, 'utf8'));
-  // build the replace table: /$bunfs/root/X → <here>/<relative-on-disk>
-  const replaceTable = new Map();
-  for (const [bunPath, rel] of Object.entries(pathMap)) {
-    replaceTable.set(bunPath, join(here, rel));
-  }
-
-  function rewriteGraph(text) {
-    // Replace string literals containing the virtual in-bundle root
-    // (POSIX "/$bunfs/root/..." or Windows single-drive "B:/~BUN/root/...")
-    // with the on-disk absolute path from the replace table.
-    return text.replace(/["'`](?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\/[^"'`]+["'`]/g, (m) => {
-      const body = m.slice(1, -1);
-      const target = replaceTable.get(body) || replaceTable.get(body.replaceAll('\\','/'));
-      // JSON.stringify emits a valid JS string literal. This is essential on
-      // Windows, where path.join() returns backslashes that would otherwise be
-      // interpreted as escapes (for example, \b in "\bunfs").
-      return target ? JSON.stringify(target) : m;
-    });
-  }
-
-  // entry → cli.original.cjs (ESM, no IIFE wrap)
-  code = stripPragma(code);
-  code = rewriteGraph(code);
-  code = fixFileURLs(code);
-  code = fixTextRequires(code);
-  writeFileSync(dst, code);
-  unlinkSync(src);
-
-  // rewrite every chunk/asset file in bunfs/ in place
-  const bunfsDir = join(here, 'bunfs');
-  let n = 0;
-  for (const f of readdirSync(bunfsDir)) {
-    if (!f.endsWith('.js') && !f.endsWith('.mjs')) continue;
-    const fp = join(bunfsDir, f);
-    let fc = readFileSync(fp, 'utf8');
-    fc = stripPragma(fc);
-    fc = rewriteGraph(fc);
-    fc = fixFileURLs(fc);
-    fc = fixTextRequires(fc);
-    writeFileSync(fp, fc);
-    n++;
-  }
-  console.log(`cli.original.cjs: ${code.length} bytes (chunked, rewrote ${n} graph files)`);
-} else {
-  // ── Legacy single-bundle path ──
-  code = stripPragma(code);
-
-  // (1) bunfs .node module paths → runtime vendor lookup
-  code = code.replace(
-    /require\(['"](\/\$bunfs\/root\/([\w-]+)\.node)['"]\)/g,
-    (m, _full, name) =>
-      `require(require('path').join(__dirname,'vendor',${JSON.stringify(name)},\`\${process.arch==='arm64'?'arm64':'x64'}-\${process.platform==='darwin'?'darwin':process.platform==='linux'?'linux':'win32'}\`,${JSON.stringify(name + '.node')}))`,
-  );
-
-  code = fixFileURLs(code);
-
-  // (3) make the outer (function(...){...}) actually run
-  code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirname)');
-
-  writeFileSync(dst, code);
-  unlinkSync(src);
-  console.log(`cli.original.cjs: ${code.length} bytes`);
-}
-POSTPROC_EOF
-node "$CLAWGOD_DIR/post-process.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then err "Post-process failed"; exit 1; fi
-[ -f "$CLAWGOD_DIR/cli.original.cjs" ] || { err "Post-process failed"; exit 1; }
-
-# Stamp the source version so the wrapper can detect drift on next launch
-echo "$NATIVE_BIN_LABEL" > "$CLAWGOD_DIR/.source-version"
-
-# Keep the binary we just extracted from. cli.cjs points process.execPath at
-# claude.orig, so everything Claude re-spawns from execPath (daemon, background
-# and forked sessions) runs that file, not the patched bundle. The launcher
-# section below swaps it in once it knows where claude lives.
-if [ -f "$NATIVE_BIN" ]; then
-  mv -f "$NATIVE_BIN" "$CLAWGOD_DIR/claude.staged"
-fi
-
-# If we pulled the binary from npm into a tmpdir, clean it up now —
-# extraction is done, drift detection only consults ~/.local/share/claude/versions/.
-if [ -n "$NATIVE_BIN_TMPDIR" ]; then
-  rm -rf "$NATIVE_BIN_TMPDIR"
-fi
-
-info "cli.original.cjs ready ($NATIVE_BIN_LABEL)"
-
-fi  # end --no-upgrade skip
-
-# A failed earlier upgrade may have left a newer native binary staged.
-# Re-patching the installed source must not install that different version.
-if [ "$NO_UPGRADE" = "1" ]; then rm -f "$CLAWGOD_DIR/claude.staged"; fi
-
-# ─── Write re-patch helper (used by wrapper on version drift) ─────────
-
-cat > "$CLAWGOD_DIR/repatch.mjs" << 'REPATCH_EOF'
-#!/usr/bin/env bun
-// Re-extract + post-process + patch the user's currently-installed
-// native Claude binary. Invoked by cli.cjs when it detects that
-// .source-version no longer matches the latest binary in versions/.
-import { spawnSync } from 'child_process';
-import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
-import { dirname, join, basename } from 'path';
-import { fileURLToPath } from 'url';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const nativeBin = process.argv[2];
-
-if (!nativeBin || !existsSync(nativeBin)) {
-  console.error('repatch: native binary path required and must exist');
-  process.exit(1);
-}
-
-rmSync(join(here, 'vendor'), { recursive: true, force: true });
-rmSync(join(here, 'bunfs'), { recursive: true, force: true });
-rmSync(join(here, 'pathmap.json'), { force: true });
-rmSync(join(here, 'cli.original.js'), { force: true });
-
-const runtime = process.execPath;
-
-function run(label, args) {
-  const r = spawnSync(runtime, args, { cwd: here, stdio: 'inherit' });
-  if (r.status !== 0) {
-    console.error(`repatch: ${label} failed (exit ${r.status})`);
-    process.exit(1);
-  }
-}
-
-const extractor = join(here, 'extract-natives.mjs');
-const postProc = join(here, 'post-process.mjs');
-const patcher = join(here, 'patch.mjs');
-
-run('extract', [extractor, nativeBin, here]);
-run('post-process', [postProc]);
-run('clean source backup', [patcher, '--capture-clean-source']);
-run('patcher', [patcher]);
-
-writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
-console.log(`[clawgod] re-patched to ${basename(nativeBin)}`);
-REPATCH_EOF
-chmod +x "$CLAWGOD_DIR/repatch.mjs"
-info "Re-patch helper installed (repatch.mjs)"
-
-# ─── Write OpenAI-compatible proxy ────────────────────────────
-
-cat > "$CLAWGOD_DIR/openai-proxy.cjs" << 'PROXY_EOF'
-'use strict';
-// Anthropic Messages API <-> OpenAI Chat Completions API translation proxy
-// Allows Claude Code to use xAI/Grok and other OpenAI-compatible APIs
-
-function textParts(content, context) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) throw new Error(context + ' must be text or content blocks');
-  return content.map(function (block) {
-    if (block.type !== 'text') throw new Error(context + ': unsupported block ' + block.type);
-    return textValue(block.text);
-  }).join('\n');
-}
-
-function textValue(value) {
-  if (typeof value !== 'string') throw new Error('Text content must be a string');
-  return value;
-}
-
-function userPart(block) {
-  if (block.type === 'text') return { type: 'text', text: textValue(block.text) };
-  var source = block.source || {};
-  if (block.type === 'image') {
-    if (source.type === 'base64' && source.data && /^image\//.test(source.media_type))
-      return { type: 'image_url', image_url: { url: 'data:' + source.media_type + ';base64,' + source.data } };
-    if (source.type === 'url' && source.url) return { type: 'image_url', image_url: { url: source.url } };
-    throw new Error('Unsupported image source');
-  }
-  if (block.type === 'document') {
-    if (block.citations && block.citations.enabled) throw new Error('Document citations are not supported by openai-chat');
-    if (source.type === 'text') return { type: 'text', text: textValue(source.data) };
-    if (source.type === 'base64' && source.media_type === 'application/pdf' && source.data)
-      return { type: 'file', file: { filename: block.title || 'document.pdf', file_data: 'data:application/pdf;base64,' + source.data } };
-    throw new Error('Unsupported document source; use base64 PDF (requires upstream file support) or text');
-  }
-  throw new Error('Unsupported user content block: ' + block.type);
-}
-
-function translateMessages(msgs) {
-  if (!Array.isArray(msgs)) throw new Error('messages must be an array');
-  var out = [];
-  for (var msg of msgs) {
-    // Some clients supply system instructions inside the conversation rather
-    // than only in body.system. Chat Completions supports these directly;
-    // retain their position and never silently discard instruction content.
-    if (msg.role === 'system') {
-      out.push({ role: 'system', content: textParts(msg.content, 'System message') });
-      continue;
-    }
-    if (msg.role !== 'user' && msg.role !== 'assistant') throw new Error('Unsupported message role: ' + msg.role);
-    if (typeof msg.content === 'string') { out.push({ role: msg.role, content: msg.content }); continue; }
-    if (!Array.isArray(msg.content)) throw new Error('Message content must be text or content blocks');
-    if (msg.role === 'user') {
-      var parts = [];
-      for (var block of msg.content) {
-        if (block.type === 'tool_result') {
-          var text = block.content === undefined ? '' : textParts(block.content, 'Tool result');
-          out.push({ role: 'tool', tool_call_id: block.tool_use_id, content: (block.is_error ? '[ERROR] ' : '') + text });
-        } else parts.push(userPart(block));
-      }
-      // All tool results must precede the next user turn (including parallel calls).
-      if (parts.length) out.push({ role: 'user', content: parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts });
-    } else {
-      var textContent = '', toolCalls = [];
-      for (var b of msg.content) {
-        if (b.type === 'text') textContent += textValue(b.text);
-        else if (b.type === 'tool_use') toolCalls.push({ id: b.id, type: 'function', function: { name: b.name, arguments: typeof b.input === 'string' ? b.input : JSON.stringify(b.input) } });
-        // Anthropic thinking signatures cannot be replayed to Chat Completions.
-        else if (b.type !== 'thinking' && b.type !== 'redacted_thinking') throw new Error('Unsupported assistant content block: ' + b.type);
-      }
-      var assistantMsg = { role: 'assistant', content: textContent || null };
-      if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
-      out.push(assistantMsg);
-    }
-  }
-  return out;
-}
-
-function translateRequest(body, configuredEffort) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Request must be an object');
-  var messages = body.system ? [{ role: 'system', content: textParts(body.system, 'System prompt') }] : [];
-  var result = { model: body.model, messages: messages.concat(translateMessages(body.messages || [])), stream: !!body.stream };
-  if (body.max_tokens !== undefined) result.max_tokens = body.max_tokens;
-  if (body.temperature !== undefined) result.temperature = body.temperature;
-  if (body.top_p !== undefined) result.top_p = body.top_p;
-  if (body.stop_sequences) result.stop = body.stop_sequences;
-  var effort = configuredEffort || (body.output_config && body.output_config.effort);
-  if (effort && effort !== 'auto') result.reasoning_effort = effort === 'max' ? 'xhigh' : effort;
-  if (body.tools && body.tools.length) result.tools = body.tools.map(function (tool) {
-    if (tool.type && tool.type !== 'custom') throw new Error('Unsupported tool type: ' + tool.type);
-    return { type: 'function', function: { name: tool.name, description: tool.description || '', parameters: tool.input_schema || { type: 'object', properties: {} } } };
-  });
-  if (body.tool_choice) {
-    var choice = body.tool_choice;
-    if (choice.type === 'tool' && choice.name) result.tool_choice = { type: 'function', function: { name: choice.name } };
-    else if (choice.type === 'any') result.tool_choice = 'required';
-    else if (choice.type === 'auto' || choice.type === 'none') result.tool_choice = choice.type;
-    else throw new Error('Unsupported tool_choice');
-    if (choice.disable_parallel_tool_use !== undefined) result.parallel_tool_calls = !choice.disable_parallel_tool_use;
-  }
-  if (body.output_config && body.output_config.format) throw new Error('Structured output format is not supported by openai-chat');
-  if (body.stream) result.stream_options = { include_usage: true };
-  // Build only protocol fields; never recursively strip keys from user tool data/schema.
-  return result;
-}
-
-// Deliberately local and approximate: text UTF-8 bytes / 3, image budget 1600,
-// PDF decoded bytes / 3. Binary size is not a tokenizer or a PDF page count.
-function estimateTokens(request) {
-  var bytes = 0, mediaTokens = 0;
-  function visit(value) {
-    if (typeof value === 'string') bytes += new TextEncoder().encode(value).length;
-    else if (Array.isArray(value)) value.forEach(visit);
-    else if (value && typeof value === 'object') {
-      if (value.type === 'image_url' && value.image_url) { mediaTokens += 1600; return; }
-      if (value.type === 'file' && value.file && typeof value.file.file_data === 'string' && value.file.file_data.startsWith('data:application/pdf;base64,')) {
-        mediaTokens += Math.ceil(value.file.file_data.split(',')[1].length / 4); return;
-      }
-      for (var key of Object.keys(value)) { bytes += key.length; visit(value[key]); }
-    }
-  }
-  visit(request.messages);
-  visit(request.tools);
-  return Math.max(1, Math.ceil(bytes / 3) + mediaTokens + request.messages.length * 4);
-}
-
-function mapFinishReason(reason, hasToolCalls) {
-  // Some compatible providers use stop even when they return tool_calls.
-  // Keep truncation/refusal distinct, but do not hide a completed tool turn.
-  if (reason === 'tool_calls' || (reason === 'stop' && hasToolCalls)) return 'tool_use';
-  if (reason === 'length') return 'max_tokens';
-  if (reason === 'content_filter') return 'refusal';
-  // Chat's stop does not distinguish natural stops from stop sequences.
-  if (reason === 'stop') return 'end_turn';
-  throw new Error('Unsupported upstream finish_reason: ' + reason);
-}
-
-function toolInput(argumentsText) {
-  var input = JSON.parse(argumentsText || '{}');
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Tool arguments must be a JSON object');
-  return input;
-}
-
-function usageOf(usage) {
-  return { input_tokens: (usage && usage.prompt_tokens) || 0, output_tokens: (usage && usage.completion_tokens) || 0 };
-}
-
-function translateResponse(response, model) {
-  if (response.error) throw new Error(response.error.message || 'Upstream API error');
-  var choice = response.choices && response.choices[0];
-  if (!choice || !choice.message || typeof choice.message !== 'object') throw new Error('No message in upstream response');
-  var content = [], message = choice.message;
-  if (message.content !== undefined && message.content !== null) content.push({ type: 'text', text: textValue(message.content) });
-  if (message.refusal) content.push({ type: 'text', text: textValue(message.refusal) });
-  for (var tc of message.tool_calls || []) {
-    if (!tc.id || !tc.function || !tc.function.name) throw new Error('Incomplete upstream tool call');
-    content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: toolInput(tc.function.arguments) });
-  }
-  return { id: response.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: content, model: model || response.model, stop_reason: mapFinishReason(choice.finish_reason, content.some(function (b) { return b.type === 'tool_use'; })), stop_sequence: null, usage: usageOf(response.usage) };
-}
-
-function sse(event, data) { return 'event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n'; }
-
-function createStreamTranslator(model) {
-  var started = false, finished = false, stopped = false, textIndex = null, nextIndex = 0;
-  var tools = new Map(), usage = usageOf(), reason;
-  return function (chunk) {
-    if (stopped) throw new Error('Data after stream end');
-    var events = [];
-    function emit(type, fields) { events.push(sse(type, { type: type, ...fields })); }
-    if (chunk === null) {
-      if (!finished) throw new Error('Upstream stream ended before finish_reason');
-      stopped = true;
-      emit('message_delta', { delta: { stop_reason: reason, stop_sequence: null }, usage: usage });
-      emit('message_stop', {});
-      return events;
-    }
-    if (chunk.error) throw new Error(chunk.error.message || 'Upstream stream error');
-    if (chunk.usage) usage = usageOf(chunk.usage);
-    var choice = chunk.choices && chunk.choices.find(function (c) { return c.index === undefined || c.index === 0; });
-    if (!choice) {
-      if (!Array.isArray(chunk.choices)) throw new Error('Invalid upstream stream chunk');
-      return events;
-    }
-    if (finished) throw new Error('Completion data after finish_reason');
-    if (!started) {
-      started = true;
-      emit('message_start', { message: { id: chunk.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: [], model: model || chunk.model, stop_reason: null, stop_sequence: null, usage: usage } });
-    }
-    var delta = choice.delta || {};
-    var text = delta.content || delta.refusal;
-    if (text) {
-      textValue(text);
-      if (textIndex === null) { textIndex = nextIndex++; emit('content_block_start', { index: textIndex, content_block: { type: 'text', text: '' } }); }
-      emit('content_block_delta', { index: textIndex, delta: { type: 'text_delta', text: text } });
-    }
-    for (var tc of delta.tool_calls || []) {
-      if (!Number.isInteger(tc.index) || tc.index < 0) throw new Error('Invalid upstream tool index');
-      if (!tools.has(tc.index)) tools.set(tc.index, { id: '', name: '', args: '' });
-      var buf = tools.get(tc.index);
-      if (tc.id) buf.id += tc.id;
-      if (tc.function) { buf.name += tc.function.name || ''; buf.args += tc.function.arguments || ''; }
-    }
-    if (choice.finish_reason) {
-      reason = mapFinishReason(choice.finish_reason, tools.size > 0);
-      if (textIndex !== null) emit('content_block_stop', { index: textIndex });
-      // Buffer tools until complete so fragmented metadata and parallel calls
-      // produce valid, sequential Anthropic content blocks with validated JSON.
-      for (var tool of tools.values()) {
-        if (!tool.id || !tool.name) throw new Error('Incomplete upstream tool call');
-        toolInput(tool.args);
-        var index = nextIndex++;
-        emit('content_block_start', { index: index, content_block: { type: 'tool_use', id: tool.id, name: tool.name, input: {} } });
-        emit('content_block_delta', { index: index, delta: { type: 'input_json_delta', partial_json: tool.args || '{}' } });
-        emit('content_block_stop', { index: index });
-      }
-      finished = true;
-    }
-    return events;
-  };
-}
-
-// Parse complete SSE events, independent of transport chunk / UTF-8 boundaries.
-async function* translateStream(reader, model) {
-  var decoder = new TextDecoder(), buffer = '', data = [], translate = createStreamTranslator(model);
-  function payload(line) {
-    if (line === '') { var result = data.length ? data.join('\n') : undefined; data = []; return result; }
-    if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
-  }
-  while (true) {
-    var read = await reader.read();
-    buffer += read.done ? decoder.decode() : decoder.decode(read.value, { stream: true });
-    if (read.done && buffer && !/[\r\n]$/.test(buffer)) buffer += '\n';
-    var match;
-    while ((match = /[\r\n]/.exec(buffer))) {
-      var offset = match.index;
-      if (!read.done && buffer[offset] === '\r' && offset === buffer.length - 1) break;
-      var line = buffer.slice(0, offset);
-      buffer = buffer.slice(offset + (buffer.slice(offset, offset + 2) === '\r\n' ? 2 : 1));
-      var value = payload(line);
-      if (value === undefined) continue;
-      if (value === '[DONE]') { yield* translate(null); return; }
-      yield* translate(JSON.parse(value));
-    }
-    if (read.done) {
-      if (data.length) {
-        var tail = data.join('\n');
-        if (tail !== '[DONE]') yield* translate(JSON.parse(tail));
-      }
-      yield* translate(null);
-      return;
-    }
-  }
-}
-
-function json(body, status, headers) {
-  return new Response(JSON.stringify(body), { status: status || 200, headers: { 'Content-Type': 'application/json', ...headers } });
-}
-function errorResponse(status, message) {
-  var types = { 400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_error', 404: 'not_found_error', 429: 'rate_limit_error' };
-  return json({ type: 'error', error: { type: types[status] || 'api_error', message: message } }, status);
-}
-
-function startProxy(config) {
-  var upstreamURL = new URL(config.baseURL || 'https://api.x.ai/v1');
-  if (!['http:', 'https:'].includes(upstreamURL.protocol) || upstreamURL.username || upstreamURL.password || upstreamURL.search || upstreamURL.hash)
-    throw new Error('OpenAI baseURL must be an HTTP(S) API base without credentials, query, or fragment');
-  upstreamURL.pathname = upstreamURL.pathname.replace(/\/+$/, '') + '/chat/completions';
-  var server = Bun.serve({
-    port: 0, hostname: '127.0.0.1', idleTimeout: 255,
-    fetch: async function (req) {
-      var path = new URL(req.url).pathname;
-      if (req.method === 'GET' && path === '/health') return new Response('ok');
-      var count = path === '/v1/messages/count_tokens' || path === '/messages/count_tokens';
-      if (req.method !== 'POST' || (!count && path !== '/v1/messages' && path !== '/messages')) return errorResponse(404, 'Not found');
-      var body, request;
-      try {
-        body = await req.json();
-        request = translateRequest(body, config.effort);
-        request.model = body.model || config.model || '';
-      } catch (e) { return errorResponse(400, 'Translation error: ' + e.message); }
-      if (count) return json({ input_tokens: estimateTokens(request) }, 200, { 'x-clawgod-token-count': 'estimate' });
-
-      var abort = new AbortController();
-      var onAbort = function () { abort.abort(req.signal.reason); };
-      req.signal.addEventListener('abort', onAbort, { once: true });
-      if (req.signal.aborted) onAbort();
-      var timeout = Number(config.timeoutMs) || 3000000;
-      var timer = setTimeout(function () { abort.abort(new Error('Upstream request timed out')); }, timeout);
-      if (timer.unref) timer.unref();
-      function cleanup() { clearTimeout(timer); req.signal.removeEventListener('abort', onAbort); }
-      var upstream;
-      try {
-        upstream = await fetch(upstreamURL.href, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + config.apiKey }, body: JSON.stringify(request), signal: abort.signal });
-        if (!upstream.ok) {
-          var errText = await upstream.text(), errBody;
-          try { errBody = JSON.parse(errText); } catch {}
-          var response = errorResponse(upstream.status, (errBody && errBody.error && errBody.error.message) || errText || ('HTTP ' + upstream.status));
-          var retryAfter = upstream.headers.get('retry-after');
-          if (retryAfter) response.headers.set('retry-after', retryAfter);
-          cleanup();
-          return response;
-        }
-        if (!request.stream) {
-          var result = translateResponse(await upstream.json(), request.model);
-          cleanup();
-          return json(result);
-        }
-        if (!upstream.body || !(upstream.headers.get('content-type') || '').toLowerCase().startsWith('text/event-stream'))
-          throw new Error('Expected an upstream text/event-stream response');
-      } catch (e) {
-        abort.abort();
-        cleanup();
-        return errorResponse(502, 'Upstream request failed: ' + e.message);
-      }
-
-      var reader = upstream.body.getReader(), iterator = translateStream(reader, request.model), cancelled = false;
-      var encoder = new TextEncoder();
-      async function closeReader() { try { await reader.cancel(); } catch {} cleanup(); }
-      var readable = new ReadableStream({
-        async pull(controller) {
-          try {
-            var next = await iterator.next();
-            if (cancelled) return;
-            if (next.done) { await closeReader(); controller.close(); }
-            else controller.enqueue(encoder.encode(next.value));
-          } catch (e) {
-            if (!cancelled) {
-              controller.enqueue(encoder.encode(sse('error', { type: 'error', error: { type: 'api_error', message: 'Stream error: ' + e.message } })));
-              controller.close();
-            }
-            abort.abort();
-            await closeReader();
-          }
-        },
-        async cancel() { cancelled = true; abort.abort(); await closeReader(); await iterator.return(); },
-      });
-      return new Response(readable, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
-    },
-  });
-  return { port: server.port, stop: function () { server.stop(); } };
-}
-
-module.exports = { startProxy: startProxy };
-PROXY_EOF
-info "OpenAI-compatible proxy created (openai-proxy.cjs)"
-
-# ─── Write patch feature gates ────────────────────────────────
-
-cat > "$CLAWGOD_DIR/feature-gates.cjs" << 'GATES_EOF'
-'use strict';
-// Patch feature gates — computes globalThis.__clawgodPatches before the
-// patched cli loads. Config: user-edited ~/.clawgod/patches.json
-// ({"<feature>": false}, absent key = on). Per-feature env overrides for a
-// single launch: CLAWGOD_FEATURE_<NAME>=false (feature id upper-cased,
-// dashes → underscores, e.g. CLAWGOD_FEATURE_GEO_NEUTRALIZE=false; "true"
-// restores a feature disabled in patches.json). CLAWGOD_FEATURES_META
-// below is machine-generated by build.js from the FEATURES registry in
-// patch.mjs (single source of truth) — do not hand-edit. Each gated patch in
-// cli.original.cjs checks its own entry:
-//   globalThis.__clawgodPatches?.["<patchId>"] !== false
-// Absent/failed config → gate table absent → all gates default ON, which is
-// exactly the pre-toggle behavior.
-const CLAWGOD_FEATURES_META = {
-  "agent-teams": [
-    "agent-teams"
-  ],
-  "agent-teams-graph": [
-    "agent-teams"
-  ],
-  "computer-use-sub": [
-    "computer-use"
-  ],
-  "computer-use-default": [
-    "computer-use"
-  ],
-  "computer-use-gate": [
-    "computer-use"
-  ],
-  "ultraplan": [
-    "ultraplan"
-  ],
-  "ultrareview-gate": [
-    "ultrareview"
-  ],
-  "ultrareview-direct": [
-    "ultrareview"
-  ],
-  "voice-mode": [
-    "voice-mode"
-  ],
-  "auto-mode-helper-gate": [
-    "auto-mode"
-  ],
-  "auto-mode-inline-gate": [
-    "auto-mode"
-  ],
-  "classifier-timeout": [
-    "classifier-tuning"
-  ],
-  "classifier-model": [
-    "classifier-tuning"
-  ],
-  "classifier-retries": [
-    "classifier-tuning"
-  ],
-  "theme-logo-rgb": [
-    "theme"
-  ],
-  "theme-logo-ansi": [
-    "theme"
-  ],
-  "theme-claude-rgb-dark": [
-    "theme"
-  ],
-  "theme-claude-rgb-light": [
-    "theme"
-  ],
-  "theme-claude-ansi": [
-    "theme"
-  ],
-  "theme-shimmer-rgb": [
-    "theme"
-  ],
-  "theme-shimmer-rgb-light": [
-    "theme"
-  ],
-  "theme-shimmer-ansi": [
-    "theme"
-  ],
-  "theme-hex": [
-    "theme"
-  ],
-  "theme-brief-rgb-dark": [
-    "theme"
-  ],
-  "theme-brief-rgb-light": [
-    "theme"
-  ],
-  "theme-brief-ansi": [
-    "theme"
-  ],
-  "geo-stego-date": [
-    "geo-neutralize"
-  ],
-  "geo-detect-probe": [
-    "geo-neutralize"
-  ],
-  "geo-apostrophe-stego": [
-    "geo-neutralize"
-  ],
-  "wiggly-dove": [
-    "wiggly-dove"
-  ],
-  "remove-cyber-risk": [
-    "cyber-risk"
-  ],
-  "remove-url-restriction": [
-    "url-restriction"
-  ],
-  "remove-cautious-actions": [
-    "cautious-actions"
-  ],
-  "remove-not-logged-in": [
-    "not-logged-in"
-  ],
-  "attachment-filter-bypass": [
-    "message-filter"
-  ],
-  "message-filter-legacy": [
-    "message-filter"
-  ],
-  "message-filter-s8": [
-    "message-filter"
-  ],
-  "remote-settings-off": [
-    "remote-settings"
-  ]
-};
-
-// Features realized by the wrapper itself rather than by a baked patch id:
-// they read the same patches.json / CLAWGOD_FEATURE_* inputs, but their
-// consumer is cli.cjs (or a module it loads) instead of a runtime gate in
-// cli.original.cjs. Their gate lands in the same __clawgodPatches table.
-var CLAWGOD_RUNTIME_FEATURES = ['bun-ant-shim'];
-
-var clawgodDir = require('path').join(require('os').homedir(), '.clawgod');
-
-var _cfg = {};
-try { _cfg = JSON.parse(require('fs').readFileSync(require('path').join(clawgodDir, 'patches.json'), 'utf8')); } catch {}
-for (var _name in process.env) {
-  if (_name.indexOf('CLAWGOD_FEATURE_') !== 0) continue;
-  var _val = process.env[_name];
-  if (_val !== 'true' && _val !== 'false') continue;
-  _cfg[_name.slice('CLAWGOD_FEATURE_'.length).toLowerCase().replace(/_/g, '-')] = _val === 'true';
-}
-
-// META keys are patch ids; a feature id is "known" when some patch lists it
-// or when the wrapper owns it (CLAWGOD_RUNTIME_FEATURES).
-// Unknown keys are residue (renamed/removed features).
-for (var _k in _cfg) {
-  var _known = CLAWGOD_RUNTIME_FEATURES.indexOf(_k) >= 0;
-  for (var _f in CLAWGOD_FEATURES_META) {
-    if (CLAWGOD_FEATURES_META[_f].indexOf(_k) >= 0) { _known = true; break; }
-  }
-  if (!_known) process.stderr.write('[clawgod] warning: unknown feature "' + _k + '" in patches.json\n');
-}
-
-var _gate = {};
-for (var _pid in CLAWGOD_FEATURES_META) {
-  var _feats = CLAWGOD_FEATURES_META[_pid];
-  var _on = false;
-  for (var _j = 0; _j < _feats.length; _j++) {
-    if (_cfg[_feats[_j]] !== false) { _on = true; break; }
-  }
-  _gate[_pid] = _on;
-}
-for (var _rfi = 0; _rfi < CLAWGOD_RUNTIME_FEATURES.length; _rfi++) {
-  _gate[CLAWGOD_RUNTIME_FEATURES[_rfi]] = _cfg[CLAWGOD_RUNTIME_FEATURES[_rfi]] !== false;
-}
-globalThis.__clawgodPatches = _gate;
-GATES_EOF
-info "Patch feature gates created (feature-gates.cjs)"
-
-# ─── Write wrapper (cli.cjs, runs under Bun) ──────────────────
-
-cat > "$CLAWGOD_DIR/cli.cjs" << 'WRAPPER_EOF'
-#!/usr/bin/env bun
-const { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, statSync, renameSync } = require('fs');
-const { join, basename } = require('path');
-const { homedir } = require('os');
-const { spawnSync } = require('child_process');
-
-const clawgodDir = join(homedir(), '.clawgod');
-// Version queries (including installer verification) must not start provider
-// servers or background update requests that keep the process alive (#203).
-// Match only a standalone flag, never a prompt/subcommand containing it.
-const versionOnly = process.argv.length === 3 && ['--version', '-v'].includes(process.argv[2]);
-
-// Note: there used to be a "drift detection" block here that scanned
-// ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
-// Retained native versions (including on Windows) may be older than the
-// version our installer pulled from npm. Scanning them could roll back a
-// fresh install and cause a re-patch loop. Upgrades instead go through the
-// patched `claude update` redirect; native background updates are disabled
-// below so they cannot restore an official launcher over ours.
-
-// One-time migration: earlier wrapper versions set CLAUDE_CONFIG_DIR=~/.clawgod,
-// which made Claude Code read/write ~/.clawgod/.claude.json instead of the
-// native ~/.claude.json (the file holding MCP config, project history, session
-// index). Move it back transparently on first run after upgrade.
-const nativeClaudeJson = join(homedir(), '.claude.json');
-const strayClaudeJson = join(clawgodDir, '.claude.json');
-if (!versionOnly && existsSync(strayClaudeJson) && !existsSync(nativeClaudeJson)) {
-  try { renameSync(strayClaudeJson, nativeClaudeJson); } catch {}
-}
-
-const providerDir = clawgodDir;
-const configFile = join(providerDir, 'provider.json');
-
-const defaultConfig = {
-  apiKey: '',
-  baseURL: 'https://api.anthropic.com',
-  model: '',
-  smallModel: '',
-  effort: '',
-  timeoutMs: 3000000,
-};
-
-let config = { ...defaultConfig };
-if (!versionOnly && existsSync(configFile)) {
-  try {
-    const raw = JSON.parse(readFileSync(configFile, 'utf8'));
-    config = { ...defaultConfig, ...raw };
-  } catch {}
-} else if (!versionOnly) {
-  mkdirSync(providerDir, { recursive: true });
-  writeFileSync(configFile, JSON.stringify(defaultConfig, null, 2) + '\n');
-}
-
-// Explicit protocol takes precedence over legacy provider types.
-if (config.protocol !== undefined && !['anthropic', 'openai-chat'].includes(config.protocol)) {
-  throw new Error('[clawgod] Unsupported provider protocol: ' + config.protocol + '. Use anthropic or openai-chat; auto and Responses are not supported.');
-}
-const _useProxy = config.protocol === 'openai-chat' ||
-  (config.protocol === undefined && ['grok', 'openai-compat'].includes(config.type));
-if (_useProxy) {
-  let _proxyKey = config.apiKey || '';
-  if (!_proxyKey && config.type === 'grok') {
-    try {
-      const _gs = JSON.parse(readFileSync(join(homedir(), '.grok', 'user-settings.json'), 'utf8'));
-      _proxyKey = _gs.apiKey || '';
-    } catch {}
-    if (!_proxyKey) _proxyKey = process.env.GROK_API_KEY || '';
-  }
-  // The generic Anthropic default must never become a Chat Completions URL.
-  if (config.baseURL === defaultConfig.baseURL || !config.baseURL) {
-    if (config.type === 'grok') config.baseURL = 'https://api.x.ai/v1';
-    else throw new Error('[clawgod] openai-chat requires an explicit baseURL, for example https://example.com/v1');
-  }
-  if (_proxyKey) {
-    const { startProxy } = require('./openai-proxy.cjs');
-    const _proxy = startProxy({
-      apiKey: _proxyKey,
-      baseURL: config.baseURL || (config.type === 'grok' ? 'https://api.x.ai/v1' : ''),
-      model: config.model || '',
-      effort: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? config.effort,
-      timeoutMs: process.env.API_TIMEOUT_MS ?? config.timeoutMs,
-    });
-    delete process.env.ANTHROPIC_API_KEY;
-    process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + _proxy.port;
-    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-passthrough';
-    if (config.model) process.env.ANTHROPIC_MODEL = config.model;
-    if (config.smallModel) process.env.ANTHROPIC_SMALL_FAST_MODEL = config.smallModel;
-    process.env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
-    process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= '1';
-    process.on('exit', function () { try { _proxy.stop(); } catch {} });
-    process.stderr.write('[clawgod] OpenAI Chat Completions proxy on port ' + _proxy.port + '\n');
-    config = { ...config, apiKey: '', baseURL: '', model: '', smallModel: '' };  // prevent fallthrough to apiKey/baseURL injection below
-  } else {
-    throw new Error('[clawgod] openai-chat requires an API key (grok also accepts GROK_API_KEY or ~/.grok/user-settings.json)');
-  }
-}
-
-const hasProviderApiKey = !!config.apiKey;
-
-if (hasProviderApiKey) {
-  if (config.baseURL) process.env.ANTHROPIC_BASE_URL = config.baseURL;
-  if (config.model) process.env.ANTHROPIC_MODEL = config.model;
-  if (config.smallModel) process.env.ANTHROPIC_SMALL_FAST_MODEL = config.smallModel;
-  if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
-    delete process.env.ANTHROPIC_API_KEY;
-    const existingToken = (process.env.ANTHROPIC_AUTH_TOKEN || '').trim();
-    process.env.ANTHROPIC_AUTH_TOKEN = existingToken || config.apiKey;
-  } else {
-    delete process.env.ANTHROPIC_AUTH_TOKEN;
-    process.env.ANTHROPIC_API_KEY = config.apiKey;
-  }
-} else if (config.baseURL && config.baseURL !== defaultConfig.baseURL) {
-  process.env.ANTHROPIC_BASE_URL ??= config.baseURL;
-}
-
-// Third-party Anthropic-compatible proxies (DeepSeek / OneAPI / Bedrock /
-// vLLM / etc.) don't share Anthropic's server-side handling of
-// x-anthropic-billing-header. That header carries a per-request `cch` field
-// which Anthropic's own server excludes from prompt-cache key calculation
-// (via cacheScope:null), but third-party proxies fold into the prefix hash —
-// so the cached prefix changes every request and cache hit rate drops to
-// zero. Auto-disable the header whenever baseURL points away from Anthropic.
-// Users can force re-enable with CLAUDE_CODE_ATTRIBUTION_HEADER=1 if needed.
-if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
-  process.env.CLAUDE_CODE_ATTRIBUTION_HEADER ??= '0';
-}
-
-if (config.effort) {
-  process.env.CLAUDE_CODE_EFFORT_LEVEL ??= config.effort;
-}
-
-if (config.timeoutMs) {
-  process.env.API_TIMEOUT_MS ??= String(config.timeoutMs);
-}
-// Remote Control needs GrowthBook evaluation. Restrict network traffic by
-// default only in max mode; on/off retain upstream eligibility checks.
-// Explicit user environment settings still take precedence.
-if (existsSync(join(clawgodDir, '.lean-max')) && !existsSync(join(clawgodDir, '.lean-disabled'))) {
-  process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
-}
-process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
-// Updates belong to clawgod's `claude update` redirect. The native background
-// updater can repair a missing Windows claude.exe even at the same version,
-// shadowing our claude.cmd. Keep it disabled for every clawgod process (#200).
-process.env.DISABLE_AUTOUPDATER = '1';
-// Use system ripgrep (extracted vendor rg path was build-time-baked; system
-// rg is the most reliable fallback under Bun runtime).
-process.env.USE_BUILTIN_RIPGREP ??= '1';
-
-const featuresFile = join(providerDir, 'features.json');
-if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
-  try {
-    const raw = readFileSync(featuresFile, 'utf8');
-    JSON.parse(raw);
-    process.env.CLAUDE_INTERNAL_FC_OVERRIDES = raw;
-  } catch {}
-}
-
-// Monkey-patch process.execPath: Anthropic's CLI uses process.execPath to
-// locate the native binary for shell wrappers (find→bfs, grep→ugrep, rg) and
-// subprocess spawning. Under Bun, process.execPath returns the Bun runtime
-// path, not the Claude native binary. The launcher script sets
-// CLAUDE_CODE_EXECPATH to claude.orig (the real native binary) before exec'ing
-// Bun, so we use that as the source of truth.  See issue #100.
-const _realExecPath = process.env.CLAUDE_CODE_EXECPATH || process.execPath;
-if (_realExecPath !== process.execPath) {
-  Object.defineProperty(process, 'execPath', {
-    value: _realExecPath,
-    configurable: true,
-  });
-}
-
-// Lean mode toggle — --lean-off / --lean-on / --lean-max
-if (process.argv.includes('--lean-off') || process.argv.includes('--lean-on') || process.argv.includes('--lean-max')) {
-  const _leanOff = join(clawgodDir, '.lean-disabled');
-  const _leanMax = join(clawgodDir, '.lean-max');
-  const _leanSettings = join(homedir(), '.claude', 'settings.json');
-  const _baseDeny = ['DesignSync','NotebookEdit','PushNotification','RemoteTrigger','CronCreate','CronDelete','CronList'];
-  const _maxDeny = ['EnterPlanMode','ExitPlanMode','SendMessage','ScheduleWakeup','AskUserQuestion','ReportFindings'];
-  const _baseFlags = ['disableWorkflows','disableClaudeAiConnectors','disableArtifact'];
-  const _maxFlags = ['disableBundledSkills','disableRemoteControl'];
-  const _allDeny = new Set([..._baseDeny, ..._maxDeny]);
-  const _allFlags = [..._baseFlags, ..._maxFlags];
-  const _unlink = function(p) { try { require('fs').unlinkSync(p); } catch {} };
-  if (process.argv.includes('--lean-off')) {
-    writeFileSync(_leanOff, '');
-    _unlink(_leanMax);
-    try {
-      const _s = JSON.parse(readFileSync(_leanSettings, 'utf8'));
-      for (const _k of _allFlags) delete _s[_k];
-      if (Array.isArray(_s.permissions?.deny)) _s.permissions.deny = _s.permissions.deny.filter(function(t) { return !_allDeny.has(t); });
-      writeFileSync(_leanSettings, JSON.stringify(_s, null, 2) + '\n');
-    } catch {}
-    process.stderr.write('[clawgod] Lean mode disabled. All tools restored.\n');
-  } else {
-    const _isMax = process.argv.includes('--lean-max');
-    _unlink(_leanOff);
-    if (_isMax) writeFileSync(_leanMax, ''); else _unlink(_leanMax);
-    const _deny = _isMax ? [..._baseDeny, ..._maxDeny] : _baseDeny;
-    const _flags = _isMax ? _allFlags : _baseFlags;
-    try {
-      let _s = {};
-      try { _s = JSON.parse(readFileSync(_leanSettings, 'utf8')); } catch {}
-      let _ch = false;
-      for (const _k of _flags) { if (!(_k in _s)) { _s[_k] = true; _ch = true; } }
-      // If downgrading from max to on, remove max-only keys
-      if (!_isMax) { for (const _k of _maxFlags) { if (_k in _s) { delete _s[_k]; _ch = true; } } }
-      if (!_s.permissions) _s.permissions = {};
-      if (!Array.isArray(_s.permissions.deny)) _s.permissions.deny = [];
-      const _ex = new Set(_s.permissions.deny);
-      for (const _t of _deny) { if (!_ex.has(_t)) { _s.permissions.deny.push(_t); _ch = true; } }
-      // If downgrading from max to on, remove max-only deny entries
-      if (!_isMax) {
-        const _maxSet = new Set(_maxDeny);
-        const _before = _s.permissions.deny.length;
-        _s.permissions.deny = _s.permissions.deny.filter(function(t) { return !_maxSet.has(t); });
-        if (_s.permissions.deny.length !== _before) _ch = true;
-      }
-      if (_ch) writeFileSync(_leanSettings, JSON.stringify(_s, null, 2) + '\n');
-    } catch {}
-    process.stderr.write('[clawgod] Lean mode: ' + (_isMax ? 'max' : 'on') + '. Settings updated.\n');
-  }
-  process.exit(0);
-}
-
-// Update check — cached, non-blocking, 24h interval
-try {
-  const _ucFile = join(clawgodDir, '.update-check');
-  const _verFile = join(clawgodDir, '.clawgod-version');
-  if (!versionOnly && existsSync(_verFile)) {
-    const _localVer = readFileSync(_verFile, 'utf8').trim();
-    let _uc = null;
-    try { if (existsSync(_ucFile)) _uc = JSON.parse(readFileSync(_ucFile, 'utf8')); } catch {}
-    var _semGt = function(a, b) { var x = a.split('.'), y = b.split('.'); for (var i = 0; i < 3; i++) { var d = (parseInt(x[i]||0)) - (parseInt(y[i]||0)); if (d) return d > 0; } return false; };
-    if (_uc && _uc.v && _semGt(_uc.v, _localVer)) {
-      process.stderr.write('[clawgod] v' + _uc.v + ' available (installed: v' + _localVer + ") — run 'claude update' to upgrade\n");
-    }
-    if (!_uc || Date.now() - (_uc.t || 0) > 86400000) {
-      fetch('https://api.github.com/repos/0Chencc/clawgod/releases/latest', {
-        headers: { 'User-Agent': 'clawgod' },
-        signal: AbortSignal.timeout(5000),
-      }).then(function(r) { return r.json(); }).then(function(d) {
-        var v = (d.tag_name || '').replace(/^v/, '');
-        if (v) writeFileSync(_ucFile, JSON.stringify({ t: Date.now(), v: v }));
-      }).catch(function() {});
-    }
-  }
-} catch {}
-
-// Patch feature gates (~/.clawgod/patches.json + CLAWGOD_FEATURE_* env) —
-// must run before the patched cli loads so gated patches see
-// globalThis.__clawgodPatches.
-require('./feature-gates.cjs');
-
-// Runtime helpers shared by injected patches (globalThis.__clawgodHelpers,
-// see runtime-helpers.cjs). cli.original.cjs is a separate module scope, so
-// the patched bundle reaches helpers through globalThis only.
-require('./runtime-helpers.cjs');
-
-// Claude Code 2.1.271+ renders through Bun.ant.CellSegmenter, an
-// Anthropic-private Bun API that stock Bun does not ship. Without it the
-// renderer throws before the first frame and the TUI looks hung, so the shim
-// re-implements the API in JS. No-op when the real API exists or when the
-// bun-ant-shim feature is off (patches.json / CLAWGOD_FEATURE_BUN_ANT_SHIM).
-require('./bun-ant-shim.cjs');
-
-require('./cli.original.cjs');
-WRAPPER_EOF
-chmod +x "$CLAWGOD_DIR/cli.cjs"
-echo "$CLAWGOD_SELF_VERSION" > "$CLAWGOD_DIR/.clawgod-version"
-info "Wrapper created (cli.cjs)"
-
-cat > "$CLAWGOD_DIR/startup-check.cjs" << 'STARTUP_EOF'
-'use strict';
-// Bounded installer probe shared by PowerShell 5.1 and POSIX shells. Running
-// under Node keeps the watchdog independent of the Bun runtime being checked.
-const { spawn, spawnSync } = require('node:child_process');
-const { writeFileSync } = require('node:fs');
-const { dirname, join } = require('node:path');
-
-const [bun, cli] = process.argv.slice(2);
-const timeoutMs = Number(process.env.CLAWGOD_STARTUP_TIMEOUT_MS || 30000);
-if (!bun || !cli || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647) {
-  process.stderr.write('Usage: node startup-check.cjs <bun> <cli.cjs>; CLAWGOD_STARTUP_TIMEOUT_MS must be a positive integer <= 2147483647.\n');
-  process.exitCode = 1;
-} else {
-  const logPath = join(dirname(cli), 'startup-check.log');
-  const limit = 1024 * 1024;
-  let output = Buffer.alloc(0), truncated = false, finished = false;
-  const versionPattern = /^\d+\.\d+\.\d+[^\r\n]*\(Claude Code\)\s*$/;
-  let stdoutLine = '', sawVersion = false;
-  const child = spawn(bun, [cli, '--version'], {
-    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    detached: process.platform !== 'win32',
-  });
-  const capture = chunk => {
-    output = Buffer.concat([output, chunk]);
-    if (output.length > limit) { output = output.subarray(output.length - limit); truncated = true; }
-  };
-  child.stdout.on('data', chunk => {
-    capture(chunk);
-    // Detect stdout lines independently of stderr ordering and the bounded log
-    // tail. A warning must neither fabricate nor erase a successful version.
-    const lines = (stdoutLine + chunk.toString('utf8')).split('\n');
-    stdoutLine = lines.pop().slice(-4096);
-    if (lines.some(line => versionPattern.test(line))) sawVersion = true;
-  });
-  child.stderr.on('data', capture);
-
-  function finish(code, message) {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    const text = (truncated ? '[Earlier startup output truncated]\n' : '') + output.toString('utf8');
-    const diagnostic = message ? '\n[clawgod] ' + message + '\n' : '';
-    let logWritten = false;
-    try { writeFileSync(logPath, text + diagnostic); logWritten = true; }
-    catch (error) {
-      process.stderr.write('[clawgod] Cannot write startup log: ' + error.message + '\n');
-      code = code || 1;
-    }
-    if (text) process.stdout.write(text);
-    if (diagnostic) process.stderr.write(diagnostic);
-    if (code && logWritten) process.stderr.write('[clawgod] Startup log: ' + logPath + '\n');
-    process.exitCode = code;
-  }
-
-  const timer = setTimeout(() => {
-    // Kill only the probe's process tree, never the parent Claude session that
-    // invoked `claude update`. Closing our pipes also bounds inherited handles.
-    if (child.pid) {
-      if (process.platform === 'win32') {
-        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
-          stdio: 'ignore', windowsHide: true, timeout: 2000,
-        });
-      } else {
-        try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-      }
-      try { child.kill('SIGKILL'); } catch {}
-    }
-    child.stdout.destroy();
-    child.stderr.destroy();
-    child.unref();
-    finish(124, 'Startup verification timed out after ' + timeoutMs + ' ms. The Bun probe did not finish; launcher installation was aborted. If this machine needs more time, increase CLAWGOD_STARTUP_TIMEOUT_MS and retry.');
-  }, timeoutMs);
-
-  child.on('error', error => finish(1, 'Could not start Bun: ' + error.message));
-  child.on('close', (code, signal) => {
-    if (code !== 0) finish(code || 1, 'Patched Claude startup failed' + (signal ? ' (' + signal + ')' : ' (exit ' + code + ')') + '.');
-    else if (!sawVersion && !versionPattern.test(stdoutLine))
-      finish(1, 'Bun exited successfully but did not print a Claude Code version.');
-    else finish(0);
-  });
-}
-STARTUP_EOF
-
-# ─── Write classifier runtime helper ────────────────────
-
-cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
-'use strict';
-// Runtime helpers shared by injected patches, exposed on
-// globalThis.__clawgodHelpers. The patched cli.original.cjs lives in its own
-// module scope, so it reaches these helpers only through globalThis.
-//
-// cli.cjs requires this module once at launch; after that, adding a new
-// helper means editing this single file — no build.js / cli.cjs / template
-// changes. (feature-gates.cjs is a future merge target here.)
-//
-// Helpers return values only: injected code owns gating, env reads, timers,
-// and mutation of the renderer's state.
-
-// Parses a CLAWGOD_CLASSIFIER_TIMEOUT_MS value to a finite number, or null
-// when it cannot be parsed (missing/blank/non-numeric/Infinity/overflow). The
-// caller decides the fallback: the injected patch code checks for null
-// explicitly and keeps the original formula, while any real number — a
-// legitimate "0" included — is applied as a floor. Returning null (not 0)
-// keeps "0" as a real override and never conflates it with a parse failure.
-function classifierTimeoutFloor(envValue) {
-  if (typeof envValue === 'string' && envValue.trim() === '') return null;
-  const value = Number(envValue);
-  return Number.isFinite(value) ? value : null;
-}
-
-// A DA1 reply can arrive in multiple stdin reads (issue #171). The renderer
-// normally flushes incomplete escapes after 50ms, which turns a split ESC [
-// into a key and lets the reply's suffix reach the text input. While a DA1
-// sentinel is outstanding, allow the same 2s inter-read budget upstream uses
-// for recognized control-sequence prefixes. This also covers 2.1.263, whose
-// longer-prefix handling predates that upstream fix.
-//
-// Do not filter input: ordinary keys, paste, and complete sequences still go
-// through the existing parser immediately. A lone Escape or Alt+[ during a
-// pending probe is delayed, then passed to the original parser on timeout.
-// With no outstanding probe, even those keys retain their usual timing.
-function terminalReplyDelay(querier, reader, now) {
-  const parse = reader?.parse;
-  if (parse?.mode !== 'NORMAL' || typeof parse.incomplete !== 'string') return 0;
-  if (!/^\x1b(?:\[(?:\?[\d;]*)?)?$/.test(parse.incomplete)) return 0;
-  // 2.1.263 writes queue entries immediately. 2.1.274 adds `written`, and
-  // may queue probes before stdin attaches; those cannot have replies yet.
-  if (!Array.isArray(querier?.queue) || !querier.queue.some((entry) =>
-    entry?.kind === 'barrier' || (entry?.kind === 'sentinel' && entry.written !== false))) return 0;
-  if (!Number.isFinite(now) || !Number.isFinite(reader.lastInputAt)) return 0;
-  return Math.max(0, 2000 - Math.max(0, now - reader.lastInputAt));
-}
-
-// The runtime container (globalThis.__clawgodHelpers) IS the module's own
-// exports, so a new helper only needs an export line here to be reachable
-// from the patched bundle — no separate registration object. We expose
-// module.exports, not module (the latter carries id/filename/paths metadata).
-module.exports.classifierTimeoutFloor = classifierTimeoutFloor;
-module.exports.terminalReplyDelay = terminalReplyDelay;
-globalThis.__clawgodHelpers = module.exports;
-CFG_EOF
-info "Classifier runtime helpers created (runtime-helpers.cjs)"
-
-# ─── Write Bun.ant runtime shim ────────────────────────
-# Claude Code 2.1.271+ renders through Bun.ant.CellSegmenter, an
-# Anthropic-private Bun API that stock Bun does not ship. cli.cjs loads this
-# shim before the bundle; without it the TUI never paints.
-cat > "$CLAWGOD_DIR/bun-ant-shim.cjs" << 'BUNANT_EOF'
-'use strict';
-/**
- * clawgod — `Bun.ant` runtime shim.
- *
- * Claude Code 2.1.271 moved its Ink renderer onto `Bun.ant.CellSegmenter`, an
- * Anthropic-private Bun API that ships only inside the bundled native binary.
- * clawgod runs the extracted JS bundle on the user's own Bun, which has no
- * `Bun.ant` namespace, so the renderer threw before the first frame: the TUI
- * never painted while the process stayed alive and looked hung (issue #183).
- * The native binary (`claude.orig`) was unaffected.
- *
- * This module implements the API surface the renderer consumes. cli.cjs loads
- * it before cli.original.cjs, and it no-ops when the real API is present.
- *
- * Contract (reverse-engineered from the 2.1.271+ bundle, pinned by
- * bun-ant-shim.test.mjs):
- *
- *   new CellSegmenter({ ambiguousIsNarrow, substitute, screen, tabWidth })
- *   .graphemes / .sgrKeys / .sgrCloseKeys / .uris   per-run tables, strings
- *   .segment(text, cellsOut, runsOut, reordered) -> cell count
- *       cellsOut: 2 int32 per cell — [graphemeIndex, (run << 10) | tab | width]
- *       runsOut:  2 int32 per run  — [styleId, uriIndex]
- *       Negative return = required cell capacity (caller reallocates).
- *   .paint(targetCells, targetWidth, x, y, cells, count, _unused, charMap, words)
- *   .setCell(targetCells, targetWidth, x, y, charId, packedStyle)
- *       Both return end * 2^36 + first * 2^20 + end for a nonempty span.
- *       I0() decodes the upper fields as damage bounds; j0()/xC() return the
- *       low field as the absolute ending column for soft-wrap metadata.
- *
- * The `substitute` option (bidi control ranges) needs no handling: the controls
- * are zero width already, which is what the option asks for.
- *
- * The tables are mutated in place: the bundle caches the four arrays once per
- * renderer instance. SGR state persists across segment() calls, so a style
- * spanning a wrapped line survives.
- *
- * Toggle: patches.json {"bun-ant-shim": false} or CLAWGOD_FEATURE_BUN_ANT_SHIM=false
- */
-
-const SCREEN_DEFAULTS = {
-  widthMask: 3, narrow: 0, wide: 1, spacerTail: 2, spacerHead: 3,
-  emptyCharIndex: 0, spacerCharIndex: 1, tabWidth: 8,
-};
-
-const STYLE_SHIFT = 17;
-const LINK_SHIFT = 2;
-const LINK_MASK = 32767;
-const WIDTH_MASK = 255;
-const TAB_FLAG = 256;
-const RUN_SHIFT = 10;
-const DAMAGE_SPAN = 1048576; // 2^20 — field holding the first column
-const DAMAGE_END = 68719476736; // 2^36 — field holding the end column
-
-// SGR attributes that occupy one style slot, as param -> [slot, closeParam].
-// The bundle's style pool only accepts single-parameter codes, so combined
-// sequences are split below.
-const SGR_ATTRS = new Map([
-  [1, ['bold', 22]],
-  [2, ['dim', 22]],
-  [3, ['italic', 23]],
-  [4, ['underline', 24]],
-  [5, ['blink', 25]],
-  [6, ['blink-fast', 25]],
-  [7, ['inverse', 27]],
-  [8, ['hidden', 28]],
-  [9, ['strike', 29]],
-  [21, ['underline-double', 24]],
-  [53, ['overline', 55]],
-]);
-
-// Closing params, as closeParam -> slots it clears (22 and 24 each cover the
-// two attributes they close).
-const SGR_CLOSES = new Map([
-  [22, ['bold', 'dim']],
-  [23, ['italic']],
-  [24, ['underline', 'underline-double']],
-  [25, ['blink', 'blink-fast']],
-  [27, ['inverse']],
-  [28, ['hidden']],
-  [29, ['strike']],
-  [39, ['fg']],
-  [49, ['bg']],
-  [55, ['overline']],
-  [59, ['underline-color']],
-]);
-
-// Extended colours (38/48/58) and the 30-37/90-97 fg, 40-47/100-107 bg ranges.
-const SGR_EXTENDED = new Map([
-  [38, ['fg', 39]],
-  [48, ['bg', 49]],
-  [58, ['underline-color', 59]],
-]);
-
-function slotFor(param) {
-  const attr = SGR_ATTRS.get(param);
-  if (attr) return attr;
-  const extended = SGR_EXTENDED.get(param);
-  if (extended) return extended;
-  if ((param >= 30 && param <= 37) || (param >= 90 && param <= 97)) return ['fg', 39];
-  if ((param >= 40 && param <= 47) || (param >= 100 && param <= 107)) return ['bg', 49];
-  return null;
-}
-
-function sgrCode(params) {
-  return '\x1b[' + params + 'm';
-}
-
-// ─── Grapheme segmentation & width ───────────────────────────
-
-let graphemeSegmenter;
-let graphemeSegmenterResolved = false;
-
-function graphemeIterator() {
-  if (!graphemeSegmenterResolved) {
-    graphemeSegmenterResolved = true;
-    try {
-      graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-    } catch {
-      graphemeSegmenter = null;
-    }
-  }
-  return graphemeSegmenter;
-}
-
-// Approximate East Asian Wide/Fullwidth + emoji ranges, used only when
-// Bun.stringWidth is unavailable (the CI unit test runs under plain Node).
-const FALLBACK_WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1F64F}\u{1F900}-\u{1F9FF}\u{20000}-\u{2FFFD}\u{30000}-\u{3FFFD}]/u;
-
-function fallbackWidth(grapheme) {
-  if (/^\p{M}+$/u.test(grapheme)) return 0;
-  for (const ch of grapheme) if (FALLBACK_WIDE.test(ch)) return 2;
-  return 1;
-}
-
-function graphemeWidth(grapheme, ambiguousIsNarrow) {
-  const bun = typeof Bun === 'object' && Bun !== null ? Bun : undefined;
-  if (bun && typeof bun.stringWidth === 'function') {
-    try {
-      const width = bun.stringWidth(grapheme, { ambiguousIsNarrow: ambiguousIsNarrow === true });
-      if (Number.isFinite(width) && width >= 0) return width | 0;
-    } catch {}
-  }
-  return fallbackWidth(grapheme);
-}
-
-// ─── Escape scanner ─────────────────────────────────────────
-
-// Text, SGR, OSC-8 hyperlinks, and any other escape (dropped — a `write` op
-// only carries styling).
-const ESCAPE_SCAN = /\x1b\[([0-9;]*)m|\x1b\]8;([^;\x07\x1b]*);([^\x07\x1b]*)(?:\x07|\x1b\\)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[@-~]|\x1b[@-Z\\-_]/g;
-
-function scanChunks(text) {
-  const chunks = [];
-  let last = 0;
-  ESCAPE_SCAN.lastIndex = 0;
-  for (let match; (match = ESCAPE_SCAN.exec(text)) !== null; ) {
-    if (match.index > last) chunks.push({ kind: 'text', value: text.slice(last, match.index) });
-    if (match[1] !== undefined) chunks.push({ kind: 'sgr', value: match[1] });
-    else if (match[3] !== undefined) chunks.push({ kind: 'osc8', value: match[3] });
-    last = match.index + match[0].length;
-  }
-  if (last < text.length) chunks.push({ kind: 'text', value: text.slice(last) });
-  return chunks;
-}
-
-// ─── CellSegmenter ──────────────────────────────────────────
-
-class CellSegmenter {
-  constructor(options) {
-    const opts = options || {};
-    const screen = opts.screen || {};
-    this.ambiguousIsNarrow = opts.ambiguousIsNarrow !== false;
-    this.tabWidth = Number.isFinite(opts.tabWidth) && opts.tabWidth > 0 ? opts.tabWidth | 0 : SCREEN_DEFAULTS.tabWidth;
-    const kind = (key) => screen[key] ?? SCREEN_DEFAULTS[key];
-    this.kinds = {
-      narrow: kind('narrow'), wide: kind('wide'),
-      spacerTail: kind('spacerTail'), spacerHead: kind('spacerHead'),
-    };
-    this.emptyCharIndex = kind('emptyCharIndex');
-    this.spacerCharIndex = kind('spacerCharIndex');
-
-    // Mutated in place — the renderer caches these arrays per instance.
-    this.graphemes = [' ', ''];
-    this.sgrKeys = [''];
-    this.sgrCloseKeys = [''];
-    this.uris = [''];
-
-    this._graphemeIndex = new Map([[' ', 0], ['', 1]]);
-    this._styleIndex = new Map();
-    this._uriIndex = new Map();
-    this._style = new Map();
-  }
-
-  _uriIndexFor(uri) {
-    let id = this._uriIndex.get(uri);
-    if (id === undefined) {
-      id = this.uris.length;
-      this.uris.push(uri);
-      this._uriIndex.set(uri, id);
-    }
-    return id;
-  }
-
-  _applySgr(params) {
-    const parts = params.split(';');
-    for (let i = 0; i < parts.length; i += 1) {
-      const raw = parts[i];
-      const param = raw === '' ? 0 : Number(raw);
-      if (!Number.isFinite(param)) continue;
-      if (param === 0) {
-        this._style.clear();
-        continue;
-      }
-      const closes = SGR_CLOSES.get(param);
-      if (closes) {
-        for (const slot of closes) this._style.delete(slot);
-        continue;
-      }
-      const extended = SGR_EXTENDED.get(param);
-      if (extended) {
-        // 38/48/58 take "5;n" or "2;r;g;b" operands. Consume them here so the
-        // loop does not read the operands as attribute params.
-        const mode = parts[i + 1];
-        let code;
-        if (mode === '5' && parts[i + 2] !== undefined) {
-          code = sgrCode(param + ';5;' + parts[i + 2]);
-          i += 2;
-        } else if (mode === '2' && parts[i + 4] !== undefined) {
-          code = sgrCode(param + ';2;' + parts[i + 2] + ';' + parts[i + 3] + ';' + parts[i + 4]);
-          i += 4;
-        } else {
-          code = sgrCode(param);
-        }
-        this._style.set(extended[0], { code, close: sgrCode(extended[1]) });
-        continue;
-      }
-      const slotEntry = slotFor(param);
-      if (slotEntry) {
-        this._style.set(slotEntry[0], { code: sgrCode(param), close: sgrCode(slotEntry[1]) });
-      } else {
-        // Unknown attribute: keep it as its own slot so the transition to the
-        // next style still closes it where the terminal understands the code.
-        this._style.set('param-' + param, { code: sgrCode(param), close: '' });
-      }
-    }
-  }
-
-  _styleId() {
-    if (this._style.size === 0) return 0;
-    const pairs = [];
-    for (const entry of this._style.values()) pairs.push(entry.code + '\u0000' + entry.close);
-    // Sort so the same attribute set reached via different SGR orderings
-    // (e.g. "1;7" vs "7;1") shares one style id instead of bloating the table.
-    pairs.sort();
-    const codes = pairs.map((pair) => pair.slice(0, pair.indexOf('\u0000')));
-    const closes = pairs.map((pair) => pair.slice(pair.indexOf('\u0000') + 1));
-    const key = codes.length + '|' + codes.join('\u0000') + '|' + closes.join('\u0000');
-    let id = this._styleIndex.get(key);
-    if (id === undefined) {
-      // IDs must remain stable for this instance: the renderer caches their
-      // resolved styles, and the current segment() may already reference them.
-      // The caller owns capacity/generation checks and rebuilds the segmenter
-      // together with its caches; never truncate these tables independently.
-      id = this.sgrKeys.length;
-      this.sgrKeys.push(codes.join('\u0000'));
-      this.sgrCloseKeys.push(closes.join('\u0000'));
-      this._styleIndex.set(key, id);
-    }
-    return id;
-  }
-
-  _graphemeId(grapheme) {
-    let id = this._graphemeIndex.get(grapheme);
-    if (id === undefined) {
-      id = this.graphemes.length;
-      this.graphemes.push(grapheme);
-      this._graphemeIndex.set(grapheme, id);
-    }
-    return id;
-  }
-
-  segment(text, cells, runs /* , reordered */) {
-    const source = typeof text === 'string' ? text : text == null ? '' : String(text);
-    const items = [];
-    let link = 0;
-    // The bundle re-runs segment() with grown arrays when this returns a
-    // negative count. _applySgr advances the persistent _style map, so a
-    // capacity-fail run must roll it back or the retry would re-apply the SGR
-    // codes on top of the already-advanced state and mis-style the leading
-    // text. _applySgr only set()s fresh objects / delete()s / clear()s, so a
-    // shallow copy is a faithful snapshot.
-    const styleSnapshot = new Map(this._style);
-
-    const push = (grapheme) => {
-      const isTab = grapheme === '\t';
-      items.push({
-        graphemeIndex: this._graphemeId(grapheme),
-        tab: isTab,
-        width: isTab ? 0 : graphemeWidth(grapheme, this.ambiguousIsNarrow),
-        style: this._styleId(),
-        link,
-      });
-    };
-
-    const segmenter = graphemeIterator();
-    for (const chunk of scanChunks(source)) {
-      if (chunk.kind === 'sgr') {
-        this._applySgr(chunk.value);
-        continue;
-      }
-      if (chunk.kind === 'osc8') {
-        link = chunk.value ? this._uriIndexFor(chunk.value) : 0;
-        continue;
-      }
-      if (segmenter) {
-        for (const entry of segmenter.segment(chunk.value)) push(entry.segment);
-      } else {
-        push(chunk.value);
-      }
-    }
-
-    const count = items.length;
-    if (cells.length < count * 2 || runs.length < count * 2) {
-      this._style = styleSnapshot;
-      return -count;
-    }
-
-    let runCount = 0;
-    let previous = null;
-    for (let i = 0; i < count; i += 1) {
-      const item = items[i];
-      if (!previous || previous.style !== item.style || previous.link !== item.link) {
-        runs[runCount * 2] = item.style;
-        runs[runCount * 2 + 1] = item.link;
-        runCount += 1;
-        previous = item;
-      }
-      item.run = runCount - 1;
-      cells[i * 2] = item.graphemeIndex;
-      cells[i * 2 + 1] = (item.run << RUN_SHIFT) | (item.tab ? TAB_FLAG : 0) | (item.width & WIDTH_MASK);
-    }
-    return count;
-  }
-
-  paint(target, targetWidth, x, y, cells, count, _unused, charMap, words) {
-    const columns = targetWidth | 0;
-    const emptyCharId = charMap ? charMap[this.emptyCharIndex] | 0 : this.emptyCharIndex;
-    const spacerCharId = charMap ? charMap[this.spacerCharIndex] | 0 : this.spacerCharIndex;
-    const rowBase = (y | 0) * columns;
-    let column = x | 0;
-    const first = column;
-
-    for (let i = 0; i < (count | 0); i += 1) {
-      const packed = cells[i * 2 + 1];
-      const run = packed >>> RUN_SHIFT;
-      const word = (words ? words[run] : 0) | 0;
-      const style = (word >>> STYLE_SHIFT) << STYLE_SHIFT;
-      // runWords() has already removed its cache's +1 sentinel offset.
-      const link = (word >>> LINK_SHIFT) & LINK_MASK;
-      const styleBits = style | (link << LINK_SHIFT);
-
-      if ((packed & TAB_FLAG) !== 0) {
-        const stop = this.tabWidth - (((column % this.tabWidth) + this.tabWidth) % this.tabWidth);
-        for (let k = 0; k < stop; k += 1) this._put(target, rowBase, columns, column + k, emptyCharId, styleBits | this.kinds.narrow);
-        column += stop;
-        continue;
-      }
-
-      const width = packed & WIDTH_MASK;
-      if (width >= 2) {
-        const charId = charMap ? charMap[cells[i * 2]] | 0 : cells[i * 2] | 0;
-        this._put(target, rowBase, columns, column, charId, styleBits | this.kinds.wide);
-        this._put(target, rowBase, columns, column + 1, spacerCharId, styleBits | this.kinds.spacerTail);
-        column += 2;
-      } else if (width === 1) {
-        const charId = charMap ? charMap[cells[i * 2]] | 0 : cells[i * 2] | 0;
-        this._put(target, rowBase, columns, column, charId, styleBits | this.kinds.narrow);
-        column += 1;
-      }
-      // width 0 (combining mark, bidi control): no cell of its own.
-    }
-
-    return packDamage(first, column);
-  }
-
-  setCell(target, targetWidth, x, y, charId, packedStyle) {
-    const columns = targetWidth | 0;
-    const column = x | 0;
-    const row = y | 0;
-    if (column < 0 || column >= columns || row < 0) return 0;
-    this._put(target, row * columns, columns, column, charId, packedStyle);
-    return packDamage(column, column + 1);
-  }
-
-  _put(target, rowBase, columns, column, charId, packed) {
-    if (column < 0 || column >= columns) return;
-    const index = (rowBase + column) << 1;
-    target[index] = charId;
-    target[index + 1] = packed;
-  }
-}
-
-function packDamage(first, end) {
-  if (end <= first) return 0;
-  return end * DAMAGE_END + first * DAMAGE_SPAN + end;
-}
-
-// ─── Installation ───────────────────────────────────────────
-
-function install() {
-  if (typeof Bun !== 'object' || Bun === null) return false;
-  if (typeof Bun.ant === 'object' && Bun.ant !== null && typeof Bun.ant.CellSegmenter === 'function') return false;
-  if (globalThis.__clawgodPatches && globalThis.__clawgodPatches['bun-ant-shim'] === false) return false;
-  try {
-    if (typeof Bun.ant !== 'object' || Bun.ant === null) Bun.ant = {};
-    Bun.ant.CellSegmenter = CellSegmenter;
-  } catch {
-    return false;
-  }
-  return true;
-}
-
-module.exports = { CellSegmenter, install, packDamage, scanChunks };
-
-if (install() && process.env.CLAWGOD_BUN_ANT_SHIM_DEBUG === '1') {
-  // stderr only (stdout belongs to the TUI renderer), opt-in: the install log
-  // already names the renderer runtime path on every (re)install.
-  process.stderr.write('[clawgod] Bun.ant shim active (Claude Code >= 2.1.271 renderer on stock Bun)\n');
-}
-BUNANT_EOF
-info "Bun.ant runtime shim created (bun-ant-shim.cjs)"
-
-# ─── Write universal patcher ───────────────────────────
-
 cat > "$CLAWGOD_DIR/acorn.mjs" << 'ACORN_EOF'
 // This file was generated. Do not modify manually!
 var astralIdentifierCodes = [509, 0, 227, 0, 150, 4, 294, 9, 1368, 2, 2, 1, 6, 3, 41, 2, 5, 0, 166, 1, 574, 3, 9, 9, 7, 9, 32, 4, 318, 1, 78, 5, 71, 10, 50, 3, 123, 2, 54, 14, 32, 10, 3, 1, 11, 3, 46, 10, 8, 0, 46, 9, 7, 2, 37, 13, 2, 9, 6, 1, 45, 0, 13, 2, 49, 13, 9, 3, 2, 11, 83, 11, 7, 0, 3, 0, 158, 11, 6, 9, 7, 3, 56, 1, 2, 6, 3, 1, 3, 2, 10, 0, 11, 1, 3, 6, 4, 4, 68, 8, 2, 0, 3, 0, 2, 3, 2, 4, 2, 0, 15, 1, 83, 17, 10, 9, 5, 0, 82, 19, 13, 9, 214, 6, 3, 8, 28, 1, 83, 16, 16, 9, 82, 12, 9, 9, 7, 19, 58, 14, 5, 9, 243, 14, 166, 9, 71, 5, 2, 1, 3, 3, 2, 0, 2, 1, 13, 9, 120, 6, 3, 6, 4, 0, 29, 9, 41, 6, 2, 3, 9, 0, 10, 10, 47, 15, 199, 7, 137, 9, 54, 7, 2, 7, 17, 9, 57, 21, 2, 13, 123, 5, 4, 0, 2, 1, 2, 6, 2, 0, 9, 9, 49, 4, 2, 1, 2, 4, 9, 9, 55, 9, 266, 3, 10, 1, 2, 0, 49, 6, 4, 4, 14, 10, 5350, 0, 7, 14, 11465, 27, 2343, 9, 87, 9, 39, 4, 60, 6, 26, 9, 535, 9, 470, 0, 2, 54, 8, 3, 82, 0, 12, 1, 19628, 1, 4178, 9, 519, 45, 3, 22, 543, 4, 4, 5, 9, 7, 3, 6, 31, 3, 149, 2, 1418, 49, 513, 54, 5, 49, 9, 0, 15, 0, 23, 4, 2, 14, 1361, 6, 2, 16, 3, 6, 2, 1, 2, 4, 101, 0, 161, 6, 10, 9, 357, 0, 62, 13, 499, 13, 245, 1, 2, 9, 233, 0, 3, 0, 8, 1, 6, 0, 475, 6, 110, 6, 6, 9, 4759, 9, 787719, 239];
@@ -8696,6 +6504,2240 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ACORN_LICENSE_EOF
+
+if [ "$NO_UPGRADE" = "1" ]; then
+  if [ ! -f "$CLAWGOD_DIR/cli.original.cjs" ]; then
+    warn "--no-upgrade requires an existing installation."
+    warn "Run a full install first (without --no-upgrade)."
+    exit 1
+  fi
+  if [ -f "$CLAWGOD_DIR/source-backup.json" ] && {
+    [ ! -f "$CLAWGOD_DIR/pathmap.json" ] || node -e '
+const paths = require(process.argv[1]);
+process.exit(Object.values(paths).every(entry => typeof entry.loader === "string") ? 0 : 1);
+' "$CLAWGOD_DIR/pathmap.json";
+  }; then
+    info "Using complete clean-source backup (--no-upgrade)"
+  else
+    # Old backups lack clean chunks or asset loader metadata. Recover the exact
+    # installed version so --no-upgrade also repairs asset loading (#233).
+    VERSION=$(node -e '
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+let stamp = "";
+try { stamp = fs.readFileSync(process.argv[2], "utf8").trim(); } catch {}
+const version = stamp.match(/^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/)?.[1] ||
+  source.match(/Version:\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
+if (!version) process.exit(1);
+console.log(version);
+' "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/.source-version") || {
+      warn "No complete source backup and installed version is unknown. Reinstall with --version <version>."
+      exit 1
+    }
+    NO_UPGRADE=0
+    info "Recovering clean source for installed version $VERSION (one-time download, no version upgrade)"
+  fi
+fi
+if [ "$NO_UPGRADE" != "1" ]; then
+
+# ─── Locate native Bun binary (cli.js source) ──────────────────────────
+# v2.1.113+ ships a Bun standalone executable as the only canonical form.
+# We extract cli.js text from this binary, patch it, then run via Bun
+# runtime. Source: npm registry (@anthropic-ai/claude-code-<platform>).
+# Local binary detection is intentionally skipped — see policy note below.
+
+mkdir -p "$CLAWGOD_DIR" "$BIN_DIR"
+
+NATIVE_BIN=""
+NATIVE_BIN_LABEL=""
+NATIVE_BIN_TMPDIR=""
+
+# Detection policy: ALWAYS pull from the npm registry @latest.
+#
+# Earlier versions of this script also probed local `node_modules` roots
+# (npm-global, bun-global) before falling back to the registry. That was
+# a stale-source trap: once clawgod is installed it patches out
+# `claude update`, so users never re-run `npm install -g` / `bun add -g`.
+# Both directories freeze at whatever version was on disk the day clawgod
+# was first installed, and `claude update` (which is now redirected here)
+# would re-detect that frozen binary forever — never reaching the
+# registry. See INCIDENT_LOG 2026-04-29 entry. The fix is to skip local
+# detection entirely; the npm tarball is ~60-90 MB compressed, fetched
+# once per upgrade, and npm's HTTP cache keeps repeats fast.
+
+# Detect platform suffix (used by the npm fetch below)
+case "$(uname -s)" in
+  Darwin) os="darwin" ;;
+  Linux)  os="linux" ;;
+  *)      os="" ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) arch="arm64" ;;
+  x86_64|amd64)  arch="x64" ;;
+  *)             arch="" ;;
+esac
+if [ "$os" = "linux" ] && (ldd /bin/ls 2>/dev/null | grep -q musl); then
+  PLATFORM="${os}-${arch}-musl"
+else
+  PLATFORM="${os}-${arch}"
+fi
+
+# Pull the Bun standalone binary from the npm registry. Anthropic publishes
+# per-platform packages (e.g. claude-code-darwin-arm64); their tarball ships
+# the binary directly under package/.
+if [ -z "$NATIVE_BIN" ]; then
+  if ! command -v npm &>/dev/null; then
+    warn "No native Claude Code binary found locally, and npm is not installed."
+    warn "  Either install the official binary first:"
+    warn "    curl -fsSL https://claude.ai/install.sh | bash"
+    warn "  or install npm so we can fetch it from the registry."
+    exit 1
+  fi
+  if [ -z "$os" ] || [ -z "$arch" ]; then
+    warn "Unsupported platform: $(uname -s) $(uname -m)"
+    exit 1
+  fi
+  NPM_PKG="@anthropic-ai/claude-code-${PLATFORM}"
+  dim "Fetching $NPM_PKG@$VERSION from npm registry ..."
+  NATIVE_BIN_TMPDIR=$(mktemp -d)
+  if ( cd "$NATIVE_BIN_TMPDIR" && npm pack "$NPM_PKG@$VERSION" --silent >/dev/null 2>&1 ); then
+    TARBALL=$(ls "$NATIVE_BIN_TMPDIR"/*.tgz 2>/dev/null | head -1)
+    if [ -n "$TARBALL" ]; then
+      ( cd "$NATIVE_BIN_TMPDIR" && tar xzf "$TARBALL" )
+      cand="$NATIVE_BIN_TMPDIR/package/claude"
+      if [ -f "$cand" ]; then
+        sz=$(stat -f%z "$cand" 2>/dev/null || stat -c%s "$cand" 2>/dev/null || echo 0)
+        if [ "$sz" -gt 10000000 ]; then
+          NATIVE_BIN="$cand"
+          NATIVE_BIN_LABEL=$(node -e "console.log(require('$NATIVE_BIN_TMPDIR/package/package.json').version)" 2>/dev/null || echo "npm-latest")
+        fi
+      fi
+    fi
+  fi
+  if [ -z "$NATIVE_BIN" ]; then
+    rm -rf "$NATIVE_BIN_TMPDIR"
+    warn "Failed to download $NPM_PKG from npm."
+    warn "  Install the official Claude Code binary manually:"
+    warn "    curl -fsSL https://claude.ai/install.sh | bash"
+    exit 1
+  fi
+  info "Downloaded $NPM_PKG@$NATIVE_BIN_LABEL"
+fi
+
+if [ -z "$NATIVE_BIN" ]; then
+  warn "Native Claude Code binary not found"
+  warn "Install the official binary first:"
+  warn "  curl -fsSL https://claude.ai/install.sh | bash"
+  warn "Then re-run this script."
+  exit 1
+fi
+
+# ─── Snapshot existing installation for rollback on failure ──────────
+PREV_BACKUP_DIR=""
+ROLLBACK_FILES=(cli.original.cjs cli.original.cjs.bak cli.original.js .source-version
+  source-backup.json bunfs vendor pathmap.json extract-natives.mjs post-process.mjs
+  repatch.mjs openai-proxy.cjs feature-gates.cjs cli.cjs .clawgod-version
+  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs ast-patches.mjs acorn.mjs acorn.LICENSE)
+if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
+  PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
+  for f in "${ROLLBACK_FILES[@]}"; do
+    if [ -e "$CLAWGOD_DIR/$f" ]; then
+      cp -a "$CLAWGOD_DIR/$f" "$PREV_BACKUP_DIR/" || {
+        warn "Could not snapshot $f; installation was not changed."
+        rm -rf "$PREV_BACKUP_DIR"
+        exit 1
+      }
+    fi
+  done
+fi
+
+rollback_install() {
+  local status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ]; then
+    rm -f "$CLAWGOD_DIR/claude.staged"
+    if [ -n "$PREV_BACKUP_DIR" ]; then
+      dim "Rolling back to previous working installation ..."
+      for f in "${ROLLBACK_FILES[@]}"; do rm -rf "$CLAWGOD_DIR/$f"; done
+      if cp -a "$PREV_BACKUP_DIR"/. "$CLAWGOD_DIR/"; then
+        info "Restored previous working installation ($(cat "$CLAWGOD_DIR/.source-version"))."
+      else
+        warn "Rollback failed; backup kept at $PREV_BACKUP_DIR"
+        return
+      fi
+    fi
+  fi
+  [ -z "$PREV_BACKUP_DIR" ] || rm -rf "$PREV_BACKUP_DIR" || warn "Could not remove rollback snapshot at $PREV_BACKUP_DIR"
+}
+trap rollback_install EXIT
+
+# Write extractor (used both for cli.js and .node modules)
+cat > "$CLAWGOD_DIR/extract-natives.mjs" << 'EXTRACTOR_EOF'
+#!/usr/bin/env node
+/**
+ * ClawGod Bun section extractor
+ *
+ * Parses the .bun (PE/ELF) or __BUN,__bun (Mach-O) section embedded in a
+ * Bun standalone executable, walks the module graph, and extracts:
+ *   - the entry-point module      → <out>/cli.original.js
+ *   - every loader=napi module    → <out>/vendor/<name>/<arch>-<os>/<name>.node
+ *
+ * Everything else is dropped (e.g. auto-generated *.js napi shims aren't
+ * needed because cli.js already inlines the require('/$bunfs/root/X.node')
+ * calls that post-process.mjs rewrites to the vendor lookup).
+ *
+ * Adapted from /home/kaiju/code/python/parse-bun/main.js (which itself
+ * implements the format documented in docs/bun-section-format.md). Lazy
+ * Bun.file reads were replaced with readFileSync so the script runs under
+ * the existing `node` invocation in install.sh / install.ps1.
+ *
+ * Usage:
+ *   node extract-natives.mjs <binary-path> <output-dir>
+ */
+
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join, basename } from 'node:path';
+
+// ─── Format constants ────────────────────────────────────────────────
+
+const TRAILER             = Buffer.from('\n---- Bun! ----\n');
+const BUN_SECTION_NAME    = '.bun';
+const OFFSET_STRUCT_SIZE  = 32;
+const MODULE_RECORD_SIZE  = 52;
+
+// loader id → name (also retained for chunk and asset loading semantics)
+const LOADERS = {
+  0:'jsx', 1:'js', 2:'ts', 3:'tsx', 4:'css', 5:'file', 6:'json', 7:'jsonc',
+  8:'toml', 9:'wasm', 10:'napi', 11:'base64', 12:'dataurl', 13:'text',
+  14:'bunsh', 15:'sqlite', 16:'sqlite_embedded', 17:'html', 18:'yaml',
+  19:'json5', 20:'md',
+};
+
+// ELF
+const ELF_MAGIC_LE          = 0x464c457f; // "\x7fELF" LE u32
+const ELF_EI_CLASS          = 0x04;
+const ELF_EI_DATA           = 0x05;
+const ELF_CLASS_64          = 0x02;
+const ELF_DATA_LE           = 0x01;
+const ELF_E_MACHINE         = 0x12;       // u16
+const ELF_EHDR_SIZE         = 0x40;
+const ELF64_E_SHOFF         = 0x28;
+const ELF64_E_SHENTSIZE     = 0x3a;
+const ELF64_E_SHNUM         = 0x3c;
+const ELF64_E_SHSTRNDX      = 0x3e;
+const ELF64_SH_NAME         = 0x00;
+const ELF64_SH_OFFSET       = 0x18;
+const ELF64_SH_SIZE         = 0x20;
+const EM_X86_64             = 0x3e;
+const EM_AARCH64            = 0xb7;
+
+// Mach-O (thin LE 64-bit; fat / 32-bit / BE rejected with clear message)
+const MH_MAGIC_64           = 0xfeedfacf;
+const MH_CIGAM_64           = 0xcffaedfe;
+const MH_MAGIC              = 0xfeedface;
+const MH_CIGAM              = 0xcefaedfe;
+const MACH_CPUTYPE_OFF      = 0x04;        // u32
+const MACH_NCMDS_OFF        = 0x10;
+const MACH_SIZEOFCMDS_OFF   = 0x14;
+const MACH_HDR_SIZE_64      = 0x20;
+const LC_SEGMENT_64         = 0x19;
+const LC_CMDSIZE_OFF        = 0x04;
+const LC_SEGNAME_OFF        = 0x08;
+const LC_SEGNAME_LEN        = 0x10;
+const SEG64_NSECTS_OFF      = 0x40;
+const SEG64_SECTS_OFF       = 0x48;
+const SECT64_ENTRY_SIZE     = 0x50;
+const SECT64_SIZE_OFF       = 0x28;
+const SECT64_OFFSET_OFF     = 0x30;
+const CPU_TYPE_X86_64       = 0x01000007;
+const CPU_TYPE_ARM64        = 0x0100000c;
+
+// PE
+const PE_OFFSET_PTR         = 0x3c;
+const PE_MACHINE_OFF        = 0x04;       // relative to PE sig
+const PE_NUM_SECTIONS_OFF   = 0x06;
+const PE_OPT_HDR_SIZE_OFF   = 0x14;
+const PE_COFF_HDR_SIZE      = 0x18;
+const PE_OPT_MAGIC_OFF      = 0x18;
+const PE_OPT_MAGIC_PE32P    = 0x20b;
+const PE_SECTION_ENTRY_SIZE = 0x28;
+const PE_SECT_RAW_SIZE_OFF  = 0x10;
+const PE_SECT_RAW_OFF_OFF   = 0x14;
+const PE_SECT_NAME_LEN      = 0x08;
+const IMAGE_MACHINE_AMD64   = 0x8664;
+const IMAGE_MACHINE_ARM64   = 0xaa64;
+
+// ─── Helpers ─────────────────────────────────────────────────────────
+
+function die(msg) { throw new Error(`error: ${msg}`); }
+
+function readU64LE(buf, off, what) {
+  const v = buf.readBigUInt64LE(off);
+  if (v > BigInt(Number.MAX_SAFE_INTEGER)) die(`${what} exceeds JS safe integer: ${v}`);
+  return Number(v);
+}
+
+function checkedSlice(buf, off, size, what) {
+  if (off < 0 || size < 0 || off + size > buf.length) {
+    die(`${what} out of bounds: offset=${off} size=${size} buf=${buf.length}`);
+  }
+  return buf.subarray(off, off + size);
+}
+
+function decodeName(buf) {
+  return buf.toString('utf8').replace(/\u0000+$/u, '');
+}
+
+// ─── Section locators (per format) ───────────────────────────────────
+
+function findSectionElf(buf) {
+  if (buf.length < ELF_EHDR_SIZE) die('ELF too small');
+  if (buf[ELF_EI_CLASS] !== ELF_CLASS_64) die('ELF: only 64-bit supported');
+  if (buf[ELF_EI_DATA]  !== ELF_DATA_LE) die('ELF: only little-endian supported');
+
+  const eMachine = buf.readUInt16LE(ELF_E_MACHINE);
+  const arch = eMachine === EM_X86_64  ? 'x64'
+             : eMachine === EM_AARCH64 ? 'arm64'
+             : die(`ELF: unsupported e_machine 0x${eMachine.toString(16)}`);
+
+  const shoff     = readU64LE(buf, ELF64_E_SHOFF, 'ELF e_shoff');
+  const shentsize = buf.readUInt16LE(ELF64_E_SHENTSIZE);
+  const shnum     = buf.readUInt16LE(ELF64_E_SHNUM);
+  const shstrndx  = buf.readUInt16LE(ELF64_E_SHSTRNDX);
+  if (shstrndx >= shnum) die('ELF e_shstrndx out of range');
+
+  const shstrEntry  = buf.subarray(shoff + shstrndx * shentsize, shoff + (shstrndx + 1) * shentsize);
+  const shstrOffset = readU64LE(shstrEntry, ELF64_SH_OFFSET, 'shstrtab offset');
+  const shstrSize   = readU64LE(shstrEntry, ELF64_SH_SIZE,   'shstrtab size');
+  const shstr       = checkedSlice(buf, shstrOffset, shstrSize, 'shstrtab');
+
+  let match = null;
+  for (let i = 0; i < shnum; i++) {
+    const entry   = buf.subarray(shoff + i * shentsize, shoff + (i + 1) * shentsize);
+    const nameIdx = entry.readUInt32LE(ELF64_SH_NAME);
+    if (nameIdx >= shstr.length) continue;
+    let nameEnd = nameIdx;
+    while (nameEnd < shstr.length && shstr[nameEnd] !== 0) nameEnd++;
+    if (shstr.toString('ascii', nameIdx, nameEnd) !== BUN_SECTION_NAME) continue;
+    if (match) die('ELF has multiple .bun sections');
+    const rawOffset = readU64LE(entry, ELF64_SH_OFFSET, '.bun sh_offset');
+    const rawSize   = readU64LE(entry, ELF64_SH_SIZE,   '.bun sh_size');
+    if (rawOffset + rawSize > buf.length) die('.bun out of file bounds');
+    match = { format: 'ELF', os: 'linux', arch, rawOffset, rawSize };
+  }
+  if (!match) die('ELF has no .bun section');
+  return match;
+}
+
+function findSectionMacho(buf) {
+  if (buf.length < MACH_HDR_SIZE_64) die('Mach-O too small');
+  const cputype = buf.readUInt32LE(MACH_CPUTYPE_OFF);
+  const arch = cputype === CPU_TYPE_X86_64 ? 'x64'
+             : cputype === CPU_TYPE_ARM64  ? 'arm64'
+             : die(`Mach-O: unsupported cputype 0x${cputype.toString(16)}`);
+
+  const ncmds      = buf.readUInt32LE(MACH_NCMDS_OFF);
+  const sizeofcmds = buf.readUInt32LE(MACH_SIZEOFCMDS_OFF);
+  if (sizeofcmds === 0 || MACH_HDR_SIZE_64 + sizeofcmds > buf.length) die('Mach-O sizeofcmds invalid');
+  const cmds = buf.subarray(MACH_HDR_SIZE_64, MACH_HDR_SIZE_64 + sizeofcmds);
+
+  let match = null;
+  let off = 0;
+  for (let i = 0; i < ncmds; i++) {
+    if (off + 8 > sizeofcmds) die(`Mach-O LC ${i} truncated`);
+    const cmd     = cmds.readUInt32LE(off);
+    const cmdsize = cmds.readUInt32LE(off + LC_CMDSIZE_OFF);
+    if (cmdsize < 8 || off + cmdsize > sizeofcmds) die(`Mach-O LC ${i} cmdsize invalid: ${cmdsize}`);
+    if (cmd === LC_SEGMENT_64) {
+      const segname = cmds.toString('ascii', off + LC_SEGNAME_OFF, off + LC_SEGNAME_OFF + LC_SEGNAME_LEN).replace(/\0+$/, '');
+      if (segname === '__BUN') {
+        const nsects = cmds.readUInt32LE(off + SEG64_NSECTS_OFF);
+        if (SEG64_SECTS_OFF + nsects * SECT64_ENTRY_SIZE > cmdsize) die(`Mach-O LC_SEGMENT_64(__BUN) sections exceed cmdsize`);
+        for (let j = 0; j < nsects; j++) {
+          const s = off + SEG64_SECTS_OFF + j * SECT64_ENTRY_SIZE;
+          const sectname = cmds.toString('ascii', s, s + LC_SEGNAME_LEN).replace(/\0+$/, '');
+          if (sectname === '__bun') {
+            const rawSize   = readU64LE(cmds, s + SECT64_SIZE_OFF, '__bun size');
+            const rawOffset = cmds.readUInt32LE(s + SECT64_OFFSET_OFF);
+            if (rawOffset + rawSize > buf.length) die('__bun out of file bounds');
+            if (match) die('Mach-O has multiple __BUN,__bun sections');
+            match = { format: 'Mach-O', os: 'darwin', arch, rawOffset, rawSize };
+          }
+        }
+      }
+    }
+    off += cmdsize;
+  }
+  if (!match) die('Mach-O has no __BUN,__bun section');
+  return match;
+}
+
+function findSectionPe(buf) {
+  if (buf.length < 0x40) die('PE too small');
+  if (buf.toString('ascii', 0, 2) !== 'MZ') die('PE missing MZ header');
+  const peOff = buf.readUInt32LE(PE_OFFSET_PTR);
+  if (buf.toString('ascii', peOff, peOff + 4) !== 'PE\0\0') die('PE missing PE signature');
+
+  const machine = buf.readUInt16LE(peOff + PE_MACHINE_OFF);
+  const arch = machine === IMAGE_MACHINE_AMD64 ? 'x64'
+             : machine === IMAGE_MACHINE_ARM64 ? 'arm64'
+             : die(`PE: unsupported machine 0x${machine.toString(16)}`);
+
+  const optMagic = buf.readUInt16LE(peOff + PE_OPT_MAGIC_OFF);
+  if (optMagic !== PE_OPT_MAGIC_PE32P) die(`PE: only 64-bit (PE32+) supported, got 0x${optMagic.toString(16)}`);
+
+  const numSect    = buf.readUInt16LE(peOff + PE_NUM_SECTIONS_OFF);
+  const optHdrSize = buf.readUInt16LE(peOff + PE_OPT_HDR_SIZE_OFF);
+  const sectTable  = peOff + PE_COFF_HDR_SIZE + optHdrSize;
+
+  let match = null;
+  for (let i = 0; i < numSect; i++) {
+    const entry  = sectTable + i * PE_SECTION_ENTRY_SIZE;
+    const rawNm  = buf.subarray(entry, entry + PE_SECT_NAME_LEN);
+    const nul    = rawNm.indexOf(0);
+    const name   = rawNm.subarray(0, nul === -1 ? rawNm.length : nul).toString('ascii');
+    if (name !== BUN_SECTION_NAME) continue;
+    if (match) die('PE has multiple .bun sections');
+    const rawSize   = buf.readUInt32LE(entry + PE_SECT_RAW_SIZE_OFF);
+    const rawOffset = buf.readUInt32LE(entry + PE_SECT_RAW_OFF_OFF);
+    if (rawOffset + rawSize > buf.length) die('.bun out of file bounds');
+    match = { format: 'PE', os: 'win32', arch, rawOffset, rawSize };
+  }
+  if (!match) die('PE has no .bun section');
+  return match;
+}
+
+function findBunSection(buf) {
+  if (buf.length < 4) die('file too small');
+  const magic = buf.readUInt32LE(0);
+  if (magic === ELF_MAGIC_LE)                       return findSectionElf(buf);
+  if (magic === MH_MAGIC_64)                        return findSectionMacho(buf);
+  if (magic === MH_CIGAM_64 || magic === MH_CIGAM)  die('Mach-O: only little-endian supported');
+  if (magic === MH_MAGIC)                           die('Mach-O: only 64-bit supported');
+  return findSectionPe(buf);
+}
+
+// ─── Payload + module records ────────────────────────────────────────
+
+function parsePayload(sectionData) {
+  if (sectionData.length < 8) die('.bun too small for length prefix');
+  const payloadSize = readU64LE(sectionData, 0, '.bun payload length');
+  if (payloadSize + 8 > sectionData.length) die('.bun payload exceeds raw section');
+  const payload = sectionData.subarray(8, 8 + payloadSize);
+  if (payload.length < OFFSET_STRUCT_SIZE + TRAILER.length) die('.bun payload too small');
+  if (!payload.subarray(payload.length - TRAILER.length).equals(TRAILER)) die('.bun trailer mismatch');
+  return payload;
+}
+
+function parseOffsets(payload) {
+  const start = payload.length - TRAILER.length - OFFSET_STRUCT_SIZE;
+  return {
+    modules_offset: payload.readUInt32LE(start + 8),
+    modules_size:   payload.readUInt32LE(start + 12),
+    entry_point_id: payload.readUInt32LE(start + 16),
+  };
+}
+
+function parseModules(payload, offsets) {
+  if (offsets.modules_size % MODULE_RECORD_SIZE !== 0) {
+    die(`modules table size not a multiple of ${MODULE_RECORD_SIZE}: ${offsets.modules_size}`);
+  }
+  const count = offsets.modules_size / MODULE_RECORD_SIZE;
+  if (offsets.entry_point_id >= count) die(`entry_point_id ${offsets.entry_point_id} >= ${count}`);
+  const table = checkedSlice(payload, offsets.modules_offset, offsets.modules_size, 'modules table');
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const rec        = table.subarray(i * MODULE_RECORD_SIZE, (i + 1) * MODULE_RECORD_SIZE);
+    const nameOff    = rec.readUInt32LE(0);
+    const nameSize   = rec.readUInt32LE(4);
+    const contentOff = rec.readUInt32LE(8);
+    const contentSize= rec.readUInt32LE(12);
+    const loaderId   = rec.readUInt8(49);
+    const name = decodeName(checkedSlice(payload, nameOff, nameSize, `module[${i}].name`));
+    const content = checkedSlice(payload, contentOff, contentSize, `module[${i}].content`);
+    out.push({
+      index: i,
+      entry: i === offsets.entry_point_id,
+      name,
+      content,
+      loader: LOADERS[loaderId] ?? `unknown(${loaderId})`,
+    });
+  }
+  return out;
+}
+
+// ─── Output dispatch ─────────────────────────────────────────────────
+
+function napiBasename(name) {
+  // Bun records may use either '/' (POSIX builds) or '\\' (PE) as separator;
+  // always normalize so basename grabs the right tail.
+  const flat = name.replaceAll('\\', '/');
+  const tail = flat.split('/').pop() ?? '';
+  return tail.replace(/\.node$/i, '');
+}
+
+// ─── Main ────────────────────────────────────────────────────────────
+
+function main() {
+  const [,, binaryPath, outputDir] = process.argv;
+  if (!binaryPath || !outputDir) {
+    console.error('Usage: extract-natives.mjs <binary-path> <output-dir>');
+    process.exit(1);
+  }
+  if (!existsSync(binaryPath)) {
+    console.error(`Binary not found: ${binaryPath}`);
+    process.exit(1);
+  }
+
+  const buf = readFileSync(binaryPath);
+  console.log(`Size:    ${(buf.length / 1024 / 1024).toFixed(1)} MB`);
+
+  const section = findBunSection(buf);
+  console.log(`Format:  ${section.format} (${section.arch}-${section.os})`);
+
+  const sectionData = checkedSlice(buf, section.rawOffset, section.rawSize, '.bun section');
+  const payload     = parsePayload(sectionData);
+  const offsets     = parseOffsets(payload);
+  const modules     = parseModules(payload, offsets);
+  console.log(`Modules: ${modules.length} (entry id=${offsets.entry_point_id})`);
+
+  mkdirSync(outputDir, { recursive: true });
+
+  const entryMod = modules.find((m) => m.entry);
+  const entryText = entryMod ? entryMod.content.toString('utf8') : '';
+  // v2.1.245+ splits the app into an ESM chunk graph: the entry is a small
+  // ~20KB ESM module static-importing sibling chunk modules + a handful of
+  // boot modules, with lazy import() of chunk-*.js. The ~1400 remaining js
+  // records and ~170 text/file assets must all be kept on disk as flat
+  // siblings, or the entry throws "Cannot find module".
+  // Bun mounts the app bundle at "/$bunfs/root" on POSIX builds and at
+  // "B:/~BUN/root" on single-drive Windows builds (both are virtual
+  // in-bundle roots, differ only by the drive-letter prefix).
+  const BUN_MOUNT_RE = /^(?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\//;
+  const bunSub = (name) => {
+    const n = name.replaceAll('\\', '/');
+    const mm = n.match(BUN_MOUNT_RE);
+    return mm ? n.slice(mm[0].length) : null;
+  };
+  const isChunked = !!entryMod &&
+    !entryText.includes('(function(exports, require, module') &&
+    (entryText.includes('import{') || BUN_MOUNT_RE.test(entryText));
+
+  // When chunked, also extract every non-napi module to a flat dir so the
+  // ESM graph resolves. We flatten <mount>/sub/path → sub__path and keep
+  // napi under vendor/. We postpone path rewriting to post-process.mjs
+  // (which knows the final install dir).
+  const platDir = `${section.arch}-${section.os}`;
+  const graphDir = join(outputDir, 'bunfs');
+
+  let cliCount = 0, napiCount = 0, dropped = 0;
+  const napiNames = new Set();
+  for (const m of modules) {
+    if (m.entry) {
+      const out = join(outputDir, 'cli.original.js');
+      writeFileSync(out, m.content);
+      console.log(`  cli.js   ${(m.content.length / 1024 / 1024).toFixed(2)} MB → ${out} (${m.name})`);
+      cliCount++;
+    } else if (m.loader === 'napi') {
+      const base = napiBasename(m.name);
+      if (!base) { console.warn(`  skip napi ${m.name}: empty basename`); dropped++; continue; }
+      const dir = join(outputDir, 'vendor', base, platDir);
+      mkdirSync(dir, { recursive: true });
+      const out = join(dir, `${base}.node`);
+      writeFileSync(out, m.content);
+      console.log(`  napi     ${(m.content.length / 1024).toFixed(0).padStart(5)} KB → ${out}`);
+      napiCount++;
+      napiNames.add(m.name.replaceAll('\\', '/'));
+    } else if (isChunked && bunSub(m.name)) {
+      // js chunk / text asset / file asset: write to flat graph dir so Bun
+      // can resolve the rewritten /$bunfs/root/ (POSIX) or B:/~BUN/root/
+      // (Windows single-drive) specifiers.
+      const sub = bunSub(m.name);
+      if (!sub) { dropped++; continue; }
+      const flat = sub.replace(/\//g, '__');
+      mkdirSync(graphDir, { recursive: true });
+      writeFileSync(join(graphDir, flat), m.content);
+      console.log(`  chunk    ${(m.content.length / 1024).toFixed(0).padStart(6)} KB → bunfs/${flat}`);
+      dropped++;  // count as dropped-from-entry (informational)
+    } else {
+      dropped++;
+    }
+  }
+  console.log(`Extracted: ${cliCount} cli.js + ${napiCount} napi + ${isChunked ? 'chunk-graph' : 'dropped'} (${dropped} other)`);
+  console.log(`  bunfs graph: ${isChunked ? 'yes (' + platDir + ')' : 'no (legacy single-bundle)'}`);
+  if (cliCount !== 1) {
+    console.error(`error: expected exactly 1 entry-point, got ${cliCount}`);
+    process.exit(2);
+  }
+  if (isChunked) {
+    // Write a path-map JSON so post-process.mjs can rewrite every
+    // /$bunfs/root/X or B:/~BUN/root/X string literal to the on-disk
+    // absolute path.
+    const pathMap = {};
+    for (const m of modules) {
+      const normName = m.name.replaceAll('\\', '/');
+      if (!BUN_MOUNT_RE.test(normName)) continue;
+      const sub = normName.replace(BUN_MOUNT_RE, '');
+      if (!sub) continue;
+      if (m.entry) {
+        pathMap[normName] = { path: 'cli.original.cjs', loader: m.loader };
+      } else if (m.loader === 'napi') {
+        const base = napiBasename(m.name);
+        pathMap[normName] = { path: `vendor/${base}/${platDir}/${base}.node`, loader: m.loader };
+      } else {
+        pathMap[normName] = { path: `bunfs/${sub.replace(/\//g, '__')}`, loader: m.loader };
+      }
+    }
+    writeFileSync(join(outputDir, 'pathmap.json'), JSON.stringify(pathMap, null, 0) + '\n');
+    console.log(`Graph chunks: ${modules.filter((m) => m.loader === 'js').length} js + napi in vendor/`);
+  }
+}
+
+main();
+EXTRACTOR_EOF
+
+# ─── Extract cli.js + native modules from Bun binary ──────────
+# Note: extract-natives.mjs and post-process.mjs are kept around (NOT deleted)
+# so the wrapper's drift detector can re-run them when the user upgrades
+# their native Claude binary.
+
+# Single extractor pass: writes cli.original.js + (v2.1.245+) full chunk graph
+# to $CLAWGOD_DIR/bunfs/ and vendor/<name>/<arch>-<os>/<name>.node, plus a
+# pathmap.json for post-process path rewriting.
+rm -rf "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bunfs" "$CLAWGOD_DIR/pathmap.json" \
+  "$CLAWGOD_DIR/cli.original.js" 2>/dev/null
+
+dim "Extracting cli.js + modules from $(echo "$NATIVE_BIN_LABEL") ..."
+node "$CLAWGOD_DIR/extract-natives.mjs" "$NATIVE_BIN" "$CLAWGOD_DIR" 2>&1 | while IFS= read -r line; do echo "  $line"; done
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+  err "Failed to extract from native binary"
+  exit 1
+fi
+[ -f "$CLAWGOD_DIR/cli.original.js" ] || { err "cli.js missing after extraction"; exit 1; }
+
+# ─── Post-process cli.js for Bun runtime ──────────────────────
+# 0. Strip leading @bun pragma comments so Bun recognises the CJS wrapper
+# 1. Rewrite /$bunfs/root/X.node paths to point at extracted vendor modules
+# 2. Rewrite build-time /home/runner/.../*.ts URLs (used by ripgrep,
+#    sandbox, computer-use, etc. for asset resolution) to __filename so
+#    relative resolutions land near our cli.original.cjs
+# 3. Wrap the Bun-cjs IIFE with an actual invocation so `require()` runs it
+# 4. Save as .cjs (Bun + CJS module wrapper)
+
+dim "Rewriting bunfs paths and IIFE invocation ..."
+cat > "$CLAWGOD_DIR/post-process.mjs" << 'POSTPROC_EOF'
+import { readFileSync, writeFileSync, unlinkSync, existsSync, realpathSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+import { parse } from './acorn.mjs';
+
+// Generate paths in the OS's canonical form, including Windows 8.3 aliases.
+const here = realpathSync.native(dirname(fileURLToPath(import.meta.url)));
+const src = `${here}/cli.original.js`;
+const dst = `${here}/cli.original.cjs`;
+const pathMapFile = `${here}/pathmap.json`;
+
+let code = readFileSync(src, 'utf8');
+
+// v2.1.245+ splits the app into an ESM chunk graph; post-process then
+// rewrites the whole bunfs/ dir too. Legacy single-bundle has no pathmap.
+const isChunked = existsSync(pathMapFile);
+
+// (0) Strip leading @bun pragma comments (e.g. "// @bun @bytecode @bun-cjs\n")
+// Bun requires the file to start directly with "(function" (CJS) or the
+// first import (ESM) — any preceding comment breaks that detection.
+function stripPragma(c) { return c.replace(/^(?:\/\/[^\n]*\n)+/, ''); }
+
+// build-time fileURLToPath() leaks → use cli.cjs's own __filename
+function fixFileURLs(c) {
+  return c.replace(
+    /[\w$]+\.fileURLToPath\("file:\/\/\/home\/runner\/work\/claude-cli-internal\/claude-cli-internal\/[^"]*"\)/g,
+    () => '__filename',
+  );
+}
+
+// The native bundle retains loader semantics even for executable extensions.
+// Disk require must never execute an embedded text/file asset (#233).
+function fixAssetRequires(c, assets) {
+  if (!c.includes('require')) return c;
+  const loader = `(() => {
+    const fs = import.meta.require('node:fs');
+    const path = import.meta.require('node:path');
+    const types = new Map(${JSON.stringify([...assets])});
+    return (id) => {
+      if (typeof id === 'string' && path.isAbsolute(id) && fs.existsSync(id)) {
+        const canonical = fs.realpathSync.native(id);
+        const key = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+        const type = types.get(key);
+        if (type === 'text') return fs.readFileSync(id, 'utf8');
+        if (type === 'file') return id;
+      }
+      return import.meta.require(id);
+    };
+  })()`;
+  const isRequire = node => node?.type === 'MemberExpression' &&
+    (node.computed ? node.property.value === 'require' : node.property.name === 'require') &&
+    node.object.type === 'MetaProperty' && node.object.meta.name === 'import';
+  const pending = [parse(c, { ecmaVersion: 'latest', sourceType: 'module' })];
+  const edits = [];
+  while (pending.length) {
+    const node = pending.pop();
+    const alias = node.type === 'VariableDeclarator' ? node.init
+      : node.type === 'AssignmentExpression' && node.operator === '=' ? node.right : null;
+    if (isRequire(alias)) edits.push(alias);
+    if (node.type === 'CallExpression' && isRequire(node.callee)) {
+      const id = node.arguments[0]?.value;
+      const key = typeof id === 'string' && process.platform === 'win32' ? id.toLowerCase() : id;
+      if (assets.has(key)) edits.push(node.callee);
+    }
+    for (const value of Object.values(node)) {
+      if (value?.type) pending.push(value);
+      else if (Array.isArray(value)) pending.push(...value.filter(child => child?.type));
+    }
+  }
+  for (const node of edits.sort((a, b) => b.start - a.start)) {
+    c = c.slice(0, node.start) + loader + c.slice(node.end);
+  }
+  return c;
+}
+
+if (isChunked) {
+  // ── v2.1.245+ ESM chunk graph path ──
+  const pathMap = JSON.parse(readFileSync(pathMapFile, 'utf8'));
+  // build the replace table: /$bunfs/root/X → <here>/<relative-on-disk>
+  const replaceTable = new Map();
+  const assets = new Map();
+  const graphFiles = new Set();
+  for (const [bunPath, { path, loader }] of Object.entries(pathMap)) {
+    const target = join(here, path);
+    replaceTable.set(bunPath, target);
+    if (loader === 'text' || loader === 'file') {
+      const canonical = realpathSync.native(target);
+      assets.set(process.platform === 'win32' ? canonical.toLowerCase() : canonical, loader);
+    }
+    if (['js', 'jsx', 'ts', 'tsx'].includes(loader) && path.startsWith('bunfs/')) {
+      graphFiles.add(target);
+    }
+  }
+
+  function rewriteGraph(text) {
+    // Replace string literals containing the virtual in-bundle root
+    // (POSIX "/$bunfs/root/..." or Windows single-drive "B:/~BUN/root/...")
+    // with the on-disk absolute path from the replace table.
+    return text.replace(/["'`](?:\/\$bunfs\/root|[A-Za-z]:\/~BUN\/root)\/[^"'`]+["'`]/g, (m) => {
+      const body = m.slice(1, -1);
+      const target = replaceTable.get(body) || replaceTable.get(body.replaceAll('\\','/'));
+      // JSON.stringify emits a valid JS string literal. This is essential on
+      // Windows, where path.join() returns backslashes that would otherwise be
+      // interpreted as escapes (for example, \b in "\bunfs").
+      return target ? JSON.stringify(target) : m;
+    });
+  }
+
+  // entry → cli.original.cjs (ESM, no IIFE wrap)
+  code = stripPragma(code);
+  code = rewriteGraph(code);
+  code = fixFileURLs(code);
+  code = fixAssetRequires(code, assets);
+  writeFileSync(dst, code);
+  unlinkSync(src);
+
+  // Rewrite code chunks only; skill templates must stay byte-for-byte intact.
+  let n = 0;
+  for (const fp of graphFiles) {
+    let fc = readFileSync(fp, 'utf8');
+    fc = stripPragma(fc);
+    fc = rewriteGraph(fc);
+    fc = fixFileURLs(fc);
+    fc = fixAssetRequires(fc, assets);
+    writeFileSync(fp, fc);
+    n++;
+  }
+  console.log(`cli.original.cjs: ${code.length} bytes (chunked, rewrote ${n} graph files)`);
+} else {
+  // ── Legacy single-bundle path ──
+  code = stripPragma(code);
+
+  // (1) bunfs .node module paths → runtime vendor lookup
+  code = code.replace(
+    /require\(['"](\/\$bunfs\/root\/([\w-]+)\.node)['"]\)/g,
+    (m, _full, name) =>
+      `require(require('path').join(__dirname,'vendor',${JSON.stringify(name)},\`\${process.arch==='arm64'?'arm64':'x64'}-\${process.platform==='darwin'?'darwin':process.platform==='linux'?'linux':'win32'}\`,${JSON.stringify(name + '.node')}))`,
+  );
+
+  code = fixFileURLs(code);
+
+  // (3) make the outer (function(...){...}) actually run
+  code = code.replace(/\}\)\s*$/, '})(exports, require, module, __filename, __dirname)');
+
+  writeFileSync(dst, code);
+  unlinkSync(src);
+  console.log(`cli.original.cjs: ${code.length} bytes`);
+}
+POSTPROC_EOF
+node "$CLAWGOD_DIR/post-process.mjs" 2>&1 | while IFS= read -r line; do echo "  $line"; done
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then err "Post-process failed"; exit 1; fi
+[ -f "$CLAWGOD_DIR/cli.original.cjs" ] || { err "Post-process failed"; exit 1; }
+
+# Stamp the source version so the wrapper can detect drift on next launch
+echo "$NATIVE_BIN_LABEL" > "$CLAWGOD_DIR/.source-version"
+
+# Keep the binary we just extracted from. cli.cjs points process.execPath at
+# claude.orig, so everything Claude re-spawns from execPath (daemon, background
+# and forked sessions) runs that file, not the patched bundle. The launcher
+# section below swaps it in once it knows where claude lives.
+if [ -f "$NATIVE_BIN" ]; then
+  mv -f "$NATIVE_BIN" "$CLAWGOD_DIR/claude.staged"
+fi
+
+# If we pulled the binary from npm into a tmpdir, clean it up now —
+# extraction is done, drift detection only consults ~/.local/share/claude/versions/.
+if [ -n "$NATIVE_BIN_TMPDIR" ]; then
+  rm -rf "$NATIVE_BIN_TMPDIR"
+fi
+
+info "cli.original.cjs ready ($NATIVE_BIN_LABEL)"
+
+fi  # end --no-upgrade skip
+
+# A failed earlier upgrade may have left a newer native binary staged.
+# Re-patching the installed source must not install that different version.
+if [ "$NO_UPGRADE" = "1" ]; then rm -f "$CLAWGOD_DIR/claude.staged"; fi
+
+# ─── Write re-patch helper (used by wrapper on version drift) ─────────
+
+cat > "$CLAWGOD_DIR/repatch.mjs" << 'REPATCH_EOF'
+#!/usr/bin/env bun
+// Re-extract + post-process + patch the user's currently-installed
+// native Claude binary. Invoked by cli.cjs when it detects that
+// .source-version no longer matches the latest binary in versions/.
+import { spawnSync } from 'child_process';
+import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
+import { dirname, join, basename } from 'path';
+import { fileURLToPath } from 'url';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const nativeBin = process.argv[2];
+
+if (!nativeBin || !existsSync(nativeBin)) {
+  console.error('repatch: native binary path required and must exist');
+  process.exit(1);
+}
+
+rmSync(join(here, 'vendor'), { recursive: true, force: true });
+rmSync(join(here, 'bunfs'), { recursive: true, force: true });
+rmSync(join(here, 'pathmap.json'), { force: true });
+rmSync(join(here, 'cli.original.js'), { force: true });
+
+const runtime = process.execPath;
+
+function run(label, args) {
+  const r = spawnSync(runtime, args, { cwd: here, stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error(`repatch: ${label} failed (exit ${r.status})`);
+    process.exit(1);
+  }
+}
+
+const extractor = join(here, 'extract-natives.mjs');
+const postProc = join(here, 'post-process.mjs');
+const patcher = join(here, 'patch.mjs');
+
+run('extract', [extractor, nativeBin, here]);
+run('post-process', [postProc]);
+run('clean source backup', [patcher, '--capture-clean-source']);
+run('patcher', [patcher]);
+
+writeFileSync(join(here, '.source-version'), basename(nativeBin) + '\n');
+console.log(`[clawgod] re-patched to ${basename(nativeBin)}`);
+REPATCH_EOF
+chmod +x "$CLAWGOD_DIR/repatch.mjs"
+info "Re-patch helper installed (repatch.mjs)"
+
+# ─── Write OpenAI-compatible proxy ────────────────────────────
+
+cat > "$CLAWGOD_DIR/openai-proxy.cjs" << 'PROXY_EOF'
+'use strict';
+// Anthropic Messages API <-> OpenAI Chat Completions API translation proxy
+// Allows Claude Code to use xAI/Grok and other OpenAI-compatible APIs
+
+function textParts(content, context) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) throw new Error(context + ' must be text or content blocks');
+  return content.map(function (block) {
+    if (block.type !== 'text') throw new Error(context + ': unsupported block ' + block.type);
+    return textValue(block.text);
+  }).join('\n');
+}
+
+function textValue(value) {
+  if (typeof value !== 'string') throw new Error('Text content must be a string');
+  return value;
+}
+
+function userPart(block) {
+  if (block.type === 'text') return { type: 'text', text: textValue(block.text) };
+  var source = block.source || {};
+  if (block.type === 'image') {
+    if (source.type === 'base64' && source.data && /^image\//.test(source.media_type))
+      return { type: 'image_url', image_url: { url: 'data:' + source.media_type + ';base64,' + source.data } };
+    if (source.type === 'url' && source.url) return { type: 'image_url', image_url: { url: source.url } };
+    throw new Error('Unsupported image source');
+  }
+  if (block.type === 'document') {
+    if (block.citations && block.citations.enabled) throw new Error('Document citations are not supported by openai-chat');
+    if (source.type === 'text') return { type: 'text', text: textValue(source.data) };
+    if (source.type === 'base64' && source.media_type === 'application/pdf' && source.data)
+      return { type: 'file', file: { filename: block.title || 'document.pdf', file_data: 'data:application/pdf;base64,' + source.data } };
+    throw new Error('Unsupported document source; use base64 PDF (requires upstream file support) or text');
+  }
+  throw new Error('Unsupported user content block: ' + block.type);
+}
+
+function translateMessages(msgs) {
+  if (!Array.isArray(msgs)) throw new Error('messages must be an array');
+  var out = [];
+  for (var msg of msgs) {
+    // Some clients supply system instructions inside the conversation rather
+    // than only in body.system. Chat Completions supports these directly;
+    // retain their position and never silently discard instruction content.
+    if (msg.role === 'system') {
+      out.push({ role: 'system', content: textParts(msg.content, 'System message') });
+      continue;
+    }
+    if (msg.role !== 'user' && msg.role !== 'assistant') throw new Error('Unsupported message role: ' + msg.role);
+    if (typeof msg.content === 'string') { out.push({ role: msg.role, content: msg.content }); continue; }
+    if (!Array.isArray(msg.content)) throw new Error('Message content must be text or content blocks');
+    if (msg.role === 'user') {
+      var parts = [];
+      for (var block of msg.content) {
+        if (block.type === 'tool_result') {
+          var text = block.content === undefined ? '' : textParts(block.content, 'Tool result');
+          out.push({ role: 'tool', tool_call_id: block.tool_use_id, content: (block.is_error ? '[ERROR] ' : '') + text });
+        } else parts.push(userPart(block));
+      }
+      // All tool results must precede the next user turn (including parallel calls).
+      if (parts.length) out.push({ role: 'user', content: parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts });
+    } else {
+      var textContent = '', toolCalls = [];
+      for (var b of msg.content) {
+        if (b.type === 'text') textContent += textValue(b.text);
+        else if (b.type === 'tool_use') toolCalls.push({ id: b.id, type: 'function', function: { name: b.name, arguments: typeof b.input === 'string' ? b.input : JSON.stringify(b.input) } });
+        // Anthropic thinking signatures cannot be replayed to Chat Completions.
+        else if (b.type !== 'thinking' && b.type !== 'redacted_thinking') throw new Error('Unsupported assistant content block: ' + b.type);
+      }
+      var assistantMsg = { role: 'assistant', content: textContent || null };
+      if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
+      out.push(assistantMsg);
+    }
+  }
+  return out;
+}
+
+function translateRequest(body, configuredEffort) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Request must be an object');
+  var messages = body.system ? [{ role: 'system', content: textParts(body.system, 'System prompt') }] : [];
+  var result = { model: body.model, messages: messages.concat(translateMessages(body.messages || [])), stream: !!body.stream };
+  if (body.max_tokens !== undefined) result.max_tokens = body.max_tokens;
+  if (body.temperature !== undefined) result.temperature = body.temperature;
+  if (body.top_p !== undefined) result.top_p = body.top_p;
+  if (body.stop_sequences) result.stop = body.stop_sequences;
+  var effort = configuredEffort || (body.output_config && body.output_config.effort);
+  if (effort && effort !== 'auto') result.reasoning_effort = effort === 'max' ? 'xhigh' : effort;
+  if (body.tools && body.tools.length) result.tools = body.tools.map(function (tool) {
+    if (tool.type && tool.type !== 'custom') throw new Error('Unsupported tool type: ' + tool.type);
+    return { type: 'function', function: { name: tool.name, description: tool.description || '', parameters: tool.input_schema || { type: 'object', properties: {} } } };
+  });
+  if (body.tool_choice) {
+    var choice = body.tool_choice;
+    if (choice.type === 'tool' && choice.name) result.tool_choice = { type: 'function', function: { name: choice.name } };
+    else if (choice.type === 'any') result.tool_choice = 'required';
+    else if (choice.type === 'auto' || choice.type === 'none') result.tool_choice = choice.type;
+    else throw new Error('Unsupported tool_choice');
+    if (choice.disable_parallel_tool_use !== undefined) result.parallel_tool_calls = !choice.disable_parallel_tool_use;
+  }
+  if (body.output_config && body.output_config.format) throw new Error('Structured output format is not supported by openai-chat');
+  if (body.stream) result.stream_options = { include_usage: true };
+  // Build only protocol fields; never recursively strip keys from user tool data/schema.
+  return result;
+}
+
+// Deliberately local and approximate: text UTF-8 bytes / 3, image budget 1600,
+// PDF decoded bytes / 3. Binary size is not a tokenizer or a PDF page count.
+function estimateTokens(request) {
+  var bytes = 0, mediaTokens = 0;
+  function visit(value) {
+    if (typeof value === 'string') bytes += new TextEncoder().encode(value).length;
+    else if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === 'object') {
+      if (value.type === 'image_url' && value.image_url) { mediaTokens += 1600; return; }
+      if (value.type === 'file' && value.file && typeof value.file.file_data === 'string' && value.file.file_data.startsWith('data:application/pdf;base64,')) {
+        mediaTokens += Math.ceil(value.file.file_data.split(',')[1].length / 4); return;
+      }
+      for (var key of Object.keys(value)) { bytes += key.length; visit(value[key]); }
+    }
+  }
+  visit(request.messages);
+  visit(request.tools);
+  return Math.max(1, Math.ceil(bytes / 3) + mediaTokens + request.messages.length * 4);
+}
+
+function mapFinishReason(reason, hasToolCalls) {
+  // Some compatible providers use stop even when they return tool_calls.
+  // Keep truncation/refusal distinct, but do not hide a completed tool turn.
+  if (reason === 'tool_calls' || (reason === 'stop' && hasToolCalls)) return 'tool_use';
+  if (reason === 'length') return 'max_tokens';
+  if (reason === 'content_filter') return 'refusal';
+  // Chat's stop does not distinguish natural stops from stop sequences.
+  if (reason === 'stop') return 'end_turn';
+  throw new Error('Unsupported upstream finish_reason: ' + reason);
+}
+
+function toolInput(argumentsText) {
+  var input = JSON.parse(argumentsText || '{}');
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Tool arguments must be a JSON object');
+  return input;
+}
+
+function usageOf(usage) {
+  return { input_tokens: (usage && usage.prompt_tokens) || 0, output_tokens: (usage && usage.completion_tokens) || 0 };
+}
+
+function translateResponse(response, model) {
+  if (response.error) throw new Error(response.error.message || 'Upstream API error');
+  var choice = response.choices && response.choices[0];
+  if (!choice || !choice.message || typeof choice.message !== 'object') throw new Error('No message in upstream response');
+  var content = [], message = choice.message;
+  if (message.content !== undefined && message.content !== null) content.push({ type: 'text', text: textValue(message.content) });
+  if (message.refusal) content.push({ type: 'text', text: textValue(message.refusal) });
+  for (var tc of message.tool_calls || []) {
+    if (!tc.id || !tc.function || !tc.function.name) throw new Error('Incomplete upstream tool call');
+    content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: toolInput(tc.function.arguments) });
+  }
+  return { id: response.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: content, model: model || response.model, stop_reason: mapFinishReason(choice.finish_reason, content.some(function (b) { return b.type === 'tool_use'; })), stop_sequence: null, usage: usageOf(response.usage) };
+}
+
+function sse(event, data) { return 'event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n'; }
+
+function createStreamTranslator(model) {
+  var started = false, finished = false, stopped = false, textIndex = null, nextIndex = 0;
+  var tools = new Map(), usage = usageOf(), reason;
+  return function (chunk) {
+    if (stopped) throw new Error('Data after stream end');
+    var events = [];
+    function emit(type, fields) { events.push(sse(type, { type: type, ...fields })); }
+    if (chunk === null) {
+      if (!finished) throw new Error('Upstream stream ended before finish_reason');
+      stopped = true;
+      emit('message_delta', { delta: { stop_reason: reason, stop_sequence: null }, usage: usage });
+      emit('message_stop', {});
+      return events;
+    }
+    if (chunk.error) throw new Error(chunk.error.message || 'Upstream stream error');
+    if (chunk.usage) usage = usageOf(chunk.usage);
+    var choice = chunk.choices && chunk.choices.find(function (c) { return c.index === undefined || c.index === 0; });
+    if (!choice) {
+      if (!Array.isArray(chunk.choices)) throw new Error('Invalid upstream stream chunk');
+      return events;
+    }
+    if (finished) throw new Error('Completion data after finish_reason');
+    if (!started) {
+      started = true;
+      emit('message_start', { message: { id: chunk.id || ('msg_' + Date.now()), type: 'message', role: 'assistant', content: [], model: model || chunk.model, stop_reason: null, stop_sequence: null, usage: usage } });
+    }
+    var delta = choice.delta || {};
+    var text = delta.content || delta.refusal;
+    if (text) {
+      textValue(text);
+      if (textIndex === null) { textIndex = nextIndex++; emit('content_block_start', { index: textIndex, content_block: { type: 'text', text: '' } }); }
+      emit('content_block_delta', { index: textIndex, delta: { type: 'text_delta', text: text } });
+    }
+    for (var tc of delta.tool_calls || []) {
+      if (!Number.isInteger(tc.index) || tc.index < 0) throw new Error('Invalid upstream tool index');
+      if (!tools.has(tc.index)) tools.set(tc.index, { id: '', name: '', args: '' });
+      var buf = tools.get(tc.index);
+      if (tc.id) buf.id += tc.id;
+      if (tc.function) { buf.name += tc.function.name || ''; buf.args += tc.function.arguments || ''; }
+    }
+    if (choice.finish_reason) {
+      reason = mapFinishReason(choice.finish_reason, tools.size > 0);
+      if (textIndex !== null) emit('content_block_stop', { index: textIndex });
+      // Buffer tools until complete so fragmented metadata and parallel calls
+      // produce valid, sequential Anthropic content blocks with validated JSON.
+      for (var tool of tools.values()) {
+        if (!tool.id || !tool.name) throw new Error('Incomplete upstream tool call');
+        toolInput(tool.args);
+        var index = nextIndex++;
+        emit('content_block_start', { index: index, content_block: { type: 'tool_use', id: tool.id, name: tool.name, input: {} } });
+        emit('content_block_delta', { index: index, delta: { type: 'input_json_delta', partial_json: tool.args || '{}' } });
+        emit('content_block_stop', { index: index });
+      }
+      finished = true;
+    }
+    return events;
+  };
+}
+
+// Parse complete SSE events, independent of transport chunk / UTF-8 boundaries.
+async function* translateStream(reader, model) {
+  var decoder = new TextDecoder(), buffer = '', data = [], translate = createStreamTranslator(model);
+  function payload(line) {
+    if (line === '') { var result = data.length ? data.join('\n') : undefined; data = []; return result; }
+    if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+  }
+  while (true) {
+    var read = await reader.read();
+    buffer += read.done ? decoder.decode() : decoder.decode(read.value, { stream: true });
+    if (read.done && buffer && !/[\r\n]$/.test(buffer)) buffer += '\n';
+    var match;
+    while ((match = /[\r\n]/.exec(buffer))) {
+      var offset = match.index;
+      if (!read.done && buffer[offset] === '\r' && offset === buffer.length - 1) break;
+      var line = buffer.slice(0, offset);
+      buffer = buffer.slice(offset + (buffer.slice(offset, offset + 2) === '\r\n' ? 2 : 1));
+      var value = payload(line);
+      if (value === undefined) continue;
+      if (value === '[DONE]') { yield* translate(null); return; }
+      yield* translate(JSON.parse(value));
+    }
+    if (read.done) {
+      if (data.length) {
+        var tail = data.join('\n');
+        if (tail !== '[DONE]') yield* translate(JSON.parse(tail));
+      }
+      yield* translate(null);
+      return;
+    }
+  }
+}
+
+function json(body, status, headers) {
+  return new Response(JSON.stringify(body), { status: status || 200, headers: { 'Content-Type': 'application/json', ...headers } });
+}
+function errorResponse(status, message) {
+  var types = { 400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_error', 404: 'not_found_error', 429: 'rate_limit_error' };
+  return json({ type: 'error', error: { type: types[status] || 'api_error', message: message } }, status);
+}
+
+function startProxy(config) {
+  var upstreamURL = new URL(config.baseURL || 'https://api.x.ai/v1');
+  if (!['http:', 'https:'].includes(upstreamURL.protocol) || upstreamURL.username || upstreamURL.password || upstreamURL.search || upstreamURL.hash)
+    throw new Error('OpenAI baseURL must be an HTTP(S) API base without credentials, query, or fragment');
+  upstreamURL.pathname = upstreamURL.pathname.replace(/\/+$/, '') + '/chat/completions';
+  var server = Bun.serve({
+    port: 0, hostname: '127.0.0.1', idleTimeout: 255,
+    fetch: async function (req) {
+      var path = new URL(req.url).pathname;
+      if (req.method === 'GET' && path === '/health') return new Response('ok');
+      var count = path === '/v1/messages/count_tokens' || path === '/messages/count_tokens';
+      if (req.method !== 'POST' || (!count && path !== '/v1/messages' && path !== '/messages')) return errorResponse(404, 'Not found');
+      var body, request;
+      try {
+        body = await req.json();
+        request = translateRequest(body, config.effort);
+        request.model = body.model || config.model || '';
+      } catch (e) { return errorResponse(400, 'Translation error: ' + e.message); }
+      if (count) return json({ input_tokens: estimateTokens(request) }, 200, { 'x-clawgod-token-count': 'estimate' });
+
+      var abort = new AbortController();
+      var onAbort = function () { abort.abort(req.signal.reason); };
+      req.signal.addEventListener('abort', onAbort, { once: true });
+      if (req.signal.aborted) onAbort();
+      var timeout = Number(config.timeoutMs) || 3000000;
+      var timer = setTimeout(function () { abort.abort(new Error('Upstream request timed out')); }, timeout);
+      if (timer.unref) timer.unref();
+      function cleanup() { clearTimeout(timer); req.signal.removeEventListener('abort', onAbort); }
+      var upstream;
+      try {
+        upstream = await fetch(upstreamURL.href, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + config.apiKey }, body: JSON.stringify(request), signal: abort.signal });
+        if (!upstream.ok) {
+          var errText = await upstream.text(), errBody;
+          try { errBody = JSON.parse(errText); } catch {}
+          var response = errorResponse(upstream.status, (errBody && errBody.error && errBody.error.message) || errText || ('HTTP ' + upstream.status));
+          var retryAfter = upstream.headers.get('retry-after');
+          if (retryAfter) response.headers.set('retry-after', retryAfter);
+          cleanup();
+          return response;
+        }
+        if (!request.stream) {
+          var result = translateResponse(await upstream.json(), request.model);
+          cleanup();
+          return json(result);
+        }
+        if (!upstream.body || !(upstream.headers.get('content-type') || '').toLowerCase().startsWith('text/event-stream'))
+          throw new Error('Expected an upstream text/event-stream response');
+      } catch (e) {
+        abort.abort();
+        cleanup();
+        return errorResponse(502, 'Upstream request failed: ' + e.message);
+      }
+
+      var reader = upstream.body.getReader(), iterator = translateStream(reader, request.model), cancelled = false;
+      var encoder = new TextEncoder();
+      async function closeReader() { try { await reader.cancel(); } catch {} cleanup(); }
+      var readable = new ReadableStream({
+        async pull(controller) {
+          try {
+            var next = await iterator.next();
+            if (cancelled) return;
+            if (next.done) { await closeReader(); controller.close(); }
+            else controller.enqueue(encoder.encode(next.value));
+          } catch (e) {
+            if (!cancelled) {
+              controller.enqueue(encoder.encode(sse('error', { type: 'error', error: { type: 'api_error', message: 'Stream error: ' + e.message } })));
+              controller.close();
+            }
+            abort.abort();
+            await closeReader();
+          }
+        },
+        async cancel() { cancelled = true; abort.abort(); await closeReader(); await iterator.return(); },
+      });
+      return new Response(readable, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
+    },
+  });
+  return { port: server.port, stop: function () { server.stop(); } };
+}
+
+module.exports = { startProxy: startProxy };
+PROXY_EOF
+info "OpenAI-compatible proxy created (openai-proxy.cjs)"
+
+# ─── Write patch feature gates ────────────────────────────────
+
+cat > "$CLAWGOD_DIR/feature-gates.cjs" << 'GATES_EOF'
+'use strict';
+// Patch feature gates — computes globalThis.__clawgodPatches before the
+// patched cli loads. Config: user-edited ~/.clawgod/patches.json
+// ({"<feature>": false}, absent key = on). Per-feature env overrides for a
+// single launch: CLAWGOD_FEATURE_<NAME>=false (feature id upper-cased,
+// dashes → underscores, e.g. CLAWGOD_FEATURE_GEO_NEUTRALIZE=false; "true"
+// restores a feature disabled in patches.json). CLAWGOD_FEATURES_META
+// below is machine-generated by build.js from the FEATURES registry in
+// patch.mjs (single source of truth) — do not hand-edit. Each gated patch in
+// cli.original.cjs checks its own entry:
+//   globalThis.__clawgodPatches?.["<patchId>"] !== false
+// Absent/failed config → gate table absent → all gates default ON, which is
+// exactly the pre-toggle behavior.
+const CLAWGOD_FEATURES_META = {
+  "agent-teams": [
+    "agent-teams"
+  ],
+  "agent-teams-graph": [
+    "agent-teams"
+  ],
+  "computer-use-sub": [
+    "computer-use"
+  ],
+  "computer-use-default": [
+    "computer-use"
+  ],
+  "computer-use-gate": [
+    "computer-use"
+  ],
+  "ultraplan": [
+    "ultraplan"
+  ],
+  "ultrareview-gate": [
+    "ultrareview"
+  ],
+  "ultrareview-direct": [
+    "ultrareview"
+  ],
+  "voice-mode": [
+    "voice-mode"
+  ],
+  "auto-mode-helper-gate": [
+    "auto-mode"
+  ],
+  "auto-mode-inline-gate": [
+    "auto-mode"
+  ],
+  "classifier-timeout": [
+    "classifier-tuning"
+  ],
+  "classifier-model": [
+    "classifier-tuning"
+  ],
+  "classifier-retries": [
+    "classifier-tuning"
+  ],
+  "theme-logo-rgb": [
+    "theme"
+  ],
+  "theme-logo-ansi": [
+    "theme"
+  ],
+  "theme-claude-rgb-dark": [
+    "theme"
+  ],
+  "theme-claude-rgb-light": [
+    "theme"
+  ],
+  "theme-claude-ansi": [
+    "theme"
+  ],
+  "theme-shimmer-rgb": [
+    "theme"
+  ],
+  "theme-shimmer-rgb-light": [
+    "theme"
+  ],
+  "theme-shimmer-ansi": [
+    "theme"
+  ],
+  "theme-hex": [
+    "theme"
+  ],
+  "theme-brief-rgb-dark": [
+    "theme"
+  ],
+  "theme-brief-rgb-light": [
+    "theme"
+  ],
+  "theme-brief-ansi": [
+    "theme"
+  ],
+  "geo-stego-date": [
+    "geo-neutralize"
+  ],
+  "geo-detect-probe": [
+    "geo-neutralize"
+  ],
+  "geo-apostrophe-stego": [
+    "geo-neutralize"
+  ],
+  "wiggly-dove": [
+    "wiggly-dove"
+  ],
+  "remove-cyber-risk": [
+    "cyber-risk"
+  ],
+  "remove-url-restriction": [
+    "url-restriction"
+  ],
+  "remove-cautious-actions": [
+    "cautious-actions"
+  ],
+  "remove-not-logged-in": [
+    "not-logged-in"
+  ],
+  "attachment-filter-bypass": [
+    "message-filter"
+  ],
+  "message-filter-legacy": [
+    "message-filter"
+  ],
+  "message-filter-s8": [
+    "message-filter"
+  ],
+  "remote-settings-off": [
+    "remote-settings"
+  ]
+};
+
+// Features realized by the wrapper itself rather than by a baked patch id:
+// they read the same patches.json / CLAWGOD_FEATURE_* inputs, but their
+// consumer is cli.cjs (or a module it loads) instead of a runtime gate in
+// cli.original.cjs. Their gate lands in the same __clawgodPatches table.
+var CLAWGOD_RUNTIME_FEATURES = ['bun-ant-shim'];
+
+var clawgodDir = require('path').join(require('os').homedir(), '.clawgod');
+
+var _cfg = {};
+try { _cfg = JSON.parse(require('fs').readFileSync(require('path').join(clawgodDir, 'patches.json'), 'utf8')); } catch {}
+for (var _name in process.env) {
+  if (_name.indexOf('CLAWGOD_FEATURE_') !== 0) continue;
+  var _val = process.env[_name];
+  if (_val !== 'true' && _val !== 'false') continue;
+  _cfg[_name.slice('CLAWGOD_FEATURE_'.length).toLowerCase().replace(/_/g, '-')] = _val === 'true';
+}
+
+// META keys are patch ids; a feature id is "known" when some patch lists it
+// or when the wrapper owns it (CLAWGOD_RUNTIME_FEATURES).
+// Unknown keys are residue (renamed/removed features).
+for (var _k in _cfg) {
+  var _known = CLAWGOD_RUNTIME_FEATURES.indexOf(_k) >= 0;
+  for (var _f in CLAWGOD_FEATURES_META) {
+    if (CLAWGOD_FEATURES_META[_f].indexOf(_k) >= 0) { _known = true; break; }
+  }
+  if (!_known) process.stderr.write('[clawgod] warning: unknown feature "' + _k + '" in patches.json\n');
+}
+
+var _gate = {};
+for (var _pid in CLAWGOD_FEATURES_META) {
+  var _feats = CLAWGOD_FEATURES_META[_pid];
+  var _on = false;
+  for (var _j = 0; _j < _feats.length; _j++) {
+    if (_cfg[_feats[_j]] !== false) { _on = true; break; }
+  }
+  _gate[_pid] = _on;
+}
+for (var _rfi = 0; _rfi < CLAWGOD_RUNTIME_FEATURES.length; _rfi++) {
+  _gate[CLAWGOD_RUNTIME_FEATURES[_rfi]] = _cfg[CLAWGOD_RUNTIME_FEATURES[_rfi]] !== false;
+}
+globalThis.__clawgodPatches = _gate;
+GATES_EOF
+info "Patch feature gates created (feature-gates.cjs)"
+
+# ─── Write wrapper (cli.cjs, runs under Bun) ──────────────────
+
+cat > "$CLAWGOD_DIR/cli.cjs" << 'WRAPPER_EOF'
+#!/usr/bin/env bun
+const { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, statSync, renameSync } = require('fs');
+const { join, basename } = require('path');
+const { homedir } = require('os');
+const { spawnSync } = require('child_process');
+
+const clawgodDir = join(homedir(), '.clawgod');
+// Version queries (including installer verification) must not start provider
+// servers or background update requests that keep the process alive (#203).
+// Match only a standalone flag, never a prompt/subcommand containing it.
+const versionOnly = process.argv.length === 3 && ['--version', '-v'].includes(process.argv[2]);
+
+// Note: there used to be a "drift detection" block here that scanned
+// ~/.local/share/claude/versions/ for a newer binary and silently re-patched.
+// Retained native versions (including on Windows) may be older than the
+// version our installer pulled from npm. Scanning them could roll back a
+// fresh install and cause a re-patch loop. Upgrades instead go through the
+// patched `claude update` redirect; native background updates are disabled
+// below so they cannot restore an official launcher over ours.
+
+// One-time migration: earlier wrapper versions set CLAUDE_CONFIG_DIR=~/.clawgod,
+// which made Claude Code read/write ~/.clawgod/.claude.json instead of the
+// native ~/.claude.json (the file holding MCP config, project history, session
+// index). Move it back transparently on first run after upgrade.
+const nativeClaudeJson = join(homedir(), '.claude.json');
+const strayClaudeJson = join(clawgodDir, '.claude.json');
+if (!versionOnly && existsSync(strayClaudeJson) && !existsSync(nativeClaudeJson)) {
+  try { renameSync(strayClaudeJson, nativeClaudeJson); } catch {}
+}
+
+const providerDir = clawgodDir;
+const configFile = join(providerDir, 'provider.json');
+
+const defaultConfig = {
+  apiKey: '',
+  baseURL: 'https://api.anthropic.com',
+  model: '',
+  smallModel: '',
+  effort: '',
+  timeoutMs: 3000000,
+};
+
+let config = { ...defaultConfig };
+if (!versionOnly && existsSync(configFile)) {
+  try {
+    const raw = JSON.parse(readFileSync(configFile, 'utf8'));
+    config = { ...defaultConfig, ...raw };
+  } catch {}
+} else if (!versionOnly) {
+  mkdirSync(providerDir, { recursive: true });
+  writeFileSync(configFile, JSON.stringify(defaultConfig, null, 2) + '\n');
+}
+
+// Explicit protocol takes precedence over legacy provider types.
+if (config.protocol !== undefined && !['anthropic', 'openai-chat'].includes(config.protocol)) {
+  throw new Error('[clawgod] Unsupported provider protocol: ' + config.protocol + '. Use anthropic or openai-chat; auto and Responses are not supported.');
+}
+const _useProxy = config.protocol === 'openai-chat' ||
+  (config.protocol === undefined && ['grok', 'openai-compat'].includes(config.type));
+if (_useProxy) {
+  let _proxyKey = config.apiKey || '';
+  if (!_proxyKey && config.type === 'grok') {
+    try {
+      const _gs = JSON.parse(readFileSync(join(homedir(), '.grok', 'user-settings.json'), 'utf8'));
+      _proxyKey = _gs.apiKey || '';
+    } catch {}
+    if (!_proxyKey) _proxyKey = process.env.GROK_API_KEY || '';
+  }
+  // The generic Anthropic default must never become a Chat Completions URL.
+  if (config.baseURL === defaultConfig.baseURL || !config.baseURL) {
+    if (config.type === 'grok') config.baseURL = 'https://api.x.ai/v1';
+    else throw new Error('[clawgod] openai-chat requires an explicit baseURL, for example https://example.com/v1');
+  }
+  if (_proxyKey) {
+    const { startProxy } = require('./openai-proxy.cjs');
+    const _proxy = startProxy({
+      apiKey: _proxyKey,
+      baseURL: config.baseURL || (config.type === 'grok' ? 'https://api.x.ai/v1' : ''),
+      model: config.model || '',
+      effort: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? config.effort,
+      timeoutMs: process.env.API_TIMEOUT_MS ?? config.timeoutMs,
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + _proxy.port;
+    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-passthrough';
+    if (config.model) process.env.ANTHROPIC_MODEL = config.model;
+    if (config.smallModel) process.env.ANTHROPIC_SMALL_FAST_MODEL = config.smallModel;
+    process.env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
+    process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= '1';
+    process.on('exit', function () { try { _proxy.stop(); } catch {} });
+    process.stderr.write('[clawgod] OpenAI Chat Completions proxy on port ' + _proxy.port + '\n');
+    config = { ...config, apiKey: '', baseURL: '', model: '', smallModel: '' };  // prevent fallthrough to apiKey/baseURL injection below
+  } else {
+    throw new Error('[clawgod] openai-chat requires an API key (grok also accepts GROK_API_KEY or ~/.grok/user-settings.json)');
+  }
+}
+
+const hasProviderApiKey = !!config.apiKey;
+
+if (hasProviderApiKey) {
+  if (config.baseURL) process.env.ANTHROPIC_BASE_URL = config.baseURL;
+  if (config.model) process.env.ANTHROPIC_MODEL = config.model;
+  if (config.smallModel) process.env.ANTHROPIC_SMALL_FAST_MODEL = config.smallModel;
+  if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
+    delete process.env.ANTHROPIC_API_KEY;
+    const existingToken = (process.env.ANTHROPIC_AUTH_TOKEN || '').trim();
+    process.env.ANTHROPIC_AUTH_TOKEN = existingToken || config.apiKey;
+  } else {
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    process.env.ANTHROPIC_API_KEY = config.apiKey;
+  }
+} else if (config.baseURL && config.baseURL !== defaultConfig.baseURL) {
+  process.env.ANTHROPIC_BASE_URL ??= config.baseURL;
+}
+
+// Third-party Anthropic-compatible proxies (DeepSeek / OneAPI / Bedrock /
+// vLLM / etc.) don't share Anthropic's server-side handling of
+// x-anthropic-billing-header. That header carries a per-request `cch` field
+// which Anthropic's own server excludes from prompt-cache key calculation
+// (via cacheScope:null), but third-party proxies fold into the prefix hash —
+// so the cached prefix changes every request and cache hit rate drops to
+// zero. Auto-disable the header whenever baseURL points away from Anthropic.
+// Users can force re-enable with CLAUDE_CODE_ATTRIBUTION_HEADER=1 if needed.
+if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
+  process.env.CLAUDE_CODE_ATTRIBUTION_HEADER ??= '0';
+}
+
+if (config.effort) {
+  process.env.CLAUDE_CODE_EFFORT_LEVEL ??= config.effort;
+}
+
+if (config.timeoutMs) {
+  process.env.API_TIMEOUT_MS ??= String(config.timeoutMs);
+}
+// Remote Control needs GrowthBook evaluation. Restrict network traffic by
+// default only in max mode; on/off retain upstream eligibility checks.
+// Explicit user environment settings still take precedence.
+if (existsSync(join(clawgodDir, '.lean-max')) && !existsSync(join(clawgodDir, '.lean-disabled'))) {
+  process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
+}
+process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
+// Updates belong to clawgod's `claude update` redirect. The native background
+// updater can repair a missing Windows claude.exe even at the same version,
+// shadowing our claude.cmd. Keep it disabled for every clawgod process (#200).
+process.env.DISABLE_AUTOUPDATER = '1';
+// Use system ripgrep (extracted vendor rg path was build-time-baked; system
+// rg is the most reliable fallback under Bun runtime).
+process.env.USE_BUILTIN_RIPGREP ??= '1';
+
+const featuresFile = join(providerDir, 'features.json');
+if (!process.env.CLAUDE_INTERNAL_FC_OVERRIDES && existsSync(featuresFile)) {
+  try {
+    const raw = readFileSync(featuresFile, 'utf8');
+    JSON.parse(raw);
+    process.env.CLAUDE_INTERNAL_FC_OVERRIDES = raw;
+  } catch {}
+}
+
+// Monkey-patch process.execPath: Anthropic's CLI uses process.execPath to
+// locate the native binary for shell wrappers (find→bfs, grep→ugrep, rg) and
+// subprocess spawning. Under Bun, process.execPath returns the Bun runtime
+// path, not the Claude native binary. The launcher script sets
+// CLAUDE_CODE_EXECPATH to claude.orig (the real native binary) before exec'ing
+// Bun, so we use that as the source of truth.  See issue #100.
+const _realExecPath = process.env.CLAUDE_CODE_EXECPATH || process.execPath;
+if (_realExecPath !== process.execPath) {
+  Object.defineProperty(process, 'execPath', {
+    value: _realExecPath,
+    configurable: true,
+  });
+}
+
+// Lean mode toggle — --lean-off / --lean-on / --lean-max
+if (process.argv.includes('--lean-off') || process.argv.includes('--lean-on') || process.argv.includes('--lean-max')) {
+  const _leanOff = join(clawgodDir, '.lean-disabled');
+  const _leanMax = join(clawgodDir, '.lean-max');
+  const _leanSettings = join(homedir(), '.claude', 'settings.json');
+  const _baseDeny = ['DesignSync','NotebookEdit','PushNotification','RemoteTrigger','CronCreate','CronDelete','CronList'];
+  const _maxDeny = ['EnterPlanMode','ExitPlanMode','SendMessage','ScheduleWakeup','AskUserQuestion','ReportFindings'];
+  const _baseFlags = ['disableWorkflows','disableClaudeAiConnectors','disableArtifact'];
+  const _maxFlags = ['disableBundledSkills','disableRemoteControl'];
+  const _allDeny = new Set([..._baseDeny, ..._maxDeny]);
+  const _allFlags = [..._baseFlags, ..._maxFlags];
+  const _unlink = function(p) { try { require('fs').unlinkSync(p); } catch {} };
+  if (process.argv.includes('--lean-off')) {
+    writeFileSync(_leanOff, '');
+    _unlink(_leanMax);
+    try {
+      const _s = JSON.parse(readFileSync(_leanSettings, 'utf8'));
+      for (const _k of _allFlags) delete _s[_k];
+      if (Array.isArray(_s.permissions?.deny)) _s.permissions.deny = _s.permissions.deny.filter(function(t) { return !_allDeny.has(t); });
+      writeFileSync(_leanSettings, JSON.stringify(_s, null, 2) + '\n');
+    } catch {}
+    process.stderr.write('[clawgod] Lean mode disabled. All tools restored.\n');
+  } else {
+    const _isMax = process.argv.includes('--lean-max');
+    _unlink(_leanOff);
+    if (_isMax) writeFileSync(_leanMax, ''); else _unlink(_leanMax);
+    const _deny = _isMax ? [..._baseDeny, ..._maxDeny] : _baseDeny;
+    const _flags = _isMax ? _allFlags : _baseFlags;
+    try {
+      let _s = {};
+      try { _s = JSON.parse(readFileSync(_leanSettings, 'utf8')); } catch {}
+      let _ch = false;
+      for (const _k of _flags) { if (!(_k in _s)) { _s[_k] = true; _ch = true; } }
+      // If downgrading from max to on, remove max-only keys
+      if (!_isMax) { for (const _k of _maxFlags) { if (_k in _s) { delete _s[_k]; _ch = true; } } }
+      if (!_s.permissions) _s.permissions = {};
+      if (!Array.isArray(_s.permissions.deny)) _s.permissions.deny = [];
+      const _ex = new Set(_s.permissions.deny);
+      for (const _t of _deny) { if (!_ex.has(_t)) { _s.permissions.deny.push(_t); _ch = true; } }
+      // If downgrading from max to on, remove max-only deny entries
+      if (!_isMax) {
+        const _maxSet = new Set(_maxDeny);
+        const _before = _s.permissions.deny.length;
+        _s.permissions.deny = _s.permissions.deny.filter(function(t) { return !_maxSet.has(t); });
+        if (_s.permissions.deny.length !== _before) _ch = true;
+      }
+      if (_ch) writeFileSync(_leanSettings, JSON.stringify(_s, null, 2) + '\n');
+    } catch {}
+    process.stderr.write('[clawgod] Lean mode: ' + (_isMax ? 'max' : 'on') + '. Settings updated.\n');
+  }
+  process.exit(0);
+}
+
+// Update check — cached, non-blocking, 24h interval
+try {
+  const _ucFile = join(clawgodDir, '.update-check');
+  const _verFile = join(clawgodDir, '.clawgod-version');
+  if (!versionOnly && existsSync(_verFile)) {
+    const _localVer = readFileSync(_verFile, 'utf8').trim();
+    let _uc = null;
+    try { if (existsSync(_ucFile)) _uc = JSON.parse(readFileSync(_ucFile, 'utf8')); } catch {}
+    var _semGt = function(a, b) { var x = a.split('.'), y = b.split('.'); for (var i = 0; i < 3; i++) { var d = (parseInt(x[i]||0)) - (parseInt(y[i]||0)); if (d) return d > 0; } return false; };
+    if (_uc && _uc.v && _semGt(_uc.v, _localVer)) {
+      process.stderr.write('[clawgod] v' + _uc.v + ' available (installed: v' + _localVer + ") — run 'claude update' to upgrade\n");
+    }
+    if (!_uc || Date.now() - (_uc.t || 0) > 86400000) {
+      fetch('https://api.github.com/repos/0Chencc/clawgod/releases/latest', {
+        headers: { 'User-Agent': 'clawgod' },
+        signal: AbortSignal.timeout(5000),
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        var v = (d.tag_name || '').replace(/^v/, '');
+        if (v) writeFileSync(_ucFile, JSON.stringify({ t: Date.now(), v: v }));
+      }).catch(function() {});
+    }
+  }
+} catch {}
+
+// Patch feature gates (~/.clawgod/patches.json + CLAWGOD_FEATURE_* env) —
+// must run before the patched cli loads so gated patches see
+// globalThis.__clawgodPatches.
+require('./feature-gates.cjs');
+
+// Runtime helpers shared by injected patches (globalThis.__clawgodHelpers,
+// see runtime-helpers.cjs). cli.original.cjs is a separate module scope, so
+// the patched bundle reaches helpers through globalThis only.
+require('./runtime-helpers.cjs');
+
+// Claude Code 2.1.271+ renders through Bun.ant.CellSegmenter, an
+// Anthropic-private Bun API that stock Bun does not ship. Without it the
+// renderer throws before the first frame and the TUI looks hung, so the shim
+// re-implements the API in JS. No-op when the real API exists or when the
+// bun-ant-shim feature is off (patches.json / CLAWGOD_FEATURE_BUN_ANT_SHIM).
+require('./bun-ant-shim.cjs');
+
+require('./cli.original.cjs');
+WRAPPER_EOF
+chmod +x "$CLAWGOD_DIR/cli.cjs"
+echo "$CLAWGOD_SELF_VERSION" > "$CLAWGOD_DIR/.clawgod-version"
+info "Wrapper created (cli.cjs)"
+
+cat > "$CLAWGOD_DIR/startup-check.cjs" << 'STARTUP_EOF'
+'use strict';
+// Bounded installer probe shared by PowerShell 5.1 and POSIX shells. Running
+// under Node keeps the watchdog independent of the Bun runtime being checked.
+const { spawn, spawnSync } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const { dirname, join } = require('node:path');
+
+const [bun, cli] = process.argv.slice(2);
+const timeoutMs = Number(process.env.CLAWGOD_STARTUP_TIMEOUT_MS || 30000);
+if (!bun || !cli || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647) {
+  process.stderr.write('Usage: node startup-check.cjs <bun> <cli.cjs>; CLAWGOD_STARTUP_TIMEOUT_MS must be a positive integer <= 2147483647.\n');
+  process.exitCode = 1;
+} else {
+  const logPath = join(dirname(cli), 'startup-check.log');
+  const limit = 1024 * 1024;
+  let output = Buffer.alloc(0), truncated = false, finished = false;
+  const versionPattern = /^\d+\.\d+\.\d+[^\r\n]*\(Claude Code\)\s*$/;
+  let stdoutLine = '', sawVersion = false;
+  const child = spawn(bun, [cli, '--version'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    detached: process.platform !== 'win32',
+  });
+  const capture = chunk => {
+    output = Buffer.concat([output, chunk]);
+    if (output.length > limit) { output = output.subarray(output.length - limit); truncated = true; }
+  };
+  child.stdout.on('data', chunk => {
+    capture(chunk);
+    // Detect stdout lines independently of stderr ordering and the bounded log
+    // tail. A warning must neither fabricate nor erase a successful version.
+    const lines = (stdoutLine + chunk.toString('utf8')).split('\n');
+    stdoutLine = lines.pop().slice(-4096);
+    if (lines.some(line => versionPattern.test(line))) sawVersion = true;
+  });
+  child.stderr.on('data', capture);
+
+  function finish(code, message) {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    const text = (truncated ? '[Earlier startup output truncated]\n' : '') + output.toString('utf8');
+    const diagnostic = message ? '\n[clawgod] ' + message + '\n' : '';
+    let logWritten = false;
+    try { writeFileSync(logPath, text + diagnostic); logWritten = true; }
+    catch (error) {
+      process.stderr.write('[clawgod] Cannot write startup log: ' + error.message + '\n');
+      code = code || 1;
+    }
+    if (text) process.stdout.write(text);
+    if (diagnostic) process.stderr.write(diagnostic);
+    if (code && logWritten) process.stderr.write('[clawgod] Startup log: ' + logPath + '\n');
+    process.exitCode = code;
+  }
+
+  const timer = setTimeout(() => {
+    // Kill only the probe's process tree, never the parent Claude session that
+    // invoked `claude update`. Closing our pipes also bounds inherited handles.
+    if (child.pid) {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+          stdio: 'ignore', windowsHide: true, timeout: 2000,
+        });
+      } else {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      }
+      try { child.kill('SIGKILL'); } catch {}
+    }
+    child.stdout.destroy();
+    child.stderr.destroy();
+    child.unref();
+    finish(124, 'Startup verification timed out after ' + timeoutMs + ' ms. The Bun probe did not finish; launcher installation was aborted. If this machine needs more time, increase CLAWGOD_STARTUP_TIMEOUT_MS and retry.');
+  }, timeoutMs);
+
+  child.on('error', error => finish(1, 'Could not start Bun: ' + error.message));
+  child.on('close', (code, signal) => {
+    if (code !== 0) finish(code || 1, 'Patched Claude startup failed' + (signal ? ' (' + signal + ')' : ' (exit ' + code + ')') + '.');
+    else if (!sawVersion && !versionPattern.test(stdoutLine))
+      finish(1, 'Bun exited successfully but did not print a Claude Code version.');
+    else finish(0);
+  });
+}
+STARTUP_EOF
+
+# ─── Write classifier runtime helper ────────────────────
+
+cat > "$CLAWGOD_DIR/runtime-helpers.cjs" << 'CFG_EOF'
+'use strict';
+// Runtime helpers shared by injected patches, exposed on
+// globalThis.__clawgodHelpers. The patched cli.original.cjs lives in its own
+// module scope, so it reaches these helpers only through globalThis.
+//
+// cli.cjs requires this module once at launch; after that, adding a new
+// helper means editing this single file — no build.js / cli.cjs / template
+// changes. (feature-gates.cjs is a future merge target here.)
+//
+// Helpers return values only: injected code owns gating, env reads, timers,
+// and mutation of the renderer's state.
+
+// Parses a CLAWGOD_CLASSIFIER_TIMEOUT_MS value to a finite number, or null
+// when it cannot be parsed (missing/blank/non-numeric/Infinity/overflow). The
+// caller decides the fallback: the injected patch code checks for null
+// explicitly and keeps the original formula, while any real number — a
+// legitimate "0" included — is applied as a floor. Returning null (not 0)
+// keeps "0" as a real override and never conflates it with a parse failure.
+function classifierTimeoutFloor(envValue) {
+  if (typeof envValue === 'string' && envValue.trim() === '') return null;
+  const value = Number(envValue);
+  return Number.isFinite(value) ? value : null;
+}
+
+// A DA1 reply can arrive in multiple stdin reads (issue #171). The renderer
+// normally flushes incomplete escapes after 50ms, which turns a split ESC [
+// into a key and lets the reply's suffix reach the text input. While a DA1
+// sentinel is outstanding, allow the same 2s inter-read budget upstream uses
+// for recognized control-sequence prefixes. This also covers 2.1.263, whose
+// longer-prefix handling predates that upstream fix.
+//
+// Do not filter input: ordinary keys, paste, and complete sequences still go
+// through the existing parser immediately. A lone Escape or Alt+[ during a
+// pending probe is delayed, then passed to the original parser on timeout.
+// With no outstanding probe, even those keys retain their usual timing.
+function terminalReplyDelay(querier, reader, now) {
+  const parse = reader?.parse;
+  if (parse?.mode !== 'NORMAL' || typeof parse.incomplete !== 'string') return 0;
+  if (!/^\x1b(?:\[(?:\?[\d;]*)?)?$/.test(parse.incomplete)) return 0;
+  // 2.1.263 writes queue entries immediately. 2.1.274 adds `written`, and
+  // may queue probes before stdin attaches; those cannot have replies yet.
+  if (!Array.isArray(querier?.queue) || !querier.queue.some((entry) =>
+    entry?.kind === 'barrier' || (entry?.kind === 'sentinel' && entry.written !== false))) return 0;
+  if (!Number.isFinite(now) || !Number.isFinite(reader.lastInputAt)) return 0;
+  return Math.max(0, 2000 - Math.max(0, now - reader.lastInputAt));
+}
+
+// The runtime container (globalThis.__clawgodHelpers) IS the module's own
+// exports, so a new helper only needs an export line here to be reachable
+// from the patched bundle — no separate registration object. We expose
+// module.exports, not module (the latter carries id/filename/paths metadata).
+module.exports.classifierTimeoutFloor = classifierTimeoutFloor;
+module.exports.terminalReplyDelay = terminalReplyDelay;
+globalThis.__clawgodHelpers = module.exports;
+CFG_EOF
+info "Classifier runtime helpers created (runtime-helpers.cjs)"
+
+# ─── Write Bun.ant runtime shim ────────────────────────
+# Claude Code 2.1.271+ renders through Bun.ant.CellSegmenter, an
+# Anthropic-private Bun API that stock Bun does not ship. cli.cjs loads this
+# shim before the bundle; without it the TUI never paints.
+cat > "$CLAWGOD_DIR/bun-ant-shim.cjs" << 'BUNANT_EOF'
+'use strict';
+/**
+ * clawgod — `Bun.ant` runtime shim.
+ *
+ * Claude Code 2.1.271 moved its Ink renderer onto `Bun.ant.CellSegmenter`, an
+ * Anthropic-private Bun API that ships only inside the bundled native binary.
+ * clawgod runs the extracted JS bundle on the user's own Bun, which has no
+ * `Bun.ant` namespace, so the renderer threw before the first frame: the TUI
+ * never painted while the process stayed alive and looked hung (issue #183).
+ * The native binary (`claude.orig`) was unaffected.
+ *
+ * This module implements the API surface the renderer consumes. cli.cjs loads
+ * it before cli.original.cjs, and it no-ops when the real API is present.
+ *
+ * Contract (reverse-engineered from the 2.1.271+ bundle, pinned by
+ * bun-ant-shim.test.mjs):
+ *
+ *   new CellSegmenter({ ambiguousIsNarrow, substitute, screen, tabWidth })
+ *   .graphemes / .sgrKeys / .sgrCloseKeys / .uris   per-run tables, strings
+ *   .segment(text, cellsOut, runsOut, reordered) -> cell count
+ *       cellsOut: 2 int32 per cell — [graphemeIndex, (run << 10) | tab | width]
+ *       runsOut:  2 int32 per run  — [styleId, uriIndex]
+ *       Negative return = required cell capacity (caller reallocates).
+ *   .paint(targetCells, targetWidth, x, y, cells, count, _unused, charMap, words)
+ *   .setCell(targetCells, targetWidth, x, y, charId, packedStyle)
+ *       Both return end * 2^36 + first * 2^20 + end for a nonempty span.
+ *       I0() decodes the upper fields as damage bounds; j0()/xC() return the
+ *       low field as the absolute ending column for soft-wrap metadata.
+ *
+ * The `substitute` option (bidi control ranges) needs no handling: the controls
+ * are zero width already, which is what the option asks for.
+ *
+ * The tables are mutated in place: the bundle caches the four arrays once per
+ * renderer instance. SGR state persists across segment() calls, so a style
+ * spanning a wrapped line survives.
+ *
+ * Toggle: patches.json {"bun-ant-shim": false} or CLAWGOD_FEATURE_BUN_ANT_SHIM=false
+ */
+
+const SCREEN_DEFAULTS = {
+  widthMask: 3, narrow: 0, wide: 1, spacerTail: 2, spacerHead: 3,
+  emptyCharIndex: 0, spacerCharIndex: 1, tabWidth: 8,
+};
+
+const STYLE_SHIFT = 17;
+const LINK_SHIFT = 2;
+const LINK_MASK = 32767;
+const WIDTH_MASK = 255;
+const TAB_FLAG = 256;
+const RUN_SHIFT = 10;
+const DAMAGE_SPAN = 1048576; // 2^20 — field holding the first column
+const DAMAGE_END = 68719476736; // 2^36 — field holding the end column
+
+// SGR attributes that occupy one style slot, as param -> [slot, closeParam].
+// The bundle's style pool only accepts single-parameter codes, so combined
+// sequences are split below.
+const SGR_ATTRS = new Map([
+  [1, ['bold', 22]],
+  [2, ['dim', 22]],
+  [3, ['italic', 23]],
+  [4, ['underline', 24]],
+  [5, ['blink', 25]],
+  [6, ['blink-fast', 25]],
+  [7, ['inverse', 27]],
+  [8, ['hidden', 28]],
+  [9, ['strike', 29]],
+  [21, ['underline-double', 24]],
+  [53, ['overline', 55]],
+]);
+
+// Closing params, as closeParam -> slots it clears (22 and 24 each cover the
+// two attributes they close).
+const SGR_CLOSES = new Map([
+  [22, ['bold', 'dim']],
+  [23, ['italic']],
+  [24, ['underline', 'underline-double']],
+  [25, ['blink', 'blink-fast']],
+  [27, ['inverse']],
+  [28, ['hidden']],
+  [29, ['strike']],
+  [39, ['fg']],
+  [49, ['bg']],
+  [55, ['overline']],
+  [59, ['underline-color']],
+]);
+
+// Extended colours (38/48/58) and the 30-37/90-97 fg, 40-47/100-107 bg ranges.
+const SGR_EXTENDED = new Map([
+  [38, ['fg', 39]],
+  [48, ['bg', 49]],
+  [58, ['underline-color', 59]],
+]);
+
+function slotFor(param) {
+  const attr = SGR_ATTRS.get(param);
+  if (attr) return attr;
+  const extended = SGR_EXTENDED.get(param);
+  if (extended) return extended;
+  if ((param >= 30 && param <= 37) || (param >= 90 && param <= 97)) return ['fg', 39];
+  if ((param >= 40 && param <= 47) || (param >= 100 && param <= 107)) return ['bg', 49];
+  return null;
+}
+
+function sgrCode(params) {
+  return '\x1b[' + params + 'm';
+}
+
+// ─── Grapheme segmentation & width ───────────────────────────
+
+let graphemeSegmenter;
+let graphemeSegmenterResolved = false;
+
+function graphemeIterator() {
+  if (!graphemeSegmenterResolved) {
+    graphemeSegmenterResolved = true;
+    try {
+      graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    } catch {
+      graphemeSegmenter = null;
+    }
+  }
+  return graphemeSegmenter;
+}
+
+// Approximate East Asian Wide/Fullwidth + emoji ranges, used only when
+// Bun.stringWidth is unavailable (the CI unit test runs under plain Node).
+const FALLBACK_WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1F64F}\u{1F900}-\u{1F9FF}\u{20000}-\u{2FFFD}\u{30000}-\u{3FFFD}]/u;
+
+function fallbackWidth(grapheme) {
+  if (/^\p{M}+$/u.test(grapheme)) return 0;
+  for (const ch of grapheme) if (FALLBACK_WIDE.test(ch)) return 2;
+  return 1;
+}
+
+function graphemeWidth(grapheme, ambiguousIsNarrow) {
+  const bun = typeof Bun === 'object' && Bun !== null ? Bun : undefined;
+  if (bun && typeof bun.stringWidth === 'function') {
+    try {
+      const width = bun.stringWidth(grapheme, { ambiguousIsNarrow: ambiguousIsNarrow === true });
+      if (Number.isFinite(width) && width >= 0) return width | 0;
+    } catch {}
+  }
+  return fallbackWidth(grapheme);
+}
+
+// ─── Escape scanner ─────────────────────────────────────────
+
+// Text, SGR, OSC-8 hyperlinks, and any other escape (dropped — a `write` op
+// only carries styling).
+const ESCAPE_SCAN = /\x1b\[([0-9;]*)m|\x1b\]8;([^;\x07\x1b]*);([^\x07\x1b]*)(?:\x07|\x1b\\)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[@-~]|\x1b[@-Z\\-_]/g;
+
+function scanChunks(text) {
+  const chunks = [];
+  let last = 0;
+  ESCAPE_SCAN.lastIndex = 0;
+  for (let match; (match = ESCAPE_SCAN.exec(text)) !== null; ) {
+    if (match.index > last) chunks.push({ kind: 'text', value: text.slice(last, match.index) });
+    if (match[1] !== undefined) chunks.push({ kind: 'sgr', value: match[1] });
+    else if (match[3] !== undefined) chunks.push({ kind: 'osc8', value: match[3] });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) chunks.push({ kind: 'text', value: text.slice(last) });
+  return chunks;
+}
+
+// ─── CellSegmenter ──────────────────────────────────────────
+
+class CellSegmenter {
+  constructor(options) {
+    const opts = options || {};
+    const screen = opts.screen || {};
+    this.ambiguousIsNarrow = opts.ambiguousIsNarrow !== false;
+    this.tabWidth = Number.isFinite(opts.tabWidth) && opts.tabWidth > 0 ? opts.tabWidth | 0 : SCREEN_DEFAULTS.tabWidth;
+    const kind = (key) => screen[key] ?? SCREEN_DEFAULTS[key];
+    this.kinds = {
+      narrow: kind('narrow'), wide: kind('wide'),
+      spacerTail: kind('spacerTail'), spacerHead: kind('spacerHead'),
+    };
+    this.emptyCharIndex = kind('emptyCharIndex');
+    this.spacerCharIndex = kind('spacerCharIndex');
+
+    // Mutated in place — the renderer caches these arrays per instance.
+    this.graphemes = [' ', ''];
+    this.sgrKeys = [''];
+    this.sgrCloseKeys = [''];
+    this.uris = [''];
+
+    this._graphemeIndex = new Map([[' ', 0], ['', 1]]);
+    this._styleIndex = new Map();
+    this._uriIndex = new Map();
+    this._style = new Map();
+  }
+
+  _uriIndexFor(uri) {
+    let id = this._uriIndex.get(uri);
+    if (id === undefined) {
+      id = this.uris.length;
+      this.uris.push(uri);
+      this._uriIndex.set(uri, id);
+    }
+    return id;
+  }
+
+  _applySgr(params) {
+    const parts = params.split(';');
+    for (let i = 0; i < parts.length; i += 1) {
+      const raw = parts[i];
+      const param = raw === '' ? 0 : Number(raw);
+      if (!Number.isFinite(param)) continue;
+      if (param === 0) {
+        this._style.clear();
+        continue;
+      }
+      const closes = SGR_CLOSES.get(param);
+      if (closes) {
+        for (const slot of closes) this._style.delete(slot);
+        continue;
+      }
+      const extended = SGR_EXTENDED.get(param);
+      if (extended) {
+        // 38/48/58 take "5;n" or "2;r;g;b" operands. Consume them here so the
+        // loop does not read the operands as attribute params.
+        const mode = parts[i + 1];
+        let code;
+        if (mode === '5' && parts[i + 2] !== undefined) {
+          code = sgrCode(param + ';5;' + parts[i + 2]);
+          i += 2;
+        } else if (mode === '2' && parts[i + 4] !== undefined) {
+          code = sgrCode(param + ';2;' + parts[i + 2] + ';' + parts[i + 3] + ';' + parts[i + 4]);
+          i += 4;
+        } else {
+          code = sgrCode(param);
+        }
+        this._style.set(extended[0], { code, close: sgrCode(extended[1]) });
+        continue;
+      }
+      const slotEntry = slotFor(param);
+      if (slotEntry) {
+        this._style.set(slotEntry[0], { code: sgrCode(param), close: sgrCode(slotEntry[1]) });
+      } else {
+        // Unknown attribute: keep it as its own slot so the transition to the
+        // next style still closes it where the terminal understands the code.
+        this._style.set('param-' + param, { code: sgrCode(param), close: '' });
+      }
+    }
+  }
+
+  _styleId() {
+    if (this._style.size === 0) return 0;
+    const pairs = [];
+    for (const entry of this._style.values()) pairs.push(entry.code + '\u0000' + entry.close);
+    // Sort so the same attribute set reached via different SGR orderings
+    // (e.g. "1;7" vs "7;1") shares one style id instead of bloating the table.
+    pairs.sort();
+    const codes = pairs.map((pair) => pair.slice(0, pair.indexOf('\u0000')));
+    const closes = pairs.map((pair) => pair.slice(pair.indexOf('\u0000') + 1));
+    const key = codes.length + '|' + codes.join('\u0000') + '|' + closes.join('\u0000');
+    let id = this._styleIndex.get(key);
+    if (id === undefined) {
+      // IDs must remain stable for this instance: the renderer caches their
+      // resolved styles, and the current segment() may already reference them.
+      // The caller owns capacity/generation checks and rebuilds the segmenter
+      // together with its caches; never truncate these tables independently.
+      id = this.sgrKeys.length;
+      this.sgrKeys.push(codes.join('\u0000'));
+      this.sgrCloseKeys.push(closes.join('\u0000'));
+      this._styleIndex.set(key, id);
+    }
+    return id;
+  }
+
+  _graphemeId(grapheme) {
+    let id = this._graphemeIndex.get(grapheme);
+    if (id === undefined) {
+      id = this.graphemes.length;
+      this.graphemes.push(grapheme);
+      this._graphemeIndex.set(grapheme, id);
+    }
+    return id;
+  }
+
+  segment(text, cells, runs /* , reordered */) {
+    const source = typeof text === 'string' ? text : text == null ? '' : String(text);
+    const items = [];
+    let link = 0;
+    // The bundle re-runs segment() with grown arrays when this returns a
+    // negative count. _applySgr advances the persistent _style map, so a
+    // capacity-fail run must roll it back or the retry would re-apply the SGR
+    // codes on top of the already-advanced state and mis-style the leading
+    // text. _applySgr only set()s fresh objects / delete()s / clear()s, so a
+    // shallow copy is a faithful snapshot.
+    const styleSnapshot = new Map(this._style);
+
+    const push = (grapheme) => {
+      const isTab = grapheme === '\t';
+      items.push({
+        graphemeIndex: this._graphemeId(grapheme),
+        tab: isTab,
+        width: isTab ? 0 : graphemeWidth(grapheme, this.ambiguousIsNarrow),
+        style: this._styleId(),
+        link,
+      });
+    };
+
+    const segmenter = graphemeIterator();
+    for (const chunk of scanChunks(source)) {
+      if (chunk.kind === 'sgr') {
+        this._applySgr(chunk.value);
+        continue;
+      }
+      if (chunk.kind === 'osc8') {
+        link = chunk.value ? this._uriIndexFor(chunk.value) : 0;
+        continue;
+      }
+      if (segmenter) {
+        for (const entry of segmenter.segment(chunk.value)) push(entry.segment);
+      } else {
+        push(chunk.value);
+      }
+    }
+
+    const count = items.length;
+    if (cells.length < count * 2 || runs.length < count * 2) {
+      this._style = styleSnapshot;
+      return -count;
+    }
+
+    let runCount = 0;
+    let previous = null;
+    for (let i = 0; i < count; i += 1) {
+      const item = items[i];
+      if (!previous || previous.style !== item.style || previous.link !== item.link) {
+        runs[runCount * 2] = item.style;
+        runs[runCount * 2 + 1] = item.link;
+        runCount += 1;
+        previous = item;
+      }
+      item.run = runCount - 1;
+      cells[i * 2] = item.graphemeIndex;
+      cells[i * 2 + 1] = (item.run << RUN_SHIFT) | (item.tab ? TAB_FLAG : 0) | (item.width & WIDTH_MASK);
+    }
+    return count;
+  }
+
+  paint(target, targetWidth, x, y, cells, count, _unused, charMap, words) {
+    const columns = targetWidth | 0;
+    const emptyCharId = charMap ? charMap[this.emptyCharIndex] | 0 : this.emptyCharIndex;
+    const spacerCharId = charMap ? charMap[this.spacerCharIndex] | 0 : this.spacerCharIndex;
+    const rowBase = (y | 0) * columns;
+    let column = x | 0;
+    const first = column;
+
+    for (let i = 0; i < (count | 0); i += 1) {
+      const packed = cells[i * 2 + 1];
+      const run = packed >>> RUN_SHIFT;
+      const word = (words ? words[run] : 0) | 0;
+      const style = (word >>> STYLE_SHIFT) << STYLE_SHIFT;
+      // runWords() has already removed its cache's +1 sentinel offset.
+      const link = (word >>> LINK_SHIFT) & LINK_MASK;
+      const styleBits = style | (link << LINK_SHIFT);
+
+      if ((packed & TAB_FLAG) !== 0) {
+        const stop = this.tabWidth - (((column % this.tabWidth) + this.tabWidth) % this.tabWidth);
+        for (let k = 0; k < stop; k += 1) this._put(target, rowBase, columns, column + k, emptyCharId, styleBits | this.kinds.narrow);
+        column += stop;
+        continue;
+      }
+
+      const width = packed & WIDTH_MASK;
+      if (width >= 2) {
+        const charId = charMap ? charMap[cells[i * 2]] | 0 : cells[i * 2] | 0;
+        this._put(target, rowBase, columns, column, charId, styleBits | this.kinds.wide);
+        this._put(target, rowBase, columns, column + 1, spacerCharId, styleBits | this.kinds.spacerTail);
+        column += 2;
+      } else if (width === 1) {
+        const charId = charMap ? charMap[cells[i * 2]] | 0 : cells[i * 2] | 0;
+        this._put(target, rowBase, columns, column, charId, styleBits | this.kinds.narrow);
+        column += 1;
+      }
+      // width 0 (combining mark, bidi control): no cell of its own.
+    }
+
+    return packDamage(first, column);
+  }
+
+  setCell(target, targetWidth, x, y, charId, packedStyle) {
+    const columns = targetWidth | 0;
+    const column = x | 0;
+    const row = y | 0;
+    if (column < 0 || column >= columns || row < 0) return 0;
+    this._put(target, row * columns, columns, column, charId, packedStyle);
+    return packDamage(column, column + 1);
+  }
+
+  _put(target, rowBase, columns, column, charId, packed) {
+    if (column < 0 || column >= columns) return;
+    const index = (rowBase + column) << 1;
+    target[index] = charId;
+    target[index + 1] = packed;
+  }
+}
+
+function packDamage(first, end) {
+  if (end <= first) return 0;
+  return end * DAMAGE_END + first * DAMAGE_SPAN + end;
+}
+
+// ─── Installation ───────────────────────────────────────────
+
+function install() {
+  if (typeof Bun !== 'object' || Bun === null) return false;
+  if (typeof Bun.ant === 'object' && Bun.ant !== null && typeof Bun.ant.CellSegmenter === 'function') return false;
+  if (globalThis.__clawgodPatches && globalThis.__clawgodPatches['bun-ant-shim'] === false) return false;
+  try {
+    if (typeof Bun.ant !== 'object' || Bun.ant === null) Bun.ant = {};
+    Bun.ant.CellSegmenter = CellSegmenter;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+module.exports = { CellSegmenter, install, packDamage, scanChunks };
+
+if (install() && process.env.CLAWGOD_BUN_ANT_SHIM_DEBUG === '1') {
+  // stderr only (stdout belongs to the TUI renderer), opt-in: the install log
+  // already names the renderer runtime path on every (re)install.
+  process.stderr.write('[clawgod] Bun.ant shim active (Claude Code >= 2.1.271 renderer on stock Bun)\n');
+}
+BUNANT_EOF
+info "Bun.ant runtime shim created (bun-ant-shim.cjs)"
+
+# ─── Write universal patcher ───────────────────────────
+
 cat > "$CLAWGOD_DIR/ast-patches.mjs" << 'AST_PATCHES_EOF'
 import { parse } from './acorn.mjs';
 

@@ -126,6 +126,13 @@ try {
     writeFileSync(join(dir, 'source-backup.json'), '{}');
     result = shell(selection + '\necho "CHOICE=$NO_UPGRADE,$VERSION"');
     assert.match(result.stdout, /CHOICE=1,latest/);
+    writeFileSync(join(dir, 'pathmap.json'), JSON.stringify({ '/$bunfs/root/runner.mjs': 'bunfs/runner.mjs' }));
+    result = shell(selection + '\necho "CHOICE=$NO_UPGRADE,$VERSION"');
+    assert.match(result.stdout, /CHOICE=0,2.1.272/, 'old asset metadata must be re-extracted at the installed version');
+    writeFileSync(join(dir, 'pathmap.json'), JSON.stringify({ '/$bunfs/root/runner.mjs': { path: 'bunfs/runner.mjs', loader: 'text' } }));
+    result = shell(selection + '\necho "CHOICE=$NO_UPGRADE,$VERSION"');
+    assert.match(result.stdout, /CHOICE=1,latest/, 'current asset metadata must reuse the clean backup');
+    rmSync(join(dir, 'pathmap.json'));
     rmSync(join(dir, 'source-backup.json'));
     writeFileSync(join(dir, 'cli.original.cjs'), '// unknown version');
     assert.equal(shell(selection).status, 1);

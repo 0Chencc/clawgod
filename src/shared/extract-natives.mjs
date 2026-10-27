@@ -30,7 +30,7 @@ const BUN_SECTION_NAME    = '.bun';
 const OFFSET_STRUCT_SIZE  = 32;
 const MODULE_RECORD_SIZE  = 52;
 
-// loader id → name (subset; only `napi` is acted on, rest informational)
+// loader id → name (also retained for chunk and asset loading semantics)
 const LOADERS = {
   0:'jsx', 1:'js', 2:'ts', 3:'tsx', 4:'css', 5:'file', 6:'json', 7:'jsonc',
   8:'toml', 9:'wasm', 10:'napi', 11:'base64', 12:'dataurl', 13:'text',
@@ -404,11 +404,13 @@ function main() {
       if (!BUN_MOUNT_RE.test(normName)) continue;
       const sub = normName.replace(BUN_MOUNT_RE, '');
       if (!sub) continue;
-      if (m.loader === 'napi') {
+      if (m.entry) {
+        pathMap[normName] = { path: 'cli.original.cjs', loader: m.loader };
+      } else if (m.loader === 'napi') {
         const base = napiBasename(m.name);
-        pathMap[normName] = `vendor/${base}/${platDir}/${base}.node`;
+        pathMap[normName] = { path: `vendor/${base}/${platDir}/${base}.node`, loader: m.loader };
       } else {
-        pathMap[normName] = `bunfs/${sub.replace(/\//g, '__')}`;
+        pathMap[normName] = { path: `bunfs/${sub.replace(/\//g, '__')}`, loader: m.loader };
       }
     }
     writeFileSync(join(outputDir, 'pathmap.json'), JSON.stringify(pathMap, null, 0) + '\n');
