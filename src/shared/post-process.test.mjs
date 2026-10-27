@@ -61,7 +61,7 @@ try {
   for (const mount of ['/$bunfs/root/', 'B:/~BUN/root/']) {
     const dir = join(root, mount.startsWith('B:') ? 'windows' : 'posix', 'profile space \u6d4b\u8bd5');
     mkdirSync(join(dir, 'bunfs'), { recursive: true });
-    for (const file of ['post-process.mjs', 'acorn.mjs']) {
+    for (const file of ['post-process.mjs', 'acorn.mjs', 'patch.mjs', 'ast-patches.mjs']) {
       copyFileSync(new URL(file, import.meta.url), join(dir, file));
     }
     const pathMap = {
@@ -73,13 +73,16 @@ try {
     const templates = {};
     for (const ext of ['mjs', 'js', 'cjs', 'ts', 'tsx', 'jsx', 'md', 'txt', 'json', '']) {
       const name = `runner${ext ? '.' + ext : ''}`;
-      templates[name] = `#!/usr/bin/env node\n// @bun\nvar require=import.meta.require;const asset=${JSON.stringify(mount + 'guide.md')};process.exit(2);\n`;
+      templates[name] = `#!/usr/bin/env node\n// @bun\nvar require=import.meta.require;const asset=${JSON.stringify(mount + 'guide.md')};process.exit(2);\n// .command("update").alias("upgrade")\n`;
       pathMap[mount + name] = { path: 'bunfs/' + name, loader: 'text' };
       writeFileSync(join(dir, 'bunfs', name), templates[name]);
     }
-    templates['file.mjs'] = '// @bun\nprocess.exit(3);\n';
+    templates['file.mjs'] = '// @bun\nprocess.exit(3);\nconst color="rgb(215,119,87)";\n';
     pathMap[mount + 'file.mjs'] = { path: 'bunfs/file.mjs', loader: 'file' };
     writeFileSync(join(dir, 'bunfs/file.mjs'), templates['file.mjs']);
+    const binaryAsset = Buffer.from([0, 255, 128, 13, 10]);
+    pathMap[mount + 'binary.js'] = { path: 'bunfs/binary.js', loader: 'file' };
+    writeFileSync(join(dir, 'bunfs/binary.js'), binaryAsset);
     writeFileSync(join(dir, 'cli.original.js'),
       `import{load}from ${JSON.stringify(mount + 'helper.js')};var entryLoad=import.meta.require;export{load,entryLoad};`);
     writeFileSync(join(dir, 'bunfs/helper.js'),
@@ -127,6 +130,7 @@ for (const requireAsset of [load, entryLoad, assigned]) {
     assert.equal(module.namespace.answer, 42);
   }
   assert.equal(requireAsset(join(import.meta.dirname, 'bunfs/guide.md')), '# Guide\\n');
+  assert.equal(requireAsset(join(import.meta.dirname, 'bunfs/binary.js')), join(import.meta.dirname, 'bunfs/binary.js'));
   assert.equal(requireAsset(join(import.meta.dirname, 'bunfs/module.mjs')).value, 7);
   assert.equal(typeof requireAsset('node:fs').readFileSync, 'function');
   assert.equal(requireAsset(join(import.meta.dirname, 'external.txt')).default, 'outside the extracted graph');
@@ -134,10 +138,21 @@ for (const requireAsset of [load, entryLoad, assigned]) {
 }
 `);
     run(bun, [check, '--resume', 'x']);
+    run(process.execPath, [join(dir, 'patch.mjs'), '--capture-clean-source']);
+    // A snapshot from the preceding installer may still contain asset entries.
+    const snapshotPath = join(dir, 'source-backup.json');
+    const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+    snapshot.files['bunfs/runner.mjs'] = 'old snapshot must not overwrite this template';
+    writeFileSync(snapshotPath, JSON.stringify(snapshot));
+    for (const args of [[], [], ['--revert']]) {
+      run(process.execPath, [join(dir, 'patch.mjs'), ...args]);
+    }
+    run(bun, [check, '--resume', 'x']);
     for (const [name, source] of Object.entries(templates)) {
       assert.equal(readFileSync(join(dir, 'bunfs', name), 'utf8'), source, 'assets must remain unchanged');
     }
 
+    assert.deepEqual(readFileSync(join(dir, 'bunfs/binary.js')), binaryAsset, 'file assets must retain their original bytes');
     const helper = readFileSync(join(dir, 'bunfs/helper.js'), 'utf8');
     copyFileSync(join(dir, 'cli.original.cjs'), join(dir, 'cli.original.js'));
     run(process.execPath, [join(dir, 'post-process.mjs')]);
