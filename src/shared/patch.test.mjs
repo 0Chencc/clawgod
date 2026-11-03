@@ -396,7 +396,7 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
   const gateDir = mkdtempSync(join(tmpdir(), 'clawgod-gate-bypass-test-'));
   const gateFixture = (extra) =>
     `function X(e,n){if(GMn(e.reason)==="fetched")return"fetched";if(!e.hasAdmittedCache)return"no";${extra}return e.admittedCacheAgeMs<=n*3600000?"cached":"no"}`;
-  const GATE_INJECT = ';if(globalThis.__clawgodPatches?.["remote-settings-gate-bypass"]!==!1)return "fetched";';
+  const GATE_INJECT = ';if(globalThis.__clawgodPatches?.["remote-settings-gate-bypass"]!==!1&&GMn(e.reason)!=="refused")return "fetched";';
   try {
     for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
       copyFileSync(new URL(`./${name}`, import.meta.url), join(gateDir, name));
@@ -422,12 +422,13 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
         [{ reason: 'unavailable', hasAdmittedCache: false, admittedCacheAgeMs: 0 }, 'fetched', 'no'],
         [{ reason: 'unavailable', hasAdmittedCache: true, admittedCacheAgeMs: 100 }, 'fetched', 'cached'],
         [{ reason: 'unavailable', hasAdmittedCache: true, admittedCacheAgeMs: -1 }, 'fetched', 'no'],
+        [{ reason: 'refused', hasAdmittedCache: false, admittedCacheAgeMs: 0 }, 'no', 'no'],
       ];
       for (const [input, onExpected, offExpected] of cases) {
         for (const toggle of [undefined, true, false]) {
           const result = runInNewContext(
             `${patched};X(${JSON.stringify(input)},3600000)`,
-            { GMn: r => (r === 'fetched' ? 'fetched' : 'unavailable'),
+            { GMn: r => ['fetched', 'refused'].includes(r) ? r : 'unavailable',
               ...(toggle === undefined ? {} : { __clawgodPatches: { 'remote-settings-gate-bypass': toggle } }) }
           );
           assert.equal(result, toggle === false ? offExpected : onExpected,
@@ -445,13 +446,34 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
       execFileSync(process.execPath, [join(gateDir, 'patch.mjs')]);
       assert.equal(readFileSync(target, 'utf8'), lookAlike, `${layout}: look-alike without admittedCacheAgeMs untouched`);
 
+      // The anchor on a different parameter is unrelated. It must neither
+      // inject into the look-alike nor produce a false stale failure.
+      const wrongReceiver = 'function X(e,n){if(GMn(e.reason)==="fetched")return"fetched";if(!e.hasAdmittedCache)return"no";return n.admittedCacheAgeMs?"cached":"no"}';
+      writeFileSync(target, wrongReceiver);
+      const wrongReceiverRun = spawnSync(process.execPath, [join(gateDir, 'patch.mjs')], { encoding: 'utf8' });
+      assert.equal(wrongReceiverRun.status, 0, `${layout}: second-param anchor is absent`);
+      assert.equal(readFileSync(target, 'utf8'), wrongReceiver, `${layout}: second-param anchor remains untouched`);
+
       // Drifted shape: anchor present, structure no longer recognized → stale.
-      const drifted = 'function X(e,n){if(e.admittedCacheAgeMs===void 0)return"no";return"cached"}';
+      const drifted = 'function X(e,n){if(GMn(e.reason)!=="fetched")return"no";if(!e.hasAdmittedCache)return"no";return e.admittedCacheAgeMs?"cached":"no"}';
       writeFileSync(target, drifted);
       const stale = spawnSync(process.execPath, [join(gateDir, 'patch.mjs')], { encoding: 'utf8' });
       assert.equal(stale.status, 1, `${layout}: drifted shape aborts`);
       assert.match(stale.stdout, /Bypass org-config gate when settings are still loading — AST matcher stale/, layout);
       assert.equal(readFileSync(target, 'utf8'), drifted, `${layout}: failure writes nothing`);
+
+      // Function-kind and parameter-list drift retain the anchor, so neither
+      // may silently become a "not present" result.
+      for (const [kind, changed] of Object.entries({
+        expression: 'const X=function(e,n){if(GMn(e.reason)==="fetched")return"fetched";if(!e.hasAdmittedCache)return"no";return e.admittedCacheAgeMs?"cached":"no"}',
+        arity: 'function X(e){if(GMn(e.reason)==="fetched")return"fetched";if(!e.hasAdmittedCache)return"no";return e.admittedCacheAgeMs?"cached":"no"}',
+      })) {
+        writeFileSync(target, changed);
+        const changedRun = spawnSync(process.execPath, [join(gateDir, 'patch.mjs')], { encoding: 'utf8' });
+        assert.equal(changedRun.status, 1, `${layout}: ${kind} drift aborts`);
+        assert.match(changedRun.stdout, /Bypass org-config gate when settings are still loading — AST matcher stale/, layout);
+        assert.equal(readFileSync(target, 'utf8'), changed, `${layout}: ${kind} drift writes nothing`);
+      }
 
       // Absent feature: no admittedCacheAgeMs anywhere → no stale failure.
       writeFileSync(target, '// no org-config gate in this version');
