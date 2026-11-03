@@ -7979,6 +7979,9 @@ const CLAWGOD_FEATURES_META = {
   ],
   "remote-settings-off": [
     "remote-settings"
+  ],
+  "remote-settings-gate-bypass": [
+    "remote-settings"
   ]
 };
 
@@ -8891,14 +8894,14 @@ import { parse } from './acorn.mjs';
 export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
   'computer-use-default', 'ultraplan', 'voice-mode',
-  'geo-stego-date', 'remote-settings-off', 'wiggly-dove',
+  'geo-stego-date', 'remote-settings-off', 'remote-settings-gate-bypass', 'wiggly-dove',
   'tool-result-pairing-recovery',
 ];
 
 const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
   'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
   'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove',
-  '[Tool result missing due to internal error]'];
+  'admittedCacheAgeMs', '[Tool result missing due to internal error]'];
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -9228,6 +9231,40 @@ export function scanAstPatches(code) {
       }
     }
 
+    // Org-config gate classifier: a two-param function whose first statement
+    // returns "fetched" when a helper called with (param.reason) equals
+    // "fetched", and whose body consults param.admittedCacheAgeMs. Force it to
+    // report "fetched" so the "still loading your organization's settings"
+    // gate never blocks. The admittedCacheAgeMs member (not just the minified
+    // function name) is what ties this function to the org-config gate.
+    if (node.type === 'FunctionDeclaration' && node.params.length === 2 &&
+        node.params[0]?.type === 'Identifier' && node.params[1]?.type === 'Identifier' &&
+        !node.async && !node.generator &&
+        code.slice(node.start, node.end).includes('admittedCacheAgeMs')) {
+      const id = 'remote-settings-gate-bypass';
+      if (hasGate(node, id)) {
+        results[id].patched = true;
+      } else {
+        const p0 = node.params[0].name;
+        const first = node.body.body[0];
+        const matchesShape = first?.type === 'IfStatement' &&
+          first.consequent?.type === 'ReturnStatement' && literal(first.consequent.argument, 'fetched') &&
+          first.test?.type === 'BinaryExpression' && first.test.operator === '===' &&
+          literal(first.test.right, 'fetched') &&
+          first.test.left?.type === 'CallExpression' && first.test.left.arguments.length === 1 &&
+          first.test.left.arguments[0]?.type === 'MemberExpression' &&
+          first.test.left.arguments[0].object?.type === 'Identifier' &&
+          first.test.left.arguments[0].object.name === p0 &&
+          member(first.test.left.arguments[0], 'reason');
+        if (matchesShape) injectReturn(id, node, '"fetched"');
+        else {
+          // Anchor present but the classifier shape drifted \u2014 surface as stale
+          // rather than silently reporting "not present in this version".
+          results[id].present = true;
+        }
+      }
+    }
+
     if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type) &&
         node.params.length > 0 && node.params[0].type === 'Identifier') {
       const historyParam = node.params[0].name;
@@ -9431,7 +9468,7 @@ const FEATURES = {
   'message-filter': { desc: 'Bypass non-ant message/attachment filters',
                       patchIds: ['attachment-filter-bypass', 'message-filter-legacy', 'message-filter-s8'] },
   'remote-settings': { desc: 'Ignore enterprise-managed remote settings',
-                      patchIds: ['remote-settings-off'] },
+                      patchIds: ['remote-settings-off', 'remote-settings-gate-bypass'] },
 };
 
 // Runtime gate expression baked into every toggleable replacer. Evaluates
@@ -10107,6 +10144,27 @@ const patches = [
     id: 'remote-settings-off',
     toggleable: true,
     name: 'Ignore enterprise-managed remote settings',
+    ast: true,
+  },
+
+  {
+    // The org-config gate (lZe in the settings chunk) blocks the session
+    // with a "can't start this session yet / still loading your organization's
+    // settings" screen whenever the policy/settings load state is in-flight or
+    // not started (reason unavailable_pending) or any other non-fetched,
+    // non-cached reason. With remote-settings-off blocking the fetch, the load
+    // never completes, so the gate retries forever.
+    //
+    // The AST semantic matcher (ast-patches.mjs) identifies the gate's
+    // classifier by shape \u2014 a two-param function whose first statement returns
+    // "fetched" when a helper called with (param.reason) equals "fetched", and
+    // whose body consults param.admittedCacheAgeMs \u2014 then forces it to report
+    // "fetched" for every non-refused reason. Refused sign-ins still take the
+    // refusal path (lZe's first loop checks GMn()==="refused" directly). OFF
+    // restores the upstream blocking behavior.
+    id: 'remote-settings-gate-bypass',
+    toggleable: true,
+    name: 'Bypass org-config gate when settings are still loading',
     ast: true,
   },
 

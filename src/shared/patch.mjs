@@ -74,7 +74,7 @@ const FEATURES = {
   'message-filter': { desc: 'Bypass non-ant message/attachment filters',
                       patchIds: ['attachment-filter-bypass', 'message-filter-legacy', 'message-filter-s8'] },
   'remote-settings': { desc: 'Ignore enterprise-managed remote settings',
-                      patchIds: ['remote-settings-off'] },
+                      patchIds: ['remote-settings-off', 'remote-settings-gate-bypass'] },
 };
 
 // Runtime gate expression baked into every toggleable replacer. Evaluates
@@ -750,6 +750,27 @@ const patches = [
     id: 'remote-settings-off',
     toggleable: true,
     name: 'Ignore enterprise-managed remote settings',
+    ast: true,
+  },
+
+  {
+    // The org-config gate (lZe in the settings chunk) blocks the session
+    // with a "can't start this session yet / still loading your organization's
+    // settings" screen whenever the policy/settings load state is in-flight or
+    // not started (reason unavailable_pending) or any other non-fetched,
+    // non-cached reason. With remote-settings-off blocking the fetch, the load
+    // never completes, so the gate retries forever.
+    //
+    // The AST semantic matcher (ast-patches.mjs) identifies the gate's
+    // classifier by shape — a two-param function whose first statement returns
+    // "fetched" when a helper called with (param.reason) equals "fetched", and
+    // whose body consults param.admittedCacheAgeMs — then forces it to report
+    // "fetched" for every non-refused reason. Refused sign-ins still take the
+    // refusal path (lZe's first loop checks GMn()==="refused" directly). OFF
+    // restores the upstream blocking behavior.
+    id: 'remote-settings-gate-bypass',
+    toggleable: true,
+    name: 'Bypass org-config gate when settings are still loading',
     ast: true,
   },
 
