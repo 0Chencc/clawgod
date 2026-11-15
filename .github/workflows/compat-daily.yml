@@ -155,8 +155,17 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y ripgrep
-          rg --version | head -1
+          if ! command -v rg >/dev/null 2>&1; then
+            # Avoid making compatibility tests depend on Ubuntu mirror DNS.
+            archive="$RUNNER_TEMP/ripgrep.tar.gz"
+            curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
+              https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz \
+              -o "$archive"
+            echo "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$RUNNER_TEMP"
+            sudo install -m 755 "$RUNNER_TEMP/ripgrep-15.1.0-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
+          fi
+          rg --version
 
       - name: Install ripgrep (macOS)
         if: runner.os == 'macOS'
@@ -186,6 +195,7 @@ jobs:
         run: node src/ci/provider-startup-fixture.cjs seed
 
       - name: Run install.sh (npm-fallback path)
+        id: install
         # No official Claude binary pre-installed → install.sh exercises
         # its npm-registry fallback to fetch @anthropic-ai/claude-code-<plat>.
         # Capture output so the patch-result line can be asserted on; we
@@ -436,7 +446,9 @@ jobs:
           echo "Published badge: claude $version"
 
       - name: Open / update issue on scheduled failure
-        if: failure() && github.event_name == 'schedule'
+        # Setup/network failures are visible on the run, but are not evidence
+        # of a Claude compatibility regression before installation even starts.
+        if: failure() && github.event_name == 'schedule' && (steps.install.outcome == 'failure' || steps.install.outcome == 'success')
         uses: actions/github-script@v8
         with:
           script: |
@@ -601,6 +613,7 @@ jobs:
         run: node src/ci/provider-startup-fixture.cjs seed
 
       - name: Run install.ps1 through Invoke-Expression (npm-fallback path)
+        id: install
         # Use Windows PowerShell 5.1 and evaluate the installer as a decoded
         # string, matching the documented `irm ... | iex` parser path.
         # Tee the complete output so a missing/failed patch run cannot be
@@ -804,7 +817,7 @@ jobs:
             ${{ runner.temp }}/tui-artifacts/*.json
 
       - name: Open or update issue on scheduled failure
-        if: failure() && github.event_name == 'schedule' && matrix.claude == 'latest'
+        if: failure() && github.event_name == 'schedule' && matrix.claude == 'latest' && (steps.install.outcome == 'failure' || steps.install.outcome == 'success')
         uses: actions/github-script@v8
         with:
           script: |

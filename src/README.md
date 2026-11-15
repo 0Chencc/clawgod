@@ -17,12 +17,17 @@ when either generated installer is missing or differs from its sources.
 The patcher uses Acorn AST nodes for `user-type-ant`,
 `bun-standalone-executable`, `growthbook-env-overrides-graph`,
 `computer-use-default`, `ultraplan`, `voice-mode`, `geo-stego-date`,
-`remote-settings-off`, and `wiggly-dove`.
+`remote-settings-off`, `auto-mode-inline-gate`, and `wiggly-dove`.
 It parses each candidate file once, locates stable property/string names and grammar nodes, and splices
 only those node ranges. Metadata order, quote style, whitespace, and supported
 function forms do not determine the location. Comments and text inside strings
 are not patch sites. The remaining patches retain their existing regex matchers;
 this is an incremental migration, with no new feature unlocks.
+
+The Auto-mode provider patch supports inline conditions, direct helper calls,
+and the cached local predicate introduced in Claude 2.1.323. The latter also
+feeds the final Haiku check; model-only and first-party restrictions remain
+upstream, and disabling the patch restores the original provider evaluation.
 
 AST edits are checked for overlap and reparsed before the regex phase. Parse
 failures abort without writing runtime source, even with `--tolerate-stale`.

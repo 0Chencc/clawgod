@@ -8892,13 +8892,13 @@ export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
   'computer-use-default', 'ultraplan', 'voice-mode',
   'geo-stego-date', 'remote-settings-off', 'wiggly-dove',
-  'tool-result-pairing-recovery',
+  'tool-result-pairing-recovery', 'auto-mode-inline-gate',
 ];
 
 const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
   'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
   'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove',
-  '[Tool result missing due to internal error]'];
+  '[Tool result missing due to internal error]', 'firstParty', 'claude-sonnet-4-6'];
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -9059,6 +9059,73 @@ function hasRemoteSettingsContext(node) {
   return found;
 }
 
+function conjunctions(node) {
+  return node?.type === 'LogicalExpression' && node.operator === '&&'
+    ? [...conjunctions(node.left), ...conjunctions(node.right)] : [node];
+}
+
+function providerRestriction(parts) {
+  const [first, second] = parts;
+  if (first?.type !== 'BinaryExpression' || first.operator !== '!==' ||
+      first.left.type !== 'Identifier' || !literal(first.right, 'firstParty')) return false;
+  const provider = first.left.name;
+  if (second?.type === 'BinaryExpression' && second.operator === '!==' &&
+      second.left.name === provider && literal(second.right, 'anthropicAws')) return true;
+  const call = second?.type === 'UnaryExpression' && second.operator === '!' ? second.argument : null;
+  return call?.type === 'CallExpression' && call.callee.type === 'Identifier' &&
+    call.arguments.length === 1 && call.arguments[0].name === provider;
+}
+
+function autoModeModels(node) {
+  if (node?.type !== 'LogicalExpression' || node.operator !== '||') return false;
+  const models = new Map();
+  walkScope(node, child => {
+    if (child.type === 'BinaryExpression' && child.operator === '===' && child.left.type === 'Identifier' &&
+        ['claude-opus-4-6', 'claude-sonnet-4-6'].some(model => literal(child.right, model))) {
+      models.set(child.right.value, child.left.name);
+    }
+  });
+  return models.size === 2 && models.get('claude-opus-4-6') === models.get('claude-sonnet-4-6');
+}
+
+function autoModeSites(fn, functions) {
+  const sites = [], candidates = [];
+  const statements = fn.body.body;
+  const providerCall = node => node?.type === 'CallExpression' && !node.arguments.length &&
+    node.callee.type === 'Identifier' && functions.get(node.callee.name)?.body.body.some(s =>
+      s.type === 'ReturnStatement' && providerRestriction(conjunctions(s.argument)));
+  for (const statement of statements) {
+    const returned = statement.consequent?.type === 'BlockStatement'
+      ? statement.consequent.body.length === 1 && statement.consequent.body[0] : statement.consequent;
+    if (statement.type !== 'IfStatement' || statement.alternate ||
+        returned?.type !== 'ReturnStatement' || !boolean(returned.argument, false)) continue;
+    const parts = conjunctions(statement.test);
+    if (providerRestriction(parts)) {
+      candidates.push(statement);
+      sites.push(statement.test);
+      continue;
+    }
+    if (parts.length !== 2 || !autoModeModels(parts[1])) continue;
+    candidates.push(statement);
+    const provider = parts[0];
+    if (providerCall(provider)) sites.push(provider);
+    if (provider.type !== 'Identifier') continue;
+    const bindings = statements.filter(s => s.type === 'VariableDeclaration').flatMap(s => s.declarations)
+      .filter(d => d.id.name === provider.name);
+    let written = false;
+    walkScope(fn.body, node => {
+      if ((node.type === 'AssignmentExpression' && node.left.name === provider.name) ||
+          (node.type === 'UpdateExpression' && node.argument.name === provider.name)) written = true;
+    });
+    if (bindings.length === 1 && bindings[0].end < statement.start && !written && providerCall(bindings[0].init)) {
+      // 2.1.323+ reuses this local predicate in both the Opus/Sonnet guard
+      // and the final Haiku return. Keep first-party and model-only checks.
+      sites.push(bindings[0].init);
+    }
+  }
+  return { sites: [...new Set(sites)], complete: sites.length === candidates.length, present: candidates.length > 0 };
+}
+
 // One parse per candidate file, shared by every semantic patch. Keep only edit
 // ranges; the large AST can be collected before the next graph chunk is parsed.
 export function scanAstPatches(code) {
@@ -9100,6 +9167,18 @@ export function scanAstPatches(code) {
     }
   });
   walk(tree, node => {
+    if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type) &&
+        node.body.type === 'BlockStatement' && !node.async && !node.generator) {
+      const id = 'auto-mode-inline-gate';
+      if (hasGate(node, id)) results[id].patched = true;
+      else {
+        const { sites, complete, present } = autoModeSites(node, functions);
+        if (present && !complete) results[id].present = true;
+        if (complete) for (const site of sites) {
+          edit(id, site, `(globalThis.__clawgodPatches?.[${JSON.stringify(id)}]===!1&&(${code.slice(site.start, site.end)}))`);
+        }
+      }
+    }
     if (literal(node, 'tengu_wiggly_dove')) wigglyLiterals.add(node.start);
     if (node.type === 'Program' || node.type === 'BlockStatement') {
       const flags = node.body.filter(s => s.type === 'VariableDeclaration')
@@ -9337,6 +9416,7 @@ export function scanAstPatches(code) {
     results['tool-result-pairing-recovery'].present = true;
     results['tool-result-pairing-recovery'].matches = [];
   }
+  if (results['auto-mode-inline-gate'].present) results['auto-mode-inline-gate'].matches = [];
   return results;
 }
 
@@ -9676,22 +9756,12 @@ const patches = [
     optional: true,
   },
   {
-    // \u2264v2.1.149: if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;
-    // v2.1.158+: if(q!=="firstParty"&&q!=="anthropicAws"&&($==="claude-opus-4-6"||\u2026))return!1;
-    // v2.1.214+: if(r!=="firstParty"&&!d6(r)&&(t==="claude-opus-4-6"||\u2026))return!1;
-    //   "anthropicAws" replaced by helper function !fn(var).
-    // v2.1.280+: if(Fin()&&(n==="claude-opus-4-6"||\u2026))return!1;
-    //   Fin() now contains the provider check. Keep the original condition
-    //   behind the feature gate so disabling the patch restores upstream.
-    // v2.1.293+: if(jDn()&&(n==="claude-opus-4-6"||n==="claude-sonnet-4-6"||n.includes("haiku")&&n!=="claude-haiku-5-5"))return!1;
-    //   upstream added `&&n!=="claude-haiku-5-5"` exemption to the haiku check.
-    //   Relaxed to [^;]*? to tolerate model exclusion variants without breaking on future additions.
+    // Match inline, helper-call and locally cached provider predicates.
+    // Newer bundles share the predicate with a separate Haiku restriction.
     id: 'auto-mode-inline-gate',
     toggleable: true,
     name: 'Auto-mode unlock for third-party API (inline gate)',
-    pattern: /if\((?:([\w$]+)!=="firstParty"&&(?:\1!=="anthropicAws"|![\w$]+\(\1\))[^;]*|[\w$]+\(\)&&\([\w$]+==="claude-opus-4-6"\|\|[\w$]+==="claude-sonnet-4-6"\|\|[\w$]+\.includes\("haiku"\)[^;]*?\))\)return!1;/g,
-    replacer: (m) => `if(globalThis.__clawgodPatches?.[${JSON.stringify('auto-mode-inline-gate')}]===!1&&` + m.slice(3, -10) + `)return!1;`,
-    sentinel: '!=="firstParty"&&',
+    ast: true,
   },
   {
     // CLI subcommand registered via commander chain:

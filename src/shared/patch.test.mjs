@@ -156,13 +156,16 @@ try {
   for (const graph of [false, true]) {
     rmSync(join(testDir, 'bunfs'), { recursive: true, force: true });
     if (graph) mkdirSync(join(testDir, 'bunfs'));
-    for (const [label, condition] of [
+    for (const [label, condition, setup = '', tail = 'return!0'] of [
+      ['legacy inline provider', 'provider!=="firstParty"&&provider!=="anthropicAws"'],
       ['inline provider', 'provider!=="firstParty"&&!isAws(provider)&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku"))'],
       ['provider helper', 'isThirdParty()&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku"))'],
       ['provider helper with haiku exemption (v2.1.293+)', 'isThirdParty()&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku")&&model!=="claude-haiku-5-5")'],
       ['provider helper with future exclusions', 'isThirdParty()&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6"||model.includes("haiku")&&model!=="claude-haiku-5-5"&&!isExcluded(model))'],
+      ['cached provider with split Haiku return (v2.1.323+)', 'cached&&(model==="claude-opus-4-6"||model==="claude-sonnet-4-6")',
+        'const cached=isThirdParty();', 'return !(cached&&model.includes("haiku")&&model!=="claude-haiku-5-5")'],
     ]) {
-      const source = `function isThirdParty(){return provider!=="firstParty"&&!isAws(provider)}function isAws(value){return value==="anthropicAws"}function supports(model){if(${condition})return!1;return!0}`;
+      const source = `function isThirdParty(){return provider!=="firstParty"&&!isAws(provider)}function isAws(value){return value==="anthropicAws"}function supports(model){${setup}if(${condition})return!1;${tail}}`;
       const target = join(testDir, graph ? 'bunfs/auto-mode.js' : 'cli.original.cjs');
       if (graph) writeFileSync(join(testDir, 'cli.original.cjs'), '// entry');
       writeFileSync(target, source);

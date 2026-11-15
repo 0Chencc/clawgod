@@ -31,7 +31,7 @@ const unrelated={method(){return this.environmentOverridesParsed=true,this.envir
 const dateSource = 'function dateText (input) {let info=probe(),mark=apostrophe(info?.known??false,info?.labKw??false),formatted=info?.cnTZ?input.replaceAll("-","/"):input;return`Today${mark}s date is ${formatted}.`}';
 const scanned = scanAstPatches(source + dateSource);
 for (const id of AST_PATCH_IDS) assert.equal(scanned[id].matches.length,
-  ['remote-settings-off', 'wiggly-dove', 'tool-result-pairing-recovery'].includes(id) ? 0 : 1, id);
+  ['remote-settings-off', 'wiggly-dove', 'tool-result-pairing-recovery', 'auto-mode-inline-gate'].includes(id) ? 0 : 1, id);
 const edits = Object.values(scanned).flatMap(result => result.matches);
 const patched = applyAstEdits(source + dateSource, edits);
 parsePatchSource(patched);
@@ -57,6 +57,61 @@ for (const toggle of [undefined, true, false]) {
 }
 assert.equal(applyAstEdits(patched, Object.values(scanAstPatches(patched)).flatMap(r => r.matches)), patched,
   'repeated patching without a snapshot must not nest gates');
+
+// 2.1.323/325 split the provider restriction across an if and a final return.
+const autoModeSource = `
+function thirdParty(){const route=provider;return route!=='firstParty'&&!aws(route)}
+function aws(route){return route==='anthropicAws'}
+function supports(input){
+  const model=input;
+  if(tooOld(model))return false;
+  let restricted=thirdParty();
+  if(restricted&&(model==='claude-opus-4-6'||model==='claude-sonnet-4-6')){return false;}
+  const localRestriction=provider==='firstParty'&&firstPartyRestricted;
+  return !((restricted||localRestriction)&&model.includes('haiku')&&model!=='claude-haiku-5-5');
+}
+function neighbor(){return thirdParty()}
+`;
+const autoId = 'auto-mode-inline-gate';
+const autoScan = scanAstPatches(autoModeSource)[autoId];
+assert.equal(autoScan.matches.length, 1);
+const autoPatched = applyAstEdits(autoModeSource, autoScan.matches);
+parsePatchSource(autoPatched);
+assert.equal(scanAstPatches(autoPatched)[autoId].matches.length, 0);
+assert.equal(scanAstPatches(autoPatched)[autoId].patched, true);
+assert.ok(autoPatched.includes('function neighbor(){return thirdParty()}'));
+for (const toggle of [undefined, true, false]) {
+  for (const provider of ['firstParty', 'anthropicAws', 'proxy']) {
+    for (const firstPartyRestricted of [false, true]) {
+      for (const model of ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-haiku-5-5', 'new-model', 'too-old']) {
+        const context = { provider, firstPartyRestricted, tooOld: value => value === 'too-old',
+          __clawgodPatches: { [autoId]: toggle } };
+        const original = runInNewContext(`${autoModeSource};supports(${JSON.stringify(model)})`, context);
+        const actual = runInNewContext(`${autoPatched};supports(${JSON.stringify(model)})`, context);
+        const expected = toggle !== false && provider === 'proxy' ? model !== 'too-old' : original;
+        assert.equal(actual, expected, `${provider}, ${model}, toggle=${toggle}, local=${firstPartyRestricted}`);
+        assert.equal(runInNewContext(`${autoPatched};neighbor()`, context), provider === 'proxy');
+      }
+    }
+  }
+}
+for (const changed of [
+  autoModeSource.replace('let restricted=thirdParty();', 'let restricted=unknown();'),
+  autoModeSource.replace('let restricted=thirdParty();', 'let restricted=thirdParty();restricted=unknown();'),
+]) {
+  const result = scanAstPatches(changed)[autoId];
+  assert.equal(result.present, true, 'unknown predicates must fail closed');
+  assert.equal(result.matches.length, 0);
+}
+for (const decoy of [
+  `function ordinary(){return provider!=="firstParty"&&provider!=="gateway"}`,
+  `const sample=${JSON.stringify(autoModeSource)};`,
+  `/* ${autoModeSource} */`,
+]) {
+  const result = scanAstPatches(decoy)[autoId];
+  assert.equal(result.present, false, 'unrelated provider checks and text are not stale auto-mode gates');
+  assert.equal(result.matches.length, 0);
+}
 
 const privacyGate = `function allowed () {'use strict';if (!firstParty()) return false;
   if (!lookup(rollout, false)) return false;return routeAllowed();}`;
