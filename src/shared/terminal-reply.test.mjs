@@ -28,7 +28,7 @@ assert.equal(terminalReplyDelay(pending, reader('\x1b['), NaN), 0);
 // graph/legacy patching, idempotence, expiry, and a wrapper without the helper.
 const dir = mkdtempSync(join(tmpdir(), 'clawgod-terminal-reply-test-'));
 try {
-  for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+  for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
     copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
   }
   for (const graph of [false, true]) {

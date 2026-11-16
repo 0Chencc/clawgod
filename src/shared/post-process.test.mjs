@@ -61,7 +61,7 @@ try {
   for (const mount of ['/$bunfs/root/', 'B:/~BUN/root/']) {
     const dir = join(root, mount.startsWith('B:') ? 'windows' : 'posix', 'profile space \u6d4b\u8bd5');
     mkdirSync(join(dir, 'bunfs'), { recursive: true });
-    for (const file of ['post-process.mjs', 'acorn.mjs', 'patch.mjs', 'ast-patches.mjs']) {
+    for (const file of ['post-process.mjs', 'acorn.mjs', 'patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs']) {
       copyFileSync(new URL(file, import.meta.url), join(dir, file));
     }
     const pathMap = {

@@ -52,9 +52,16 @@ Green logo = patched. Orange logo = original.
 | **Agent Teams** | Multi-agent swarm collaboration, no flags needed |
 | **Computer Use** | Screen control without Max/Pro subscription (macOS) |
 | **Auto-mode** | Unlocks auto-mode for third-party API users (no firstParty gate) |
-| **Classifier tuning** | Tunable auto-mode classifier: timeout / model / retries (`CLAWGOD_CLASSIFIER_TIMEOUT_MS`, `CLAWGOD_CLASSIFIER_MODEL`, `CLAWGOD_CLASSIFIER_RETRIES`) |
+| **Classifier tuning** | Tunable auto-mode classifier: timeout / model / retries (`CLAWGOD_CLASSIFIER_TIMEOUT_MS`, `CLAWGOD_CLASSIFIER_MODEL`, `CLAWGOD_CLASSIFIER_RETRIES`). `CLAWGOD_CLASSIFIER_MODEL` applies through 2.1.301; 2.1.302+ uses the official `CLAUDE_CODE_AUTO_MODE_MODEL` |
 | **Ultraplan** | Multi-agent planning via Claude Code Remote |
 | **Ultrareview** | Automated bug hunting via Claude Code Remote |
+
+Classifier model selection depends on the Claude Code version:
+
+- **Claude Code <= 2.1.301:** `CLAWGOD_CLASSIFIER_MODEL` overrides the classifier model at the function entry, before the server-provided classifier configuration is read. It is part of the ClawGod classifier patch and follows the `classifier-tuning` toggle.
+- **Claude Code >= 2.1.302:** the ClawGod override is retired and the official `CLAUDE_CODE_AUTO_MODE_MODEL` variable applies instead ([v2.1.302 release notes](https://github.com/anthropics/claude-code/releases/tag/v2.1.302)). A classifier model supplied by the server (`modelByMainModel` / `model`) takes precedence: when one is present, the official env var is ignored and Claude Code warns that the server-supplied model configuration takes precedence. The value is validated against organization model policies and API safeguards, and a non-compliant model is dropped. This official variable is not controlled by ClawGod's `classifier-tuning` toggle.
+
+Neither path affects the model used by server-side auto mode; both only change the client-side auto-mode classifier.
 
 ### Restriction Removals
 
@@ -180,7 +187,7 @@ For an endpoint that exposes `/v1/chat/completions`, configure:
 | `ultrareview` | Ultrareview slash command |
 | `voice-mode` | Voice Mode |
 | `auto-mode` | Auto-mode model selection on third-party APIs |
-| `classifier-tuning` | Auto-mode classifier overrides: `CLAWGOD_CLASSIFIER_TIMEOUT_MS` (min deadline; unset = 60-120s by context, v2.1.251+), `CLAWGOD_CLASSIFIER_MODEL`, `CLAWGOD_CLASSIFIER_RETRIES` (unset = 4) |
+| `classifier-tuning` | Auto-mode classifier overrides: `CLAWGOD_CLASSIFIER_TIMEOUT_MS` (min deadline; unset = 60-120s by context, v2.1.251+), `CLAWGOD_CLASSIFIER_MODEL` (through 2.1.301; 2.1.302+ uses the official `CLAUDE_CODE_AUTO_MODE_MODEL`), `CLAWGOD_CLASSIFIER_RETRIES` (unset = 4) |
 | `theme` | Green brand/logo color scheme |
 | `geo-neutralize` | Geo/proxy steganography neutralization in system prompt |
 | `wiggly-dove` | Blocks automatic Git/environment metadata collection for `x-claude-code-wiggly-dove`; disabling this protection restores upstream behavior |

@@ -72,7 +72,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/ast-patches.mjs" "$CLAWGOD_DIR/acorn.mjs" "$CLAWGOD_DIR/acorn.LICENSE" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/claude.staged" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/patch-variants.mjs" "$CLAWGOD_DIR/ast-patches.mjs" "$CLAWGOD_DIR/acorn.mjs" "$CLAWGOD_DIR/acorn.LICENSE" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/claude.staged" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -6637,7 +6637,7 @@ PREV_BACKUP_DIR=""
 ROLLBACK_FILES=(cli.original.cjs cli.original.cjs.bak cli.original.js .source-version
   source-backup.json bunfs vendor pathmap.json extract-natives.mjs post-process.mjs
   repatch.mjs openai-proxy.cjs feature-gates.cjs cli.cjs .clawgod-version
-  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs ast-patches.mjs acorn.mjs acorn.LICENSE)
+  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs patch-variants.mjs ast-patches.mjs acorn.mjs acorn.LICENSE)
 if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
   PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
   for f in "${ROLLBACK_FILES[@]}"; do
@@ -9287,6 +9287,244 @@ export function applyAstEdits(code, edits) {
 }
 AST_PATCHES_EOF
 
+cat > "$CLAWGOD_DIR/patch-variants.mjs" << 'PATCH_VARIANTS_EOF'
+/**
+ * Logical patch model.
+ *
+ * The registry in patch.mjs holds logical patches. A logical patch id is what
+ * FEATURES references and what the runtime gate table
+ * (globalThis.__clawgodPatches) is keyed by. Each logical patch owns one or
+ * more variants: mutually exclusive implementations of the same behavior,
+ * selected by the installed Claude Code version.
+ *
+ * Two authoring forms are accepted:
+ *   flat    { id, name, toggleable?, pattern, replacer, ... }
+ *   grouped { id, name, toggleable?, variants: [{ pattern, replacer, ... }] }
+ *
+ * A flat entry normalizes to a logical patch with one implicit variant, so
+ * converting an existing patch into a grouped one is a pure data change.
+ *
+ * Work items carry the logical id, which is also the AST matcher key. Every
+ * AST variant of a logical patch shares that matcher, so the matcher must
+ * cover the shapes used across the variant's supported versions. Variant
+ * replacers gate on the logical id, because the runtime gate table is
+ * computed per logical patch.
+ *
+ * Variant version bounds (`since` / `until`) are inclusive. The installed
+ * version selects at most one variant per logical patch; gaps are allowed and
+ * overlapping ranges are rejected by validateRegistry(). Unversioned variants
+ * match any version, including an unreadable version string.
+ */
+
+const LOGICAL_FIELDS = new Set(['id', 'name', 'toggleable', 'variants']);
+const VERSION_RE = /^\d+(?:\.\d+)*$/;
+
+function parseVersion(value) {
+  if (typeof value !== 'string' || !VERSION_RE.test(value)) return null;
+  return value.split('.').map(Number);
+}
+
+function compareVersions(a, b) {
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function inRange(version, variant) {
+  const hasSince = variant.since !== undefined;
+  const hasUntil = variant.until !== undefined;
+  if (!hasSince && !hasUntil) return true;
+  if (version === null) return false;
+  if (hasSince) {
+    const since = parseVersion(variant.since);
+    if (since === null || compareVersions(version, since) < 0) return false;
+  }
+  if (hasUntil) {
+    const until = parseVersion(variant.until);
+    if (until === null || compareVersions(version, until) > 0) return false;
+  }
+  return true;
+}
+
+// Two inclusive ranges overlap unless one ends strictly before the other
+// starts. Missing bounds are open, so they never create a gap.
+function rangesOverlap(a, b) {
+  if (a.until !== undefined && b.since !== undefined &&
+      compareVersions(parseVersion(a.until), parseVersion(b.since)) < 0) {
+    return false;
+  }
+  if (b.until !== undefined && a.since !== undefined &&
+      compareVersions(parseVersion(b.until), parseVersion(a.since)) < 0) {
+    return false;
+  }
+  return true;
+}
+
+function variantLabel(variant, index) {
+  const bounds = [];
+  if (variant.since !== undefined) bounds.push(`since ${variant.since}`);
+  if (variant.until !== undefined) bounds.push(`until ${variant.until}`);
+  return `#${index + 1}${bounds.length > 0 ? ` (${bounds.join(', ')})` : ' (unbounded)'}`;
+}
+
+// Returns whether the bounds are usable for overlap comparison. Invalid or
+// inverted bounds are reported and excluded from the pairwise check.
+function validateVariantRange(id, variant, errs) {
+  let valid = true;
+  if (variant.since !== undefined && parseVersion(variant.since) === null) {
+    errs.push(`variant of '${id}' has invalid since ${JSON.stringify(variant.since)}`);
+    valid = false;
+  }
+  if (variant.until !== undefined && parseVersion(variant.until) === null) {
+    errs.push(`variant of '${id}' has invalid until ${JSON.stringify(variant.until)}`);
+    valid = false;
+  }
+  if (valid && variant.since !== undefined && variant.until !== undefined &&
+      compareVersions(parseVersion(variant.since), parseVersion(variant.until)) > 0) {
+    errs.push(`variant of '${id}' has since after until`);
+    valid = false;
+  }
+  return valid;
+}
+
+// Raw entries -> logical patches. Malformed entries pass through so
+// validateRegistry() can report them instead of throwing here.
+export function normalizePatches(entries) {
+  return entries.map((entry) => {
+    if (!Array.isArray(entry.variants)) {
+      const { id, name, toggleable, ...behavior } = entry;
+      return {
+        id,
+        name,
+        toggleable: toggleable === true,
+        variants: [behavior],
+      };
+    }
+    return {
+      id: entry.id,
+      name: entry.name,
+      toggleable: entry.toggleable === true,
+      variants: entry.variants.map((variant) => ({ ...variant })),
+    };
+  });
+}
+
+// Logical patches -> executable work items, preserving registry order.
+export function expandPatches(logicalPatches) {
+  const items = [];
+  for (const patch of logicalPatches) {
+    for (const variant of patch.variants) {
+      items.push({ ...variant, id: patch.id, name: patch.name });
+    }
+  }
+  return items;
+}
+
+// Logical patches -> the same patches with only the variants whose inclusive
+// version range contains the installed version. Validation guarantees at most
+// one variant survives per patch; a patch with none is out of range and
+// omitted.
+export function selectVariants(logicalPatches, version) {
+  const parsed = parseVersion(version);
+  return logicalPatches
+    .map((patch) => ({
+      ...patch,
+      variants: patch.variants.filter((variant) => inRange(parsed, variant)),
+    }))
+    .filter((patch) => patch.variants.length > 0);
+}
+
+// Authoring guardrail. Returns human-readable errors; the caller aborts before
+// touching any file. Covers the feature contract and the variant schema.
+export function validateRegistry({ patches, features, astPatchIds }) {
+  const errs = [];
+  const astIds = new Set(astPatchIds);
+  const byId = new Map();
+
+  for (const entry of patches) {
+    if (!entry.id) errs.push(`patch without id: ${entry.name}`);
+    else if (byId.has(entry.id)) errs.push(`duplicate patch id: ${entry.id}`);
+    else byId.set(entry.id, entry);
+  }
+
+  for (const entry of patches) {
+    const id = entry.id || entry.name;
+    if (entry.variants !== undefined && !Array.isArray(entry.variants)) {
+      errs.push(`patch '${id}' has non-array variants`);
+      continue;
+    }
+    if (!Array.isArray(entry.variants)) {
+      validateVariantRange(id, entry, errs);
+      if (entry.ast) {
+        if (!astIds.has(id)) {
+          errs.push(`AST variant of '${id}' has no matcher in AST_PATCH_IDS`);
+        }
+      } else if (!(entry.pattern instanceof RegExp)) {
+        errs.push(`patch '${id}' has no pattern`);
+      } else if (typeof entry.replacer !== 'function') {
+        errs.push(`patch '${id}' has no replacer`);
+      }
+      continue;
+    }
+    if (entry.variants.length === 0) errs.push(`grouped patch '${id}' has no variants`);
+    for (const field of Object.keys(entry)) {
+      if (!LOGICAL_FIELDS.has(field)) {
+        errs.push(`grouped patch '${id}' has field '${field}' outside variants`);
+      }
+    }
+    const ranges = [];
+    let hasAst = false;
+    for (const variant of entry.variants) {
+      for (const field of Object.keys(variant)) {
+        if (LOGICAL_FIELDS.has(field)) {
+          errs.push(`variant of '${id}' has logical field '${field}'`);
+        }
+      }
+      ranges.push(validateVariantRange(id, variant, errs));
+      if (variant.ast) {
+        hasAst = true;
+        continue;
+      }
+      if (!(variant.pattern instanceof RegExp)) {
+        errs.push(`variant of '${id}' has no pattern`);
+      } else if (typeof variant.replacer !== 'function') {
+        errs.push(`variant of '${id}' has no replacer`);
+      }
+    }
+    for (let i = 0; i < entry.variants.length; i++) {
+      if (!ranges[i]) continue;
+      for (let j = i + 1; j < entry.variants.length; j++) {
+        if (!ranges[j]) continue;
+        if (rangesOverlap(entry.variants[i], entry.variants[j])) {
+          errs.push(`grouped patch '${id}' has overlapping variants ${variantLabel(entry.variants[i], i)} and ${variantLabel(entry.variants[j], j)}`);
+        }
+      }
+    }
+    if (hasAst && !astIds.has(id)) {
+      errs.push(`AST variant of '${id}' has no matcher in AST_PATCH_IDS`);
+    }
+  }
+
+  for (const [fid, def] of Object.entries(features)) {
+    for (const pid of def.patchIds) {
+      const entry = byId.get(pid);
+      if (!entry) { errs.push(`feature '${fid}' references unknown patch id '${pid}'`); continue; }
+      if (entry.toggleable !== true) errs.push(`feature '${fid}' references non-toggleable patch '${pid}'`);
+    }
+  }
+  for (const entry of patches) {
+    const referenced = Object.values(features).some((f) => f.patchIds.includes(entry.id));
+    if (entry.toggleable === true && !referenced) {
+      errs.push(`toggleable patch '${entry.id}' is referenced by no feature`);
+    }
+  }
+  return errs;
+}
+PATCH_VARIANTS_EOF
+
 cat > "$CLAWGOD_DIR/patch.mjs" << 'PATCHER_EOF'
 #!/usr/bin/env node
 /**
@@ -9296,6 +9534,7 @@ import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, ren
 import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { AST_PATCH_IDS, scanAstPatches, applyAstEdits, parsePatchSource } from './ast-patches.mjs';
+import { normalizePatches, expandPatches, selectVariants, validateRegistry as validatePatchRegistry } from './patch-variants.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGET = join(__dirname, 'cli.original.cjs');
@@ -9307,8 +9546,9 @@ const CLEAN_SOURCE = join(__dirname, 'source-backup.json');
 // ({"<featureId>": false}) or per-launch CLAWGOD_FEATURE_<NAME> env overrides
 // ("feature=false,other=true"). One feature is usually realized by
 // SEVERAL cooperating patches (Computer Use = subscription + default +
-// gate); cross-version regex variants are separate patch ids under the
-// same feature. A patch id listed in two features applies while ANY of
+// gate); cross-version implementations can be separate patch ids under the
+// same feature or grouped variants of one logical patch. A patch id listed in
+// two features applies while ANY of
 // them is enabled — disabling one feature never breaks the other.
 //
 // Patch classification (validated below, mismatch fails the run):
@@ -9566,6 +9806,11 @@ const patches = [
     // cannot ride the GB override path. Patch: CLAWGOD_CLASSIFIER_MODEL
     // short-circuits the whole chain (returns before GB config / probe /
     // main-model mapping). Unset → original behavior.
+    // Official v2.1.302 starts reading CLAUDE_CODE_AUTO_MODE_MODEL for this
+    // resolution; 2.1.301 and earlier have no such read point. The ClawGod
+    // override is therefore bounded to <=2.1.301 so it never shadows the
+    // upstream variable on newer builds.
+    // https://github.com/anthropics/claude-code/releases/tag/v2.1.302
     id: 'classifier-model',
     toggleable: true,
     name: 'Auto-mode classifier model override (CLAWGOD_CLASSIFIER_MODEL)',
@@ -9573,7 +9818,8 @@ const patches = [
     replacer: (m, fn) =>
       `function ${fn}(){let _cm=process.env.CLAWGOD_CLASSIFIER_MODEL?.trim();if(_cm&&${gate('classifier-model')})return{value:_cm,src:"default"};` + m.slice(m.indexOf('{') + 1),
     unique: true,
-    optional: true,  // v2.1.220+
+    optional: true,  // v2.1.220-2.1.301
+    until: '2.1.301',
   },
   {
     // Auto-mode classifier maxRetries default (v2.1.220+):
@@ -10089,42 +10335,31 @@ if (dumpFeatures) {
 
 // ── Registry self-check (authoring guardrail, fails fast) ──
 // Enforces the classification contract on the static data above, so a
-// metadata mistake cannot ship silently:
-//   1. every patch has a unique id
-//   2. FEATURES only references existing ids, and only toggleable ones
-//      (a core patch being referenced is a contradiction — core is not
+// metadata mistake cannot ship silently. patch-variants.mjs owns the rules:
+//   1. every logical patch has a unique id
+//   2. FEATURES only references existing logical ids, and only toggleable
+//      ones (a core patch being referenced is a contradiction; core is not
 //      toggleable by definition)
 //   3. a toggleable patch must be referenced by at least one feature
-//      (otherwise the id was mistyped, or the author forgot to register it
-//      and the toggle would silently never map to anything)
-// Any violation aborts the patcher before a single file is touched — the
+//   4. grouped patches keep behavior inside `variants`: an array, non-empty,
+//      no logical fields inside a variant, valid version bounds, and no two
+//      variants whose inclusive ranges overlap
+//   5. an AST implementation, flat or grouped, needs its logical id in
+//      AST_PATCH_IDS
+//   6. a regex implementation needs a RegExp pattern and a replacer function
+// Any violation aborts the patcher before a single file is touched; the
 // same code path runs in install.sh / install.ps1 and CI, so authoring
 // errors surface at build time, not as a user's broken toggle.
-(function validateRegistry() {
-  const errs = [];
-  const byId = new Map();
-  for (const p of patches) {
-    if (!p.id) errs.push(`patch without id: ${p.name}`);
-    else if (byId.has(p.id)) errs.push(`duplicate patch id: ${p.id}`);
-    else byId.set(p.id, p);
-  }
-  for (const [fid, def] of Object.entries(FEATURES)) {
-    for (const pid of def.patchIds) {
-      const p = byId.get(pid);
-      if (!p) { errs.push(`feature '${fid}' references unknown patch id '${pid}'`); continue; }
-      if (!p.toggleable) errs.push(`feature '${fid}' references non-toggleable patch '${pid}'`);
-    }
-  }
-  for (const p of patches) {
-    const referenced = Object.values(FEATURES).some((f) => f.patchIds.includes(p.id));
-    if (p.toggleable && !referenced) errs.push(`toggleable patch '${p.id}' is referenced by no feature`);
-  }
-  if (errs.length > 0) {
-    console.error('❌ Feature registry invalid:');
-    for (const e of errs) console.error('   -', e);
-    process.exit(1);
-  }
-})();
+const registryErrors = validatePatchRegistry({
+  patches,
+  features: FEATURES,
+  astPatchIds: AST_PATCH_IDS,
+});
+if (registryErrors.length > 0) {
+  console.error('❌ Feature registry invalid:');
+  for (const e of registryErrors) console.error('   -', e);
+  process.exit(1);
+}
 
 // The patcher itself is unconditionally stateless w.r.t. feature config:
 // every patch always bakes in. Whether a toggleable patch's effect is ON
@@ -10263,20 +10498,26 @@ try {
   process.exit(1);
 }
 
+// Expand the variants selected for the installed version into executable work
+// items. A selected flat entry yields one item whose id equals its patch id,
+// so existing patches keep their behavior and AST matcher keys.
+const workItems = expandPatches(selectVariants(normalizePatches(patches), version));
+
 let astFlushed = false;
-for (const p of [...patches.filter(p => p.ast), ...patches.filter(p => !p.ast)]) {
-  if (!p.ast && !astFlushed) {
-    try {
-      for (const [file, edits] of astEdits) {
-        files[file] = applyAstEdits(files[file], edits);
-        parsePatchSource(files[file]);
-      }
-    } catch (error) {
-      console.error(`AST rewrite failed: ${error.message}. Source files were not changed.`);
-      process.exit(1);
+const flushAstEdits = () => {
+  try {
+    for (const [file, edits] of astEdits) {
+      files[file] = applyAstEdits(files[file], edits);
+      parsePatchSource(files[file]);
     }
-    astFlushed = true;
+  } catch (error) {
+    console.error(`AST rewrite failed: ${error.message}. Source files were not changed.`);
+    process.exit(1);
   }
+  astFlushed = true;
+};
+for (const p of [...workItems.filter(p => p.ast), ...workItems.filter(p => !p.ast)]) {
+  if (!p.ast && !astFlushed) flushAstEdits();
   const fileMatches = p.ast ? astMatches.get(p.id) : collectMatches(p);
 
   /*
@@ -10376,6 +10617,7 @@ for (const p of [...patches.filter(p => p.ast), ...patches.filter(p => !p.ast)])
     skipped++;
   }
 }
+if (!astFlushed) flushAstEdits();
 
 console.log(`\n${'─'.repeat(55)}`);
 console.log(`  Result: ${applied} applied, ${skipped} skipped, ${failed} failed${tolerated > 0 ? `, ${tolerated} tolerated` : ''}`);

@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, ren
 import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { AST_PATCH_IDS, scanAstPatches, applyAstEdits, parsePatchSource } from './ast-patches.mjs';
+import { normalizePatches, expandPatches, selectVariants, validateRegistry as validatePatchRegistry } from './patch-variants.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGET = join(__dirname, 'cli.original.cjs');
@@ -17,8 +18,9 @@ const CLEAN_SOURCE = join(__dirname, 'source-backup.json');
 // ({"<featureId>": false}) or per-launch CLAWGOD_FEATURE_<NAME> env overrides
 // ("feature=false,other=true"). One feature is usually realized by
 // SEVERAL cooperating patches (Computer Use = subscription + default +
-// gate); cross-version regex variants are separate patch ids under the
-// same feature. A patch id listed in two features applies while ANY of
+// gate); cross-version implementations can be separate patch ids under the
+// same feature or grouped variants of one logical patch. A patch id listed in
+// two features applies while ANY of
 // them is enabled — disabling one feature never breaks the other.
 //
 // Patch classification (validated below, mismatch fails the run):
@@ -276,6 +278,11 @@ const patches = [
     // cannot ride the GB override path. Patch: CLAWGOD_CLASSIFIER_MODEL
     // short-circuits the whole chain (returns before GB config / probe /
     // main-model mapping). Unset → original behavior.
+    // Official v2.1.302 starts reading CLAUDE_CODE_AUTO_MODE_MODEL for this
+    // resolution; 2.1.301 and earlier have no such read point. The ClawGod
+    // override is therefore bounded to <=2.1.301 so it never shadows the
+    // upstream variable on newer builds.
+    // https://github.com/anthropics/claude-code/releases/tag/v2.1.302
     id: 'classifier-model',
     toggleable: true,
     name: 'Auto-mode classifier model override (CLAWGOD_CLASSIFIER_MODEL)',
@@ -283,7 +290,8 @@ const patches = [
     replacer: (m, fn) =>
       `function ${fn}(){let _cm=process.env.CLAWGOD_CLASSIFIER_MODEL?.trim();if(_cm&&${gate('classifier-model')})return{value:_cm,src:"default"};` + m.slice(m.indexOf('{') + 1),
     unique: true,
-    optional: true,  // v2.1.220+
+    optional: true,  // v2.1.220-2.1.301
+    until: '2.1.301',
   },
   {
     // Auto-mode classifier maxRetries default (v2.1.220+):
@@ -799,42 +807,31 @@ if (dumpFeatures) {
 
 // ── Registry self-check (authoring guardrail, fails fast) ──
 // Enforces the classification contract on the static data above, so a
-// metadata mistake cannot ship silently:
-//   1. every patch has a unique id
-//   2. FEATURES only references existing ids, and only toggleable ones
-//      (a core patch being referenced is a contradiction — core is not
+// metadata mistake cannot ship silently. patch-variants.mjs owns the rules:
+//   1. every logical patch has a unique id
+//   2. FEATURES only references existing logical ids, and only toggleable
+//      ones (a core patch being referenced is a contradiction; core is not
 //      toggleable by definition)
 //   3. a toggleable patch must be referenced by at least one feature
-//      (otherwise the id was mistyped, or the author forgot to register it
-//      and the toggle would silently never map to anything)
-// Any violation aborts the patcher before a single file is touched — the
+//   4. grouped patches keep behavior inside `variants`: an array, non-empty,
+//      no logical fields inside a variant, valid version bounds, and no two
+//      variants whose inclusive ranges overlap
+//   5. an AST implementation, flat or grouped, needs its logical id in
+//      AST_PATCH_IDS
+//   6. a regex implementation needs a RegExp pattern and a replacer function
+// Any violation aborts the patcher before a single file is touched; the
 // same code path runs in install.sh / install.ps1 and CI, so authoring
 // errors surface at build time, not as a user's broken toggle.
-(function validateRegistry() {
-  const errs = [];
-  const byId = new Map();
-  for (const p of patches) {
-    if (!p.id) errs.push(`patch without id: ${p.name}`);
-    else if (byId.has(p.id)) errs.push(`duplicate patch id: ${p.id}`);
-    else byId.set(p.id, p);
-  }
-  for (const [fid, def] of Object.entries(FEATURES)) {
-    for (const pid of def.patchIds) {
-      const p = byId.get(pid);
-      if (!p) { errs.push(`feature '${fid}' references unknown patch id '${pid}'`); continue; }
-      if (!p.toggleable) errs.push(`feature '${fid}' references non-toggleable patch '${pid}'`);
-    }
-  }
-  for (const p of patches) {
-    const referenced = Object.values(FEATURES).some((f) => f.patchIds.includes(p.id));
-    if (p.toggleable && !referenced) errs.push(`toggleable patch '${p.id}' is referenced by no feature`);
-  }
-  if (errs.length > 0) {
-    console.error('❌ Feature registry invalid:');
-    for (const e of errs) console.error('   -', e);
-    process.exit(1);
-  }
-})();
+const registryErrors = validatePatchRegistry({
+  patches,
+  features: FEATURES,
+  astPatchIds: AST_PATCH_IDS,
+});
+if (registryErrors.length > 0) {
+  console.error('❌ Feature registry invalid:');
+  for (const e of registryErrors) console.error('   -', e);
+  process.exit(1);
+}
 
 // The patcher itself is unconditionally stateless w.r.t. feature config:
 // every patch always bakes in. Whether a toggleable patch's effect is ON
@@ -973,20 +970,26 @@ try {
   process.exit(1);
 }
 
+// Expand the variants selected for the installed version into executable work
+// items. A selected flat entry yields one item whose id equals its patch id,
+// so existing patches keep their behavior and AST matcher keys.
+const workItems = expandPatches(selectVariants(normalizePatches(patches), version));
+
 let astFlushed = false;
-for (const p of [...patches.filter(p => p.ast), ...patches.filter(p => !p.ast)]) {
-  if (!p.ast && !astFlushed) {
-    try {
-      for (const [file, edits] of astEdits) {
-        files[file] = applyAstEdits(files[file], edits);
-        parsePatchSource(files[file]);
-      }
-    } catch (error) {
-      console.error(`AST rewrite failed: ${error.message}. Source files were not changed.`);
-      process.exit(1);
+const flushAstEdits = () => {
+  try {
+    for (const [file, edits] of astEdits) {
+      files[file] = applyAstEdits(files[file], edits);
+      parsePatchSource(files[file]);
     }
-    astFlushed = true;
+  } catch (error) {
+    console.error(`AST rewrite failed: ${error.message}. Source files were not changed.`);
+    process.exit(1);
   }
+  astFlushed = true;
+};
+for (const p of [...workItems.filter(p => p.ast), ...workItems.filter(p => !p.ast)]) {
+  if (!p.ast && !astFlushed) flushAstEdits();
   const fileMatches = p.ast ? astMatches.get(p.id) : collectMatches(p);
 
   /*
@@ -1086,6 +1089,7 @@ for (const p of [...patches.filter(p => p.ast), ...patches.filter(p => !p.ast)])
     skipped++;
   }
 }
+if (!astFlushed) flushAstEdits();
 
 console.log(`\n${'─'.repeat(55)}`);
 console.log(`  Result: ${applied} applied, ${skipped} skipped, ${failed} failed${tolerated > 0 ? `, ${tolerated} tolerated` : ''}`);

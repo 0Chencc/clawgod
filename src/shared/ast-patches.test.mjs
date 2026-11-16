@@ -236,7 +236,7 @@ try {
   for (const graph of [false, true]) {
     const dir = join(root, graph ? 'graph' : 'legacy');
     mkdirSync(dir);
-    for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+    for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
       copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
     }
     const entry = join(dir, 'cli.original.cjs');
