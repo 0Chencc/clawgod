@@ -12,6 +12,42 @@ The build must remain byte-for-byte reproducible. CI runs `--check` and fails
 when either generated installer is missing or differs from its sources.
 `.gitattributes` pins the complete build graph to LF on every platform.
 
+## Patch registry model
+
+`shared/patch.mjs` holds the registry; `shared/patch-variants.mjs` normalizes it
+into executable work items. A logical patch (`id`, `name`, optional
+`toggleable`) is the unit that `FEATURES` and the runtime gate table
+(`globalThis.__clawgodPatches`) refer to. It owns one or more variants, which
+are mutually exclusive implementations of the same behavior:
+
+```js
+{ id: 'example', name: 'Example', toggleable: true, variants: [
+  { until: '2.1.211', pattern: /.../g, replacer: ... },
+  { since: '2.1.212', ast: true },
+] }
+```
+
+Variants may carry `since` / `until` version bounds. Both are inclusive and a
+missing bound is open. Missing segments compare as zero, so `2.1` equals
+`2.1.0`. The installed version selects at most one variant per logical patch;
+gaps are allowed and mean the patch is skipped for those
+versions, while overlapping ranges are rejected. An unversioned entry matches
+any version, including an unreadable version string.
+
+A flat entry is shorthand for a logical patch with one implicit variant. Work
+items carry the logical id, which is also the AST matcher key. Every AST
+variant of a logical patch shares that matcher, so the matcher must cover the
+shapes used across the variant's supported versions. Variant replacers gate on
+the logical id, because the runtime table is keyed per logical patch.
+
+The validator rejects non-array `variants`, behavior fields outside `variants`,
+logical fields inside a variant, regex implementations without a RegExp pattern
+or replacer, AST implementations without a matching entry in
+`AST_PATCH_IDS`, invalid or inverted bounds, and overlapping variant ranges.
+Every current registry entry is flat and unversioned, so selection keeps the
+historical behavior; the first grouped patch can use the existing selection
+code.
+
 ## Semantic patching
 
 The patcher uses Acorn AST nodes for `user-type-ant`,

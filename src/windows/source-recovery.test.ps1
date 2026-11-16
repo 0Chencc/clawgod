@@ -46,7 +46,7 @@ try {
     Set-Content (Join-Path $ClawDir 'cli.original.cjs') '// old source'
     Set-Content (Join-Path $ClawDir '.source-version') '2.1.280'
     Set-Content (Join-Path $ClawDir 'cli.cjs') '// old wrapper'
-    $astPayloads = @('ast-patches.mjs','acorn.mjs','acorn.LICENSE')
+    $astPayloads = @('patch-variants.mjs','ast-patches.mjs','acorn.mjs','acorn.LICENSE')
     foreach ($name in $astPayloads) { Set-Content (Join-Path $ClawDir $name) "old $name" }
     New-Item -ItemType Directory -Path (Join-Path $ClawDir 'bunfs') | Out-Null
     Set-Content (Join-Path $ClawDir 'bunfs\commands.js') '// old graph'

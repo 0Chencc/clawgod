@@ -12,7 +12,7 @@ try {
   for (const graph of [false, true]) {
     const dir = join(root, graph ? 'graph' : 'legacy');
     mkdirSync(dir);
-    for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+    for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
       copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
     }
     const entry = join(dir, 'cli.original.cjs');
@@ -169,7 +169,7 @@ try {
     writeFileSync(join(rollbackDir, '.source-version'), '2.1.280\n');
     writeFileSync(join(rollbackDir, 'cli.cjs'), '// old wrapper');
     writeFileSync(join(rollbackDir, 'patch.mjs'), '// old patcher');
-    const astPayloads = ['ast-patches.mjs', 'acorn.mjs', 'acorn.LICENSE'];
+    const astPayloads = ['patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs', 'acorn.LICENSE'];
     for (const name of astPayloads) writeFileSync(join(rollbackDir, name), `old ${name}`);
     writeFileSync(join(rollbackDir, 'broken-patch.mjs'), "if(process.argv.includes('--capture-clean-source')) process.exit(0); process.exit(9);");
     const rollbackEnv = { ...env, CLAWGOD_DIR: rollbackDir, TMPDIR: rollbackTmp, NO_UPGRADE: '0', NATIVE_BIN_LABEL: '2.1.299', NATIVE_BIN: 'missing' };

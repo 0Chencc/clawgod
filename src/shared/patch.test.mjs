@@ -18,6 +18,195 @@ import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { createServer, request } from 'node:http';
+import { normalizePatches, expandPatches, selectVariants, validateRegistry } from './patch-variants.mjs';
+
+// Logical patch model: a flat registry entry keeps its historical id as both
+// the runtime gate key and the AST matcher key; a grouped entry expands to one
+// work item per variant. Version ranges select at most one variant per logical
+// patch; gaps are allowed, overlaps are rejected.
+{
+  const flat = normalizePatches([
+    { id: 'flat', name: 'Flat patch', toggleable: true, pattern: /a/g, replacer: () => 'b' },
+    { id: 'core', name: 'Core patch', ast: true },
+  ]);
+  assert.deepEqual(flat.map(p => [p.id, p.toggleable, p.variants.length]), [
+    ['flat', true, 1],
+    ['core', false, 1],
+  ]);
+  assert.deepEqual(expandPatches(flat).map(i => [i.id, i.name]), [
+    ['flat', 'Flat patch'],
+    ['core', 'Core patch'],
+  ]);
+  assert.deepEqual(expandPatches(selectVariants(flat, 'unknown')).map(i => i.id), ['flat', 'core']);
+
+  const gatedFlat = normalizePatches([
+    { id: 'gated', name: 'Gated patch', toggleable: true, since: '2.1.212', pattern: /a/g, replacer: () => 'b' },
+  ]);
+  assert.deepEqual(selectVariants(gatedFlat, '2.1.211'), []);
+  assert.deepEqual(selectVariants(gatedFlat, '2.1.212').map(p => p.id), ['gated']);
+  assert.deepEqual(selectVariants(gatedFlat, 'unknown'), []);
+
+  const grouped = [{
+    id: 'grouped',
+    name: 'Grouped patch',
+    toggleable: true,
+    variants: [
+      { until: '2.1.211', pattern: /x/g, replacer: () => 'y' },
+      { since: '2.1.212', ast: true },
+    ],
+  }];
+  const normalized = normalizePatches(grouped);
+  assert.deepEqual(expandPatches(normalized).map(i => [i.id, i.name]), [
+    ['grouped', 'Grouped patch'],
+    ['grouped', 'Grouped patch'],
+  ]);
+  assert.equal(selectVariants(normalized, '2.1.211')[0].variants[0].pattern.source, 'x');
+  assert.equal(selectVariants(normalized, '2.1.212')[0].variants[0].ast, true);
+  assert.deepEqual(selectVariants(normalized, 'unknown'), []);
+
+  const gap = [{
+    id: 'gap',
+    name: 'Gap patch',
+    toggleable: true,
+    variants: [
+      { until: '2.1.211', pattern: /x/g, replacer: () => 'y' },
+      { since: '2.1.215', ast: true },
+    ],
+  }];
+  assert.deepEqual(validateRegistry({
+    patches: gap,
+    features: { gap: { desc: 'test', patchIds: ['gap'] } },
+    astPatchIds: ['gap'],
+  }), []);
+  assert.deepEqual(selectVariants(normalizePatches(gap), '2.1.213'), []);
+
+  const features = { grouped: { desc: 'test', patchIds: ['grouped'] } };
+
+  const overlap = validateRegistry({
+    patches: [{
+      id: 'overlap',
+      name: 'Overlap patch',
+      toggleable: true,
+      variants: [
+        { until: '2.1.211', pattern: /x/g, replacer: () => 'y' },
+        { since: '2.1.211', ast: true },
+      ],
+    }],
+    features: { overlap: { desc: 'test', patchIds: ['overlap'] } },
+    astPatchIds: ['overlap'],
+  });
+  assert(overlap.some(e => /overlapping variants/.test(e)), overlap.join('; '));
+
+  // A bounded variant overlaps an unbounded one.
+  const mixedBounds = validateRegistry({
+    patches: [{
+      id: 'mixed-bounds',
+      name: 'Mixed bounds',
+      toggleable: true,
+      variants: [
+        { until: '2.1.211', pattern: /x/g, replacer: () => 'y' },
+        { ast: true },
+      ],
+    }],
+    features: { 'mixed-bounds': { desc: 'test', patchIds: ['mixed-bounds'] } },
+    astPatchIds: ['mixed-bounds'],
+  });
+  assert(mixedBounds.some(e => /overlapping variants/.test(e)), mixedBounds.join('; '));
+
+  const badRange = validateRegistry({
+    patches: [{
+      id: 'bad-range',
+      name: 'Bad range',
+      toggleable: true,
+      variants: [
+        { since: '2.1.x', pattern: /x/g, replacer: () => 'y' },
+        { since: '2.1.220', until: '2.1.210', ast: true },
+      ],
+    }],
+    features: { 'bad-range': { desc: 'test', patchIds: ['bad-range'] } },
+    astPatchIds: ['bad-range'],
+  });
+  assert(badRange.some(e => /invalid since/.test(e)), badRange.join('; '));
+  assert(badRange.some(e => /since after until/.test(e)), badRange.join('; '));
+
+  const errors = validateRegistry({
+    patches: [{
+      id: 'grouped',
+      name: 'Grouped patch',
+      toggleable: true,
+      pattern: /oops/g,
+      variants: [
+        { until: '2.1.211', ast: true },
+        { since: '2.1.212', name: 'nested', pattern: /x/g, replacer: () => 'y' },
+      ],
+    }],
+    features,
+    astPatchIds: [],
+  });
+  for (const expected of [
+    /has field 'pattern' outside variants/,
+    /has logical field 'name'/,
+    /has no matcher in AST_PATCH_IDS/,
+  ]) {
+    assert(errors.some(e => expected.test(e)), `missing error ${expected}: ${errors.join('; ')}`);
+  }
+
+  const empty = validateRegistry({
+    patches: [{ id: 'empty', name: 'Empty patch', toggleable: true, variants: [] }],
+    features: { empty: { desc: 'test', patchIds: ['empty'] } },
+    astPatchIds: [],
+  });
+  assert(empty.some(e => /has no variants/.test(e)), empty.join('; '));
+
+  // Flat entries are one implicit variant and get the same behavior checks.
+  const flatShape = validateRegistry({
+    patches: [
+      { id: 'flat-ast', name: 'Flat AST', ast: true },
+      { id: 'flat-no-pattern', name: 'Flat no pattern', replacer: () => 'x' },
+      { id: 'flat-no-replacer', name: 'Flat no replacer', pattern: /x/g },
+      { id: 'flat-bad-variants', name: 'Flat bad variants', variants: 'oops' },
+      { id: 'flat-bad-since', name: 'Flat bad since', since: '2.1.x', pattern: /x/g, replacer: () => 'x' },
+    ],
+    features: {},
+    astPatchIds: [],
+  });
+  for (const expected of [
+    /AST variant of 'flat-ast' has no matcher in AST_PATCH_IDS/,
+    /patch 'flat-no-pattern' has no pattern/,
+    /patch 'flat-no-replacer' has no replacer/,
+    /patch 'flat-bad-variants' has non-array variants/,
+    /variant of 'flat-bad-since' has invalid since/,
+  ]) {
+    assert(flatShape.some(e => expected.test(e)), `missing error ${expected}: ${flatShape.join('; ')}`);
+  }
+
+  // Missing segments compare as zero, so '2.1' and '2.1.0' are equivalent in
+  // both directions.
+  const loose = normalizePatches([
+    { id: 'loose', name: 'Loose', since: '2.1', pattern: /x/g, replacer: () => 'x' },
+    { id: 'padded', name: 'Padded', since: '2.1.0', pattern: /x/g, replacer: () => 'x' },
+  ]);
+  assert.deepEqual(selectVariants(loose, '2.1').map(p => p.id), ['loose', 'padded']);
+  assert.deepEqual(selectVariants(loose, '2.1.0').map(p => p.id), ['loose', 'padded']);
+  assert.deepEqual(selectVariants(loose, '2.1.2').map(p => p.id), ['loose', 'padded']);
+
+  const three = [{
+    id: 'three',
+    name: 'Three variants',
+    toggleable: true,
+    variants: [
+      { until: '2.1.100', pattern: /x/g, replacer: () => 'y' },
+      { since: '2.1.101', until: '2.1.200', ast: true },
+      { since: '2.1.201', pattern: /x/g, replacer: () => 'y' },
+    ],
+  }];
+  assert.deepEqual(validateRegistry({
+    patches: three,
+    features: { three: { desc: 'test', patchIds: ['three'] } },
+    astPatchIds: ['three'],
+  }), []);
+  assert.equal(selectVariants(normalizePatches(three), '2.1.150')[0].variants[0].ast, true);
+}
 
 // legal values → parsed as the floor (injected Math.max applies it)
 assert.equal(floor('200000'), 200000);
@@ -68,7 +257,7 @@ const ultraplanFixtures = [
 ];
 const testDir = mkdtempSync(join(tmpdir(), 'clawgod-patch-test-'));
 try {
-  for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+  for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
     copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
   }
   for (const graph of [false, true]) {
@@ -205,7 +394,7 @@ function privacyFixture(version, flag, check) {
     'async function buildRequest(){return{headers:{"x-unrelated":"preserved",...header(await collect())},body:{messages:[{role:"user",content:"hello"}]}}}';
 }
 try {
-  for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+  for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
     copyFileSync(new URL(`./${name}`, import.meta.url), join(privacyDir, name));
   }
   let lastPatched;
@@ -304,7 +493,7 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
 {
   const testDir = mkdtempSync(join(tmpdir(), 'clawgod-pairing-test-'));
   try {
-    for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs', 'feature-gates.cjs', 'runtime-helpers.cjs']) {
+    for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs', 'feature-gates.cjs', 'runtime-helpers.cjs']) {
       copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
     }
     const source = `
@@ -359,7 +548,7 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
     for (const graph of [false, true]) {
       const dir = join(testDir, graph ? 'unsupported-graph' : 'unsupported-legacy');
       mkdirSync(dir);
-      for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+      for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
         copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
       }
       const entry = join(dir, 'cli.original.cjs');
@@ -387,4 +576,55 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
     rmSync(testDir, { recursive: true, force: true });
   }
   console.log('[patch.test] tool-result-pairing-recovery compatibility and recovery semantics ok');
+}
+
+
+// A selection that leaves only AST work items must still flush their edits.
+// The normal registry always has regex patches, which trigger the flush; this
+// fixture removes them to cover the AST-only path.
+{
+  const testDir = mkdtempSync(join(tmpdir(), 'clawgod-ast-only-test-'));
+  try {
+    for (const name of ['patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+      copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
+    }
+    const patcher = readFileSync(new URL('./patch.mjs', import.meta.url), 'utf8').replace(
+      '// ─── Main',
+      `patches.length = 0;
+patches.push({ id: 'tool-result-pairing-recovery', name: 'AST only test', ast: true });
+for (const key of Object.keys(FEATURES)) delete FEATURES[key];
+// ─── Main`,
+    );
+    writeFileSync(join(testDir, 'patch.mjs'), patcher);
+    const source = `
+      const kks = "[Tool result missing due to internal error]";
+      function permissionErrors(history, ids) {
+        void history.length;
+        const kks = "Permission denied";
+        return ids.map(item => ({
+          type: "tool_result", tool_use_id: item,
+          content: kks, is_error: true
+        }));
+      }
+      function ensureToolResultPairing(conversationHistory, runtimeOpts) {
+        let count = conversationHistory.length;
+        let Re = ["call_1", "call_missing"];
+        let kks = "[Tool result missing due to internal error]";
+        let De=Re.map((conversationHistory)=>({type:"tool_result",tool_use_id:conversationHistory,content:kks,is_error:!0}));
+        return De;
+      }
+    `;
+    const target = join(testDir, 'cli.original.cjs');
+    writeFileSync(target, source);
+    const output = execFileSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+    assert.match(output, /AST only test \(1 replacement in 1 file\)/);
+    assert.match(output, /Result: 1 applied, 0 skipped, 0 failed/);
+    assert.ok(
+      readFileSync(target, 'utf8').includes('for(let _m of conversationHistory)'),
+      'AST edit must be written when every selected work item is AST',
+    );
+  } finally {
+    rmSync(testDir, { recursive: true, force: true });
+  }
+  console.log('[patch.test] AST-only selection flushes pending AST edits ok');
 }
