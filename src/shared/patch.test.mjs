@@ -376,6 +376,60 @@ try {
 console.log('[patch.test] ultraplan bundle/graph compatibility and toggle semantics ok');
 console.log('[patch.test] auto-mode provider gate compatibility and toggle semantics ok');
 
+// Classifier model override retirement: CLAWGOD_CLASSIFIER_MODEL applies
+// through 2.1.301 only. From 2.1.302 the official
+// CLAUDE_CODE_AUTO_MODE_MODEL path owns resolution and must stay untouched.
+{
+  const testDir = mkdtempSync(join(tmpdir(), 'clawgod-classifier-model-test-'));
+  // Same resolution shape the legacy regex targets in both versions; 2.1.302
+  // adds the official env branch inside the body, which the patch must not
+  // shadow.
+  const classifierSource = (version, official) => `// Version: ${version}
+function at(){return null}
+function Ih(){return {model:"main-model",modelByMainModel:{}}}
+function usr(){return null}
+function avt(){return null}
+function resolveClassifierModel(){let e=at(),n=Ih(),r=usr(n?.modelByMainModel,{vet:x=>x})??avt(n?.model,"model");if(r)return{value:r,src:"gb"};${official ? 'if(process.env.CLAUDE_CODE_AUTO_MODE_MODEL)return{value:process.env.CLAUDE_CODE_AUTO_MODE_MODEL,src:"env"};' : ''}return{value:"default-model",src:"default"}}`;
+  const resolveModel = (source, env, toggle) => {
+    const result = runInNewContext(`${source};resolveClassifierModel()`, {
+      __clawgodPatches: { 'classifier-model': toggle },
+      process: { env },
+    });
+    return { value: result.value, src: result.src };
+  };
+  try {
+    for (const name of ['patch.mjs', 'patch-variants.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+      copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
+    }
+    const target = join(testDir, 'cli.original.cjs');
+
+    // 2.1.301: the legacy override still wins when its gate is on.
+    writeFileSync(target, classifierSource('2.1.301', false));
+    const legacyOutput = execFileSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+    assert.match(legacyOutput, /Auto-mode classifier model override \(CLAWGOD_CLASSIFIER_MODEL\) \(1 replacement in 1 file\)/);
+    const legacyPatched = readFileSync(target, 'utf8');
+    assert.match(legacyPatched, /process\.env\.CLAWGOD_CLASSIFIER_MODEL/);
+    assert.deepEqual(resolveModel(legacyPatched, { CLAWGOD_CLASSIFIER_MODEL: 'legacy-model' }, true),
+      { value: 'legacy-model', src: 'default' });
+    assert.deepEqual(resolveModel(legacyPatched, { CLAWGOD_CLASSIFIER_MODEL: 'legacy-model' }, false),
+      { value: 'default-model', src: 'default' });
+
+    // 2.1.302: the retired patch leaves the bundle byte-identical; the
+    // official env override still resolves.
+    const official = classifierSource('2.1.302', true);
+    writeFileSync(target, official);
+    const officialOutput = execFileSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+    assert.doesNotMatch(officialOutput, /Auto-mode classifier model override \(CLAWGOD_CLASSIFIER_MODEL\)/);
+    assert.equal(readFileSync(target, 'utf8'), official);
+    assert.deepEqual(resolveModel(official,
+      { CLAWGOD_CLASSIFIER_MODEL: 'legacy-model', CLAUDE_CODE_AUTO_MODE_MODEL: 'official-model' }, false),
+      { value: 'official-model', src: 'env' });
+  } finally {
+    rmSync(testDir, { recursive: true, force: true });
+  }
+  console.log('[patch.test] classifier-model retirement at 2.1.301/2.1.302 ok');
+}
+
 // Exercise the collection -> header -> request chain with the flag bindings
 // seen in official bundles. No real repository metadata or API credentials.
 const privacyDir = mkdtempSync(join(tmpdir(), 'clawgod-wiggly-dove-test-'));

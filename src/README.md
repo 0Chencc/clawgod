@@ -44,9 +44,11 @@ The validator rejects non-array `variants`, behavior fields outside `variants`,
 logical fields inside a variant, regex implementations without a RegExp pattern
 or replacer, AST implementations without a matching entry in
 `AST_PATCH_IDS`, invalid or inverted bounds, and overlapping variant ranges.
-Every current registry entry is flat and unversioned, so selection keeps the
-historical behavior; the first grouped patch can use the existing selection
-code.
+All registry entries are still flat. A flat entry is shorthand for a logical
+patch with one implicit variant, which may carry `since` / `until` version
+bounds. `classifier-model` is the first retired sample: it carries
+`until: '2.1.301'`. Versions 2.1.302 and later select no variant and produce
+no work item, so retirement needs no no-op variant.
 
 ## Semantic patching
 

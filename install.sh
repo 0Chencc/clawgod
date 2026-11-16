@@ -9806,6 +9806,11 @@ const patches = [
     // cannot ride the GB override path. Patch: CLAWGOD_CLASSIFIER_MODEL
     // short-circuits the whole chain (returns before GB config / probe /
     // main-model mapping). Unset → original behavior.
+    // Official v2.1.302 starts reading CLAUDE_CODE_AUTO_MODE_MODEL for this
+    // resolution; 2.1.301 and earlier have no such read point. The ClawGod
+    // override is therefore bounded to <=2.1.301 so it never shadows the
+    // upstream variable on newer builds.
+    // https://github.com/anthropics/claude-code/releases/tag/v2.1.302
     id: 'classifier-model',
     toggleable: true,
     name: 'Auto-mode classifier model override (CLAWGOD_CLASSIFIER_MODEL)',
@@ -9813,7 +9818,8 @@ const patches = [
     replacer: (m, fn) =>
       `function ${fn}(){let _cm=process.env.CLAWGOD_CLASSIFIER_MODEL?.trim();if(_cm&&${gate('classifier-model')})return{value:_cm,src:"default"};` + m.slice(m.indexOf('{') + 1),
     unique: true,
-    optional: true,  // v2.1.220+
+    optional: true,  // v2.1.220-2.1.301
+    until: '2.1.301',
   },
   {
     // Auto-mode classifier maxRetries default (v2.1.220+):

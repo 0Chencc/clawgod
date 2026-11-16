@@ -52,9 +52,16 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **Agent Teams** | 多智能体协作，无需额外参数 |
 | **Computer Use** | 无需 Max/Pro 订阅即可使用屏幕控制（macOS） |
 | **Auto-mode** | 解锁第三方 API 用户的 auto-mode（移除 firstParty 限制） |
-| **Classifier 调优** | Auto-mode 分类器可调：超时 / 模型 / 重试次数（`CLAWGOD_CLASSIFIER_TIMEOUT_MS`、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`） |
+| **Classifier 调优** | Auto-mode 分类器可调：超时 / 模型 / 重试次数（`CLAWGOD_CLASSIFIER_TIMEOUT_MS`、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`）。`CLAWGOD_CLASSIFIER_MODEL` 适用于 2.1.301 及以前；2.1.302+ 使用官方 `CLAUDE_CODE_AUTO_MODE_MODEL` |
 | **Ultraplan** | 通过 Claude Code Remote 进行多智能体规划 |
 | **Ultrareview** | 通过 Claude Code Remote 自动化 Bug 查找 |
+
+分类器模型的选择随 Claude Code 版本分段：
+
+- **Claude Code <= 2.1.301：** `CLAWGOD_CLASSIFIER_MODEL` 在函数入口强制覆盖分类器模型，优先于服务端下发的分类器配置。它属于 ClawGod 的 classifier 补丁，受 `classifier-tuning` 开关控制。
+- **Claude Code >= 2.1.302：** ClawGod 的覆盖补丁退休，改用官方 `CLAUDE_CODE_AUTO_MODE_MODEL`（[v2.1.302 发布说明](https://github.com/anthropics/claude-code/releases/tag/v2.1.302)）。服务端下发的分类器模型（`modelByMainModel` / `model`）优先级更高：存在时官方环境变量会被忽略，并提示服务端模型配置优先。该值会按组织模型策略和 API safeguards 校验，不合规的模型会被丢弃。官方环境变量不受 ClawGod 的 `classifier-tuning` 开关控制。
+
+两者都只改变客户端 auto mode 分类器，不改变服务端 auto mode 使用的模型。
 
 ### 限制移除
 
@@ -180,7 +187,7 @@ claude.orig         # 原版未修改版本（自动备份）
 | `ultrareview` | Ultrareview 命令 |
 | `voice-mode` | Voice Mode |
 | `auto-mode` | 第三方 API 的 auto-mode 模型选择 |
-| `classifier-tuning` | Auto-mode 分类器覆盖：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline 下限；未设置=按上下文 60-120s，需 v2.1.251+）、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`（未设置=4） |
+| `classifier-tuning` | Auto-mode 分类器覆盖：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline 下限；未设置=按上下文 60-120s，需 v2.1.251+）、`CLAWGOD_CLASSIFIER_MODEL`（仅 2.1.301 及以前；2.1.302+ 改用官方 `CLAUDE_CODE_AUTO_MODE_MODEL`）、`CLAWGOD_CLASSIFIER_RETRIES`（未设置=4） |
 | `theme` | 绿色品牌/Logo 配色 |
 | `geo-neutralize` | 中和 system prompt 中的地区/代理隐写 |
 | `wiggly-dove` | 阻断 `x-claude-code-wiggly-dove` 自动采集 Git/环境信息；关闭此保护会恢复上游行为 |

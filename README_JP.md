@@ -52,9 +52,16 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | **Agent Teams** | マルチエージェント協調、フラグ不要 |
 | **Computer Use** | Max/Proサブスク不要で画面操作（macOS） |
 | **Auto-mode** | サードパーティ API ユーザー向け auto-mode のロック解除（firstParty 制限を撤去） |
-| **Classifier チューニング** | auto-mode 分類器の調整：タイムアウト / モデル / リトライ回数（`CLAWGOD_CLASSIFIER_TIMEOUT_MS`、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`） |
+| **Classifier チューニング** | auto-mode 分類器の調整：タイムアウト / モデル / リトライ回数（`CLAWGOD_CLASSIFIER_TIMEOUT_MS`、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`）。`CLAWGOD_CLASSIFIER_MODEL` は 2.1.301 以前に適用され、2.1.302+ では公式 `CLAUDE_CODE_AUTO_MODE_MODEL` を使用 |
 | **Ultraplan** | Claude Code Remote 経由のマルチエージェント計画 |
 | **Ultrareview** | Claude Code Remote 経由の自動バグ検出 |
+
+分類器モデルの選択は Claude Code のバージョンによって変わります：
+
+- **Claude Code <= 2.1.301：** `CLAWGOD_CLASSIFIER_MODEL` が関数の入口で分類器モデルを強制上書きし、サーバーから提供される分類器設定より優先されます。ClawGod の classifier パッチの一部であり、`classifier-tuning` トグルに従います。
+- **Claude Code >= 2.1.302：** ClawGod の上書きパッチは廃止され、公式の `CLAUDE_CODE_AUTO_MODE_MODEL` が代わりに適用されます（[v2.1.302 リリースノート](https://github.com/anthropics/claude-code/releases/tag/v2.1.302)）。サーバーが提供する分類器モデル（`modelByMainModel` / `model`）が優先され、存在する場合は公式環境変数は無視され、サーバーのモデル設定が優先される旨の警告が表示されます。値は組織のモデルポリシーと API safeguards で検証され、不適合なモデルは破棄されます。この公式環境変数は ClawGod の `classifier-tuning` トグルの対象外です。
+
+どちらもクライアント側 auto-mode 分類器のみを変更し、サーバー側 auto mode が使用するモデルは変更しません。
 
 ### 制限の解除
 
@@ -179,7 +186,7 @@ claude.orig         # オリジナル未修正版（自動バックアップ）
 | `ultrareview` | Ultrareview コマンド |
 | `voice-mode` | Voice Mode |
 | `auto-mode` | サードパーティ API での auto-mode モデル選択 |
-| `classifier-tuning` | auto-mode 分類器の上書き：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline の下限；未設定=コンテキストにより 60-120s、v2.1.251+ 必要）、`CLAWGOD_CLASSIFIER_MODEL`、`CLAWGOD_CLASSIFIER_RETRIES`（未設定=4） |
+| `classifier-tuning` | auto-mode 分類器の上書き：`CLAWGOD_CLASSIFIER_TIMEOUT_MS`（deadline の下限；未設定=コンテキストにより 60-120s、v2.1.251+ 必要）、`CLAWGOD_CLASSIFIER_MODEL`（2.1.301 以前のみ；2.1.302+ では公式 `CLAUDE_CODE_AUTO_MODE_MODEL` を使用）、`CLAWGOD_CLASSIFIER_RETRIES`（未設定=4） |
 | `theme` | 緑色ブランド/ロゴ配色 |
 | `geo-neutralize` | system prompt の地域/プロキシステガノグラフィ中和 |
 | `wiggly-dove` | `x-claude-code-wiggly-dove` の Git/環境情報の自動収集をブロック。無効化すると上流の動作に戻る |
