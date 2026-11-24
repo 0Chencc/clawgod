@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -15,6 +15,7 @@ try {
     for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
       copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
     }
+    cpSync(new URL('./ast', import.meta.url), join(dir, 'ast'), { recursive: true });
     const entry = join(dir, 'cli.original.cjs');
     if (graph) mkdirSync(join(dir, 'bunfs'));
     const target = graph ? join(dir, 'bunfs/commands.js') : entry;
@@ -169,7 +170,8 @@ try {
     writeFileSync(join(rollbackDir, '.source-version'), '2.1.280\n');
     writeFileSync(join(rollbackDir, 'cli.cjs'), '// old wrapper');
     writeFileSync(join(rollbackDir, 'patch.mjs'), '// old patcher');
-    const astPayloads = ['ast-patches.mjs', 'acorn.mjs', 'acorn.LICENSE'];
+    const astPayloads = ['ast-patches.mjs', 'acorn.mjs', 'acorn.LICENSE', 'ast/common.mjs'];
+    mkdirSync(join(rollbackDir, 'ast'));
     for (const name of astPayloads) writeFileSync(join(rollbackDir, name), `old ${name}`);
     writeFileSync(join(rollbackDir, 'broken-patch.mjs'), "if(process.argv.includes('--capture-clean-source')) process.exit(0); process.exit(9);");
     const rollbackEnv = { ...env, CLAWGOD_DIR: rollbackDir, TMPDIR: rollbackTmp, NO_UPGRADE: '0', NATIVE_BIN_LABEL: '2.1.299', NATIVE_BIN: 'missing' };

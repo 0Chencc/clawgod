@@ -92,7 +92,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for file in src/shared/*.mjs src/shared/*.cjs src/windows/*.mjs src/windows/*.cjs; do
+          for file in src/shared/*.mjs src/shared/*.cjs src/shared/ast/*.mjs src/windows/*.mjs src/windows/*.cjs; do
             node --check "$file"
           done
 

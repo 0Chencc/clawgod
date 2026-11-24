@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, copyFileSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, copyFileSync, cpSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,6 +31,7 @@ try {
   for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
     copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
   }
+  cpSync(new URL('./ast', import.meta.url), join(dir, 'ast'), { recursive: true });
   for (const graph of [false, true]) {
     if (graph) mkdirSync(join(dir, 'bunfs'));
     for (const names of [['Hf', 'za', 't', 'Ry'], ['zf', 'Lr', 'n', 'E0']]) {

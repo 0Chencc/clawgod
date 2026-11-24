@@ -4,6 +4,7 @@ const {
   chmodSync,
   existsSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } = require('node:fs');
 const { join } = require('node:path');
@@ -65,11 +66,36 @@ function weaveFeaturesMeta(content) {
   return content.replace(FEATURES_META_MARKER, () => rendered);
 }
 
+// build.js does not follow imports. ast-patches.mjs loads its patch modules
+// from the sibling ast/ directory, so each template carries one
+// {{CLAWGOD:ast/}} placeholder that expands to a write block per runtime
+// module in src/shared/ast/. Tests stay out of the installers.
+const AST_MODULES_SOURCE = 'shared/ast';
+
+function astModuleNames() {
+  return readdirSync(join(SOURCE_ROOT, AST_MODULES_SOURCE))
+    .filter((name) => name.endsWith('.mjs') && !name.endsWith('.test.mjs'))
+    .sort();
+}
+
+const bashAstModuleWrite = (name, content) => [
+  `cat > "$CLAWGOD_DIR/ast/${name}" << 'AST_MODULE_EOF'`,
+  content,
+  'AST_MODULE_EOF',
+].join('\n');
+
+const powershellAstModuleWrite = (name, content) => [
+  "@'",
+  escapeNonAscii(content),
+  `'@ | Set-Content (Join-Path $ClawDir "ast\\${name}") -Encoding UTF8`,
+].join('\n');
+
 const TARGETS = [
   {
     name: 'install.sh',
     template: 'templates/install.sh',
     mode: 0o755,
+    astModuleWrite: bashAstModuleWrite,
     sources: {
       'extract-natives.mjs': ['shared/extract-natives.mjs', identity],
       'post-process.mjs': ['shared/post-process.mjs', identity],
@@ -91,6 +117,7 @@ const TARGETS = [
     name: 'install.ps1',
     template: 'templates/install.ps1',
     asciiOnly: true,
+    astModuleWrite: powershellAstModuleWrite,
     sources: {
       'npm-fetch.mjs': ['windows/npm-fetch.mjs', escapeNonAscii],
       'extract-natives.mjs': ['shared/extract-natives.mjs', escapeNonAscii],
@@ -123,20 +150,27 @@ function readSource(relativePath) {
   return content.slice(0, -1);
 }
 
+function fillPlaceholder(output, target, name, content) {
+  const placeholder = `{{CLAWGOD:${name}}}`;
+  const matches = output.split(placeholder).length - 1;
+  if (matches !== 1) {
+    throw new Error(`${target.template}: expected one ${placeholder}, found ${matches}`);
+  }
+  return output.replace(placeholder, () => content);
+}
+
 function render(target) {
   const templatePath = join(SOURCE_ROOT, target.template);
   if (!existsSync(templatePath)) throw new Error(`Missing template: ${target.template}`);
   let output = readFileSync(templatePath, 'utf8').replace(/^\uFEFF/, '');
 
   for (const [name, [sourcePath, transform]] of Object.entries(target.sources)) {
-    const placeholder = `{{CLAWGOD:${name}}}`;
-    const matches = output.split(placeholder).length - 1;
-    if (matches !== 1) {
-      throw new Error(`${target.template}: expected one ${placeholder}, found ${matches}`);
-    }
-    const source = transform(readSource(sourcePath));
-    output = output.replace(placeholder, () => source);
+    output = fillPlaceholder(output, target, name, transform(readSource(sourcePath)));
   }
+  const astModules = astModuleNames()
+    .map((name) => target.astModuleWrite(name, readSource(`${AST_MODULES_SOURCE}/${name}`)))
+    .join('\n');
+  output = fillPlaceholder(output, target, 'ast/', astModules);
 
   const unresolved = output.match(PLACEHOLDER_RE);
   if (unresolved) {

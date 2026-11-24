@@ -72,7 +72,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/ast-patches.mjs" "$CLAWGOD_DIR/acorn.mjs" "$CLAWGOD_DIR/acorn.LICENSE" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/claude.staged" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/ast-patches.mjs" "$CLAWGOD_DIR/ast" "$CLAWGOD_DIR/acorn.mjs" "$CLAWGOD_DIR/acorn.LICENSE" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/claude.staged" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -6637,7 +6637,7 @@ PREV_BACKUP_DIR=""
 ROLLBACK_FILES=(cli.original.cjs cli.original.cjs.bak cli.original.js .source-version
   source-backup.json bunfs vendor pathmap.json extract-natives.mjs post-process.mjs
   repatch.mjs openai-proxy.cjs feature-gates.cjs cli.cjs .clawgod-version
-  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs ast-patches.mjs acorn.mjs acorn.LICENSE)
+  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs ast-patches.mjs ast acorn.mjs acorn.LICENSE)
 if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
   PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
   for f in "${ROLLBACK_FILES[@]}"; do
@@ -8738,8 +8738,367 @@ info "Bun.ant runtime shim created (bun-ant-shim.cjs)"
 
 # ─── Write universal patcher ───────────────────────────
 
+# ast-patches.mjs imports its patch modules from ast/. Replace the directory as
+# a whole so modules dropped by a newer release do not linger.
+rm -rf "$CLAWGOD_DIR/ast"
+mkdir -p "$CLAWGOD_DIR/ast"
+cat > "$CLAWGOD_DIR/ast/anchors.mjs" << 'AST_MODULE_EOF'
+// File-level prefilter anchors for the inline scan. Parsing only happens when
+// one of these strings appears verbatim in the source.
+//
+// Migrated modules are selected by the anchors they declare. A module whose
+// matcher inspects AST values must not narrow this list: acorn decodes string
+// literals, so the text it matches can be spelled with escapes and never show
+// up verbatim. Declaring the full list keeps the module on exactly the files
+// the inline scan parses, which is also the file set the pre-migration branch
+// saw.
+export const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
+  'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
+  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove',
+  '[Tool result missing due to internal error]', 'firstParty', 'claude-sonnet-4-6'];
+AST_MODULE_EOF
+cat > "$CLAWGOD_DIR/ast/combine.mjs" << 'AST_MODULE_EOF'
+// Combination for AST patch modules: layered application with per-id
+// verification and idempotency. The caller injects the raw scanner, the edit
+// applicator, the parser and the id list, so this file owns no legacy code and
+// survives when the inline scan is replaced.
+import { verifyModule } from './engine.mjs';
+
+// Effective edits change the source; no-op matches never reach the applicator.
+const effectiveMatches = (code, matches) =>
+  matches.filter(match => match.replacement !== code.slice(match.start, match.end));
+
+// Whether two edits collide for combination purposes. Same-offset zero-width
+// edits collide even though the applicator itself would write both.
+const overlaps = (a, b) =>
+  (a.start === a.end && b.start === b.end && a.start === b.start) ||
+  (a.start < b.end && b.start < a.end);
+
+// First colliding pair, walked in the applicator's sort order. Same-offset
+// zero-width pairs are listed separately because a plain range comparison
+// sees them as non-overlapping.
+function overlappingPair(edits) {
+  const sorted = [...edits].sort((a, b) => a.start - b.start || a.end - b.end);
+  let cursor = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const previous = sorted[i - 1], edit = sorted[i];
+    if (previous && previous.start === previous.end && edit.start === edit.end &&
+        previous.start === edit.start) return [previous, edit];
+    if (edit.start < cursor) return [previous, edit];
+    cursor = edit.end;
+  }
+  return null;
+}
+
+export function createAstCombination({ ids, scanRaw, applyEdits, parse }) {
+  const effectiveEdits = (code, scan) =>
+    new Map(ids.map(id => [id, effectiveMatches(code, scan[id].matches)]));
+
+  // One id's effective edits form one group. A group that overlaps itself
+  // cannot be applied without choosing a subset, so it is an implementation
+  // error of that id, never a combination conflict.
+  const effectiveGroups = (code, scan) => {
+    const effective = effectiveEdits(code, scan);
+    for (const [id, edits] of effective) {
+      if (overlappingPair(edits)) throw new Error(`AST patch '${id}' produced overlapping edits`);
+    }
+    return effective;
+  };
+
+  // Combination is only needed when two different ids collide. A group that
+  // overlaps itself alone keeps its historical path: the raw scan is returned,
+  // so range overlaps still fail in the applicator exactly as before and
+  // same-offset zero-width pairs still apply as they always did. Once any
+  // cross-id overlap forces combination, every participant's group is checked
+  // first, so a self-overlapping module can never be rescued by an earlier
+  // layer.
+  const crossIdOverlap = effective => {
+    const groups = [...effective].filter(([, edits]) => edits.length > 0);
+    for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        for (const a of groups[i][1]) {
+          for (const b of groups[j][1]) if (overlaps(a, b)) return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  // In-memory patcher for one file. Files whose effective edits stay inside
+  // their owning ids keep the historical single-batch rewrite; files with a
+  // cross-id overlap apply one id group per layer, re-parsing in between, so
+  // a later id sees the text an earlier one produced. Combination is refused
+  // rather than guessed whenever a participant cannot prove its own result.
+  const compose = (code, scan, effective, modules) => {
+    const participants = ids.filter(id => effective.get(id).length > 0);
+    const combined = participants.flatMap(id => effective.get(id).map(edit => ({ ...edit, id })));
+    // Scan fields are the initial-layer ones; applied counts this id's edits
+    // that reached the published text (0 when the file is refused).
+    const results = appliedFor => Object.fromEntries(ids.map(id =>
+      [id, { ...scan[id], applied: appliedFor(id) }]));
+    const appliedCounts = Object.fromEntries(ids.map(id => [id, 0]));
+    const conflict = (conflictIds, reason) => ({ code, results: results(() => 0), conflict: { ids: conflictIds, reason } });
+
+    if (!overlappingPair(combined)) {
+      // Fast path: byte-identical to collecting every id's edits and applying
+      // them in one batch, which is what the runner did before combination.
+      const finalCode = applyEdits(code, combined);
+      // The historical rewrite validated its product before publishing it.
+      if (combined.length) parse(finalCode);
+      for (const id of participants) appliedCounts[id] = effective.get(id).length;
+      return { code: finalCode, results: results(id => appliedCounts[id]), conflict: null };
+    }
+
+    // Layered path. Only modules can combine: an inline id has no completion
+    // contract, so the whole file is refused before anything is applied.
+    const byId = new Map(modules.map(module => [module.id, module]));
+    const legacy = participants.filter(id => !byId.has(id));
+    if (legacy.length) return conflict(legacy, 'legacy patch cannot participate in combination');
+    const unverified = participants.filter(id => typeof byId.get(id).verify !== 'function');
+    if (unverified.length) return conflict(unverified, 'module has no verify');
+
+    // P is the initial-layer participant set. Ids outside it never run again:
+    // matches they would find on later layers are ignored, not applied.
+    const before = { code, tree: parse(code) };
+    const matches = Object.fromEntries(participants.map(id => [id, effective.get(id)]));
+    let layer = code;
+    for (const id of participants) {
+      // Exactly one whole group per id: the layer is re-parsed, so this id's
+      // matcher sees earlier output and its coordinates belong to this layer.
+      const edits = effectiveMatches(layer, scanRaw(layer, [byId.get(id)])[id].matches);
+      if (overlappingPair(edits)) throw new Error(`AST patch '${id}' produced overlapping edits`);
+      // Zero effective edits here is not completion: the id stays in P, keeps
+      // applied 0, and its verify still has to pass on the final text.
+      if (!edits.length) continue;
+      layer = applyEdits(layer, edits);
+      appliedCounts[id] = edits.length;
+    }
+    const after = { code: layer, tree: parse(layer) };
+    const unproven = participants.filter(id =>
+      !verifyModule(byId.get(id), { before, after, matches: matches[id] }));
+    if (unproven.length) return conflict(unproven, 'lost or unverified target');
+    // Idempotency: every participant must be settled on the final text, or a
+    // second run would change the file again. A stale rescan is not settled
+    // either: the matcher found a site it cannot handle, and the next run
+    // would refuse the file instead of skipping it.
+    const unsettled = participants.filter(id => {
+      const rescan = scanRaw(after.code, [byId.get(id)])[id];
+      return rescan.stale || effectiveMatches(after.code, rescan.matches).length > 0;
+    });
+    if (unsettled.length) return conflict(unsettled, 'idempotency check failed');
+    return { code: layer, results: results(id => appliedCounts[id]), conflict: null };
+  };
+
+  // Explicit entry for callers that want the composed text plus per-id applied
+  // counts; tests drive the combination contract through it.
+  const transform = (code, modules) => {
+    const scan = scanRaw(code, modules);
+    return compose(code, scan, effectiveGroups(code, scan), modules);
+  };
+
+  // Runner-facing scan. Files whose ids never overlap keep the historical
+  // per-id match lists byte for byte, so the old runner's collect-then-apply
+  // flush is untouched. A file with a cross-id overlap is composed here and
+  // reported as one whole-file replacement credited to the first participating
+  // id; the other participants keep their matches but as no-ops (the composed
+  // text already contains them). The old runner skips no-op matches, yet a
+  // non-empty match list still keeps a `present` id out of its stale branch,
+  // so the composed text is applied exactly once, at the price of
+  // under-reporting which ids participated in that file and of surfacing a
+  // refused combination as a generic "AST scan failed" (no file is written
+  // either way).
+  const scan = (code, modules) => {
+    const raw = scanRaw(code, modules);
+    const effective = effectiveEdits(code, raw);
+    if (!crossIdOverlap(effective)) return raw;
+    // Composed files validate every participant up front: a self-overlapping
+    // group is that id's implementation error even when a later layer would
+    // have replaced the text it came from.
+    const composed = compose(code, raw, effectiveGroups(code, raw), modules);
+    if (composed.conflict) {
+      throw new Error(`AST combination conflict: ${composed.conflict.reason} ` +
+        `(${composed.conflict.ids.join(', ')})`);
+    }
+    const credited = ids.find(id => effective.get(id).length > 0);
+    const folded = Object.fromEntries(ids.map(id => [id, { ...raw[id] }]));
+    for (const id of ids) {
+      if (id === credited || effective.get(id).length === 0) continue;
+      folded[id].matches = raw[id].matches.map(match =>
+        ({ ...match, replacement: code.slice(match.start, match.end) }));
+    }
+    // The whole-file edit reproduces the composed text in one step.
+    folded[credited].matches = [{ start: 0, end: code.length, replacement: composed.code }];
+    return folded;
+  };
+
+  return { transform, scan };
+}
+AST_MODULE_EOF
+cat > "$CLAWGOD_DIR/ast/common.mjs" << 'AST_MODULE_EOF'
+// Syntax helpers shared by migrated patch modules and the module engine.
+export const literal = (node, value) => node?.type === 'Literal' && node.value === value;
+
+// Iterative traversal avoids adding a second call stack limit to large bundles.
+export function walk(root, visit) {
+  const pending = [root];
+  while (pending.length) {
+    const node = pending.pop();
+    visit(node);
+    for (const value of Object.values(node)) {
+      if (value?.type) pending.push(value);
+      else if (Array.isArray(value)) {
+        for (const child of value) if (child?.type) pending.push(child);
+      }
+    }
+  }
+}
+AST_MODULE_EOF
+cat > "$CLAWGOD_DIR/ast/engine.mjs" << 'AST_MODULE_EOF'
+// Engine for migrated AST patch modules: validates the module table, indexes
+// the already-parsed tree once, and dispatches modules whose anchors appear.
+// A module with empty anchors opts out of the prefilter and runs on every
+// parsed file.
+import { walk } from './common.mjs';
+
+// A module namespace may only expose these names. Anything else is a typo or
+// an undeclared contract, and must fail before any file is touched.
+const MODULE_EXPORTS = new Set(['id', 'anchors', 'evidence', 'scan', 'verify']);
+
+// Spread first so a sparse array cannot slip through: every() skips holes.
+const isStringList = value => Array.isArray(value) && value.length > 0 &&
+  [...value].every(item => typeof item === 'string' && item.length > 0);
+// Anchors may be empty, which means "no prefilter": the module runs on every
+// parsed file. Every element must still be a non-empty string.
+const isAnchorList = value => Array.isArray(value) &&
+  [...value].every(item => typeof item === 'string' && item.length > 0);
+
+// Validate the ordered module table at startup. `ids` is AST_PATCH_IDS: every
+// module owns an existing result, and the remaining ids belong to the inline
+// scan. `anchors` is the inline prefilter list: a module may narrow it only
+// when its matcher cannot see anything the prefilter misses, and a new anchor
+// would widen the set of parsed files. Violations throw immediately, mirroring
+// the registry self-check in patch.mjs.
+export function defineModules(entries, ids, anchors) {
+  const known = new Set(ids);
+  const legacyAnchors = new Set(anchors);
+  const seen = new Set();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') throw new Error('AST patch module must be an object');
+    if (typeof entry.id !== 'string' || entry.id.length === 0) {
+      throw new Error('AST patch module must export a non-empty string id');
+    }
+    // Own properties only: inherited id/scan/anchors are not a module export.
+    if (!Object.hasOwn(entry, 'id') || !Object.hasOwn(entry, 'anchors') || !Object.hasOwn(entry, 'scan')) {
+      throw new Error(`AST patch module '${entry.id}' must export id, anchors and scan`);
+    }
+    for (const name of Object.keys(entry)) {
+      if (!MODULE_EXPORTS.has(name)) {
+        throw new Error(`AST patch module '${entry.id}' exports unsupported name '${name}'`);
+      }
+    }
+    if (typeof entry.scan !== 'function') throw new Error(`AST patch module '${entry.id}' must export scan`);
+    if (!isAnchorList(entry.anchors)) {
+      throw new Error(`AST patch module '${entry.id}' must export an anchors array of non-empty strings; an empty array means no prefilter`);
+    }
+    for (const anchor of entry.anchors) {
+      if (!legacyAnchors.has(anchor)) {
+        throw new Error(`AST patch module '${entry.id}' anchor '${anchor}' is not in the legacy anchors list`);
+      }
+    }
+    if (entry.evidence !== undefined && !isStringList(entry.evidence)) {
+      throw new Error(`AST patch module '${entry.id}' must export evidence as a non-empty array of non-empty strings`);
+    }
+    // verify is optional; a present but non-callable export would only fail
+    // later, once a conflicting file reaches layered combination.
+    if (entry.verify !== undefined && typeof entry.verify !== 'function') {
+      throw new Error(`AST patch module '${entry.id}' must export verify as a function`);
+    }
+    if (!known.has(entry.id)) {
+      throw new Error(`AST patch module '${entry.id}' is not listed in AST_PATCH_IDS`);
+    }
+    if (seen.has(entry.id)) throw new Error(`duplicate AST patch id: ${entry.id}`);
+    seen.add(entry.id);
+  }
+  return entries;
+}
+
+// Runs the migrated modules on the tree the inline scan just walked. A
+// module's own result object is its only write target: edit is bound to it,
+// so a module cannot write another id's state.
+export function runModules({ code, tree, functions, results, modules }) {
+  // Nodes bucketed by type in traversal order. The index is only built when
+  // the caller saw at least one module anchor in this file, or a module with
+  // empty anchors selected itself for every file.
+  const index = new Map();
+  walk(tree, node => {
+    const bucket = index.get(node.type);
+    if (bucket) bucket.push(node);
+    else index.set(node.type, [node]);
+  });
+  // Freeze the shared buckets so one module cannot mutate another's view.
+  for (const bucket of index.values()) Object.freeze(bucket);
+  const nodes = type => index.get(type) ?? [];
+  for (const module of modules) {
+    if (!(module.anchors.length === 0 || module.anchors.some(anchor => code.includes(anchor)))) continue;
+    const result = results[module.id];
+    // A migrated id must be gone from the inline scan. If it is not, the
+    // module would silently double-write, so fail with the id that leaked.
+    if (result.matches.length || result.present || result.patched) {
+      throw new Error(`AST patch '${module.id}' was already written by the inline scan; remove its branch there`);
+    }
+    // Once a module declares a site stale, its collected edits are discarded
+    // and later edits are ignored.
+    const edit = (node, replacement) => {
+      if (result.stale) return;
+      result.matches.push({ start: node.start, end: node.end, replacement });
+    };
+    const stale = (node, reason) => {
+      result.stale = { start: node.start, end: node.end, reason };
+      result.matches = [];
+      // The runner diagnoses stale matchers through present ("candidate site
+      // found but unhandled"). Without it an empty match list reads as "not
+      // present in this version" and the drift is silently skipped.
+      result.present = true;
+    };
+    module.scan({ code, tree, nodes, functions, result, edit, stale });
+  }
+}
+
+// Combination asks a module to prove its own result after layered application.
+// The protocol (strict `true`, no shape guessing) stays in the engine so the
+// combiner never inspects a module directly.
+export function verifyModule(module, input) {
+  if (typeof module.verify !== 'function') {
+    throw new Error(`AST patch module '${module.id}' exports no verify`);
+  }
+  return module.verify(input) === true;
+}
+AST_MODULE_EOF
+cat > "$CLAWGOD_DIR/ast/user-type-ant.mjs" << 'AST_MODULE_EOF'
+import { literal } from './common.mjs';
+
+export const id = 'user-type-ant';
+// The matcher reads a decoded string literal, so the source may spell it with
+// escapes; only the full prefilter list keeps the module on the same files as
+// the inline branch it replaced.
+export { anchors } from './anchors.mjs';
+
+export function scan({ nodes, edit }) {
+  for (const fn of nodes('FunctionDeclaration')) {
+    if (fn.params.length || fn.async || fn.generator) continue;
+    const body = fn.body.body;
+    if (body.length !== 1 || body[0].type !== 'ReturnStatement') continue;
+    if (literal(body[0].argument, 'external')) edit(body[0].argument, '"ant"');
+  }
+}
+AST_MODULE_EOF
+
 cat > "$CLAWGOD_DIR/ast-patches.mjs" << 'AST_PATCHES_EOF'
 import { parse } from './acorn.mjs';
+import { defineModules, runModules } from './ast/engine.mjs';
+import { createAstCombination } from './ast/combine.mjs';
+import { anchors } from './ast/anchors.mjs';
+import * as userTypeAnt from './ast/user-type-ant.mjs';
 
 export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
@@ -8748,10 +9107,12 @@ export const AST_PATCH_IDS = [
   'tool-result-pairing-recovery', 'auto-mode-inline-gate',
 ];
 
-const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
-  'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
-  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove',
-  '[Tool result missing due to internal error]', 'firstParty', 'claude-sonnet-4-6'];
+// Patches migrated out of the inline scan below. A module owns its id and
+// anchors; migrating one deletes its branch below in the same change. Modules
+// may narrow their anchors only when their matcher cannot see anything the
+// prefilter misses; a module matching AST values keeps the full anchor list,
+// because escapes hide the matched text from the prefilter.
+const MODULES = defineModules([userTypeAnt], AST_PATCH_IDS, anchors);
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -8981,9 +9342,18 @@ function autoModeSites(fn, functions) {
 
 // One parse per candidate file, shared by every semantic patch. Keep only edit
 // ranges; the large AST can be collected before the next graph chunk is parsed.
-export function scanAstPatches(code) {
+// `modules` is the module-track schedule, overridable so tests can inject
+// fixture modules; production callers keep the default table. This is the raw
+// per-id scan; the exported scanAstPatches below folds cross-id overlaps.
+function scanRawPatches(code, modules) {
   const results = Object.fromEntries(AST_PATCH_IDS.map(id => [id, { matches: [], present: false, patched: false }]));
-  if (!anchors.some(anchor => code.includes(anchor))) return results;
+  // The two tracks have independent prefilter conditions. The inline scan runs
+  // only when a legacy anchor matches; a module with empty anchors opts out of
+  // the prefilter and runs on every parsed file. Neither enabled: skip parsing.
+  const legacyEnabled = anchors.some(anchor => code.includes(anchor));
+  const selectedModules = modules.filter(module =>
+    module.anchors.length === 0 || module.anchors.some(anchor => code.includes(anchor)));
+  if (!legacyEnabled && selectedModules.length === 0) return results;
   const tree = parsePatchSource(code);
   const edit = (id, node, replacement) => {
     results[id].matches.push({ start: node.start, end: node.end, replacement });
@@ -9019,7 +9389,8 @@ export function scanAstPatches(code) {
       functions.set(node.id.name, node);
     }
   });
-  walk(tree, node => {
+  // Inline semantic branches run only for files the legacy anchors select.
+  if (legacyEnabled) walk(tree, node => {
     if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type) &&
         node.body.type === 'BlockStatement' && !node.async && !node.generator) {
       const id = 'auto-mode-inline-gate';
@@ -9113,7 +9484,6 @@ export function scanAstPatches(code) {
         !node.async && !node.generator && node.body.body.length === 1 &&
         node.body.body[0].type === 'ReturnStatement') {
       const value = node.body.body[0].argument;
-      if (literal(value, 'external')) edit('user-type-ant', value, '"ant"');
       const standalone = expr => expr?.type === 'BinaryExpression' && expr.operator === '===' &&
         member(expr.left, 'isStandaloneExecutable') && expr.left.object.name === 'Bun' && boolean(expr.right, true);
       const typeofBun = expr => expr?.type === 'BinaryExpression' && expr.operator === '<' &&
@@ -9261,15 +9631,25 @@ export function scanAstPatches(code) {
       }
     }
   });
-  if ([...wigglyLiterals].some(start => !wigglyHandled.has(start))) {
-    results['wiggly-dove'].present = true;
-    results['wiggly-dove'].matches = [];
+  // Stale reporting belongs to the inline track; it must not fire when only
+  // modules are enabled.
+  if (legacyEnabled) {
+    if ([...wigglyLiterals].some(start => !wigglyHandled.has(start))) {
+      results['wiggly-dove'].present = true;
+      results['wiggly-dove'].matches = [];
+    }
+    if (code.includes('[Tool result missing due to internal error]') && !pairingHandled) {
+      results['tool-result-pairing-recovery'].present = true;
+      results['tool-result-pairing-recovery'].matches = [];
+    }
+    if (results['auto-mode-inline-gate'].present) results['auto-mode-inline-gate'].matches = [];
   }
-  if (code.includes('[Tool result missing due to internal error]') && !pairingHandled) {
-    results['tool-result-pairing-recovery'].present = true;
-    results['tool-result-pairing-recovery'].matches = [];
+  // Migrated patches run on the same tree after the inline scan. selectedModules
+  // already matched this file's prefilter; runModules re-checks anchors so a
+  // direct caller gets the same gating.
+  if (selectedModules.length > 0) {
+    runModules({ code, tree, functions, results, modules: selectedModules });
   }
-  if (results['auto-mode-inline-gate'].present) results['auto-mode-inline-gate'].matches = [];
   return results;
 }
 
@@ -9284,6 +9664,29 @@ export function applyAstEdits(code, edits) {
   }
   parts.push(code.slice(cursor));
   return parts.join('');
+}
+
+// ─── Combination entry ────────────────────────────────────
+// The combination algorithm lives in ast/combine.mjs so it outlives the inline
+// scan; this file only wires it to the raw scanner, the applicator and the
+// default module table.
+const combination = createAstCombination({
+  ids: AST_PATCH_IDS,
+  scanRaw: scanRawPatches,
+  applyEdits: applyAstEdits,
+  parse: parsePatchSource,
+});
+
+// Explicit entry for callers that want the composed text plus per-id applied
+// counts; tests drive the combination contract through it.
+export function transformAstPatches(code, modules = MODULES) {
+  return combination.transform(code, modules);
+}
+
+// Runner-facing scan: raw results when no ids overlap, otherwise the folded
+// one-edit-per-file form described in ast/combine.mjs.
+export function scanAstPatches(code, modules = MODULES) {
+  return combination.scan(code, modules);
 }
 AST_PATCHES_EOF
 
