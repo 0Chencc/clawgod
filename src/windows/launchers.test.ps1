@@ -130,7 +130,30 @@ try {
     Set-Content $cmd '@echo original-launcher' -Encoding Ascii
     & $install
     Assert ((Get-Content (Join-Path $BinDir 'claude.orig.cmd') -Raw) -match 'original-launcher') 'Original cmd was not preserved'
-    Write-Host '[launchers.test] repeated installs, native repair, upgrade refresh, running/locked exe, and backup preservation passed'
+    # Exercise the actual generated launcher with a normal parenthesized CLI
+    # argument. cmd.exe expands percent parameters while parsing parenthesized
+    # blocks, so this used to fail before Bun/Node was started.
+    $templateAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\templates\install.ps1'), [ref]$null, [ref]$null)
+    $launcherAssignment = $templateAst.Find({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$launcherContent' }, $true)
+    Assert ($null -ne $launcherAssignment) 'Launcher assignment not found in template'
+    $importPathInCmd = '%USERPROFILE%\.clawgod\clawgod-import.exe'
+    $cliPathInCmd = '%USERPROFILE%\.clawgod\cli.cjs'
+    $bunPathInCmd = '%USERPROFILE%\AppData\Roaming\npm\node_modules\bun\bin\bun.exe'
+    . ([ScriptBlock]::Create($launcherAssignment.Extent.Text))
+    $fakeBun = Join-Path $root 'AppData\Roaming\npm\node_modules\bun\bin'
+    New-Item -ItemType Directory -Force $fakeBun | Out-Null
+    Copy-Item $node (Join-Path $fakeBun 'bun.exe')
+    $capture = Join-Path $root 'argv.json'
+    $env:CLAWGOD_ARGV_CAPTURE = $capture
+    Set-Content (Join-Path $ClawDir 'cli.cjs') 'require("fs").writeFileSync(process.env.CLAWGOD_ARGV_CAPTURE, JSON.stringify(process.argv.slice(2)))' -Encoding Ascii
+    & $install
+    $invoke = '"{0}" -p "prompt" --tools Bash --allowedTools "Bash(pwd)" --strict-mcp-config' -f $cmd
+    & cmd.exe /d /c $invoke
+    Assert ($LASTEXITCODE -eq 0) 'Launcher rejected CLI args containing parentheses'
+    $forwarded = Get-Content $capture -Raw | ConvertFrom-Json
+    Assert (($forwarded -join '|') -eq '-p|prompt|--tools|Bash|--allowedTools|Bash(pwd)|--strict-mcp-config') 'Launcher did not forward CLI args exactly'
+    Remove-Item Env:\CLAWGOD_ARGV_CAPTURE
+    Write-Host '[launchers.test] installer recovery and parenthesized CLI argument forwarding passed'
 } finally {
     $env:USERPROFILE = $savedHome
     $env:LOCALAPPDATA = $savedLocal
