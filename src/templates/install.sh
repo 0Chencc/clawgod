@@ -72,7 +72,7 @@ if [ "$UNINSTALL" = "1" ]; then
       info "Removed ClawGod alias ($DIR/clawgod)"
     fi
   done
-  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/ast-patches.mjs" "$CLAWGOD_DIR/acorn.mjs" "$CLAWGOD_DIR/acorn.LICENSE" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/claude.staged" "$CLAWGOD_DIR/.source-version"
+  rm -rf "$CLAWGOD_DIR/node_modules" "$CLAWGOD_DIR/vendor" "$CLAWGOD_DIR/bun-runtime" "$CLAWGOD_DIR/cli.original.js" "$CLAWGOD_DIR/cli.original.js.bak" "$CLAWGOD_DIR/cli.original.cjs" "$CLAWGOD_DIR/cli.original.cjs.bak" "$CLAWGOD_DIR/source-backup.json" "$CLAWGOD_DIR/cli.js" "$CLAWGOD_DIR/cli.cjs" "$CLAWGOD_DIR/patch.mjs" "$CLAWGOD_DIR/ast-patches.mjs" "$CLAWGOD_DIR/ast" "$CLAWGOD_DIR/acorn.mjs" "$CLAWGOD_DIR/acorn.LICENSE" "$CLAWGOD_DIR/patch.js" "$CLAWGOD_DIR/extract-natives.mjs" "$CLAWGOD_DIR/post-process.mjs" "$CLAWGOD_DIR/repatch.mjs" "$CLAWGOD_DIR/startup-check.cjs" "$CLAWGOD_DIR/startup-check.log" "$CLAWGOD_DIR/openai-proxy.cjs" "$CLAWGOD_DIR/feature-gates.cjs" "$CLAWGOD_DIR/runtime-helpers.cjs" "$CLAWGOD_DIR/bun-ant-shim.cjs" "$CLAWGOD_DIR/clawgod-import" "$CLAWGOD_DIR/claude.staged" "$CLAWGOD_DIR/.source-version"
   hash -r 2>/dev/null
   info "ClawGod uninstalled"
   echo ""
@@ -305,7 +305,7 @@ PREV_BACKUP_DIR=""
 ROLLBACK_FILES=(cli.original.cjs cli.original.cjs.bak cli.original.js .source-version
   source-backup.json bunfs vendor pathmap.json extract-natives.mjs post-process.mjs
   repatch.mjs openai-proxy.cjs feature-gates.cjs cli.cjs .clawgod-version
-  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs ast-patches.mjs acorn.mjs acorn.LICENSE)
+  startup-check.cjs runtime-helpers.cjs bun-ant-shim.cjs patch.mjs ast-patches.mjs ast acorn.mjs acorn.LICENSE)
 if [ -f "$CLAWGOD_DIR/cli.original.cjs" ] && [ -f "$CLAWGOD_DIR/.source-version" ]; then
   PREV_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/clawgod-rollback-XXXXXX")
   for f in "${ROLLBACK_FILES[@]}"; do
@@ -457,6 +457,12 @@ BUNANT_EOF
 info "Bun.ant runtime shim created (bun-ant-shim.cjs)"
 
 # ─── Write universal patcher ───────────────────────────
+
+# ast-patches.mjs imports its patch modules from ast/. Replace the directory as
+# a whole so modules dropped by a newer release do not linger.
+rm -rf "$CLAWGOD_DIR/ast"
+mkdir -p "$CLAWGOD_DIR/ast"
+{{CLAWGOD:ast/}}
 
 cat > "$CLAWGOD_DIR/ast-patches.mjs" << 'AST_PATCHES_EOF'
 {{CLAWGOD:ast-patches.mjs}}

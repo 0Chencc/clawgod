@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +64,7 @@ try {
     for (const file of ['post-process.mjs', 'acorn.mjs', 'patch.mjs', 'ast-patches.mjs']) {
       copyFileSync(new URL(file, import.meta.url), join(dir, file));
     }
+    cpSync(new URL('ast', import.meta.url), join(dir, 'ast'), { recursive: true });
     const pathMap = {
       [`${mount}helper.js`]: { path: 'bunfs/helper.js', loader: 'js' },
       [`${mount}state-library.js.txt`]: { path: 'bunfs/state-library.js.txt', loader: 'text' },

@@ -76,7 +76,7 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","ast-patches.mjs","acorn.mjs","acorn.LICENSE","extract-natives.mjs","post-process.mjs","repatch.mjs","startup-check.cjs","startup-check.log","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe","claude.staged.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","source-backup.json","patch.js","patch.mjs","ast-patches.mjs","ast","acorn.mjs","acorn.LICENSE","extract-natives.mjs","post-process.mjs","repatch.mjs","startup-check.cjs","startup-check.log","openai-proxy.cjs","feature-gates.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","clawgod-import.exe","claude.staged.exe",".source-version","node_modules","bun-runtime","vendor","bunfs","pathmap.json")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
@@ -391,7 +391,7 @@ $script:RollbackPending = $false
 $RollbackFiles = @("cli.original.cjs","cli.original.cjs.bak","cli.original.js",".source-version",
     "source-backup.json","bunfs","vendor","pathmap.json","extract-natives.mjs","post-process.mjs",
     "repatch.mjs","openai-proxy.cjs","feature-gates.cjs","cli.cjs",".clawgod-version",
-    "startup-check.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","patch.mjs","ast-patches.mjs","acorn.mjs","acorn.LICENSE")
+    "startup-check.cjs","runtime-helpers.cjs","bun-ant-shim.cjs","patch.mjs","ast-patches.mjs","ast","acorn.mjs","acorn.LICENSE")
 $origCjs = Join-Path $ClawDir "cli.original.cjs"
 $sourceVerFile = Join-Path $ClawDir ".source-version"
 if ((Test-Path $origCjs) -and (Test-Path $sourceVerFile)) {
@@ -562,6 +562,13 @@ Write-OK "Bun.ant runtime shim created (bun-ant-shim.cjs)"
 
 # --- Write universal patcher ------------------------------------------
 # (Same Node.js patcher as bash version -- inline to avoid extra download)
+
+# ast-patches.mjs imports its patch modules from ast\. Replace the directory as
+# a whole so modules dropped by a newer release do not linger.
+$AstDir = Join-Path $ClawDir "ast"
+if (Test-Path $AstDir) { Remove-Item -Recurse -Force $AstDir }
+New-Item -ItemType Directory -Force -Path $AstDir | Out-Null
+{{CLAWGOD:ast/}}
 
 @'
 {{CLAWGOD:ast-patches.mjs}}

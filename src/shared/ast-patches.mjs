@@ -1,4 +1,8 @@
 import { parse } from './acorn.mjs';
+import { defineModules, runModules } from './ast/engine.mjs';
+import { createAstCombination } from './ast/combine.mjs';
+import { anchors } from './ast/anchors.mjs';
+import * as userTypeAnt from './ast/user-type-ant.mjs';
 
 export const AST_PATCH_IDS = [
   'user-type-ant', 'bun-standalone-executable', 'growthbook-env-overrides-graph',
@@ -7,10 +11,12 @@ export const AST_PATCH_IDS = [
   'tool-result-pairing-recovery', 'auto-mode-inline-gate',
 ];
 
-const anchors = ['external', 'isStandaloneExecutable', 'environmentOverridesParsed',
-  'pixelValidation', 'ultraplan', 'tengu_amber_quartz_disabled', 's date is ',
-  'Remote settings:', 'remote-settings.json', 'tengu_wiggly_dove',
-  '[Tool result missing due to internal error]', 'firstParty', 'claude-sonnet-4-6'];
+// Patches migrated out of the inline scan below. A module owns its id and
+// anchors; migrating one deletes its branch below in the same change. Modules
+// may narrow their anchors only when their matcher cannot see anything the
+// prefilter misses; a module matching AST values keeps the full anchor list,
+// because escapes hide the matched text from the prefilter.
+const MODULES = defineModules([userTypeAnt], AST_PATCH_IDS, anchors);
 const gate = id => `globalThis.__clawgodPatches?.[${JSON.stringify(id)}]!==!1`;
 const literal = (node, value) => node?.type === 'Literal' && node.value === value;
 const propertyName = node => node.computed
@@ -240,9 +246,18 @@ function autoModeSites(fn, functions) {
 
 // One parse per candidate file, shared by every semantic patch. Keep only edit
 // ranges; the large AST can be collected before the next graph chunk is parsed.
-export function scanAstPatches(code) {
+// `modules` is the module-track schedule, overridable so tests can inject
+// fixture modules; production callers keep the default table. This is the raw
+// per-id scan; the exported scanAstPatches below folds cross-id overlaps.
+function scanRawPatches(code, modules) {
   const results = Object.fromEntries(AST_PATCH_IDS.map(id => [id, { matches: [], present: false, patched: false }]));
-  if (!anchors.some(anchor => code.includes(anchor))) return results;
+  // The two tracks have independent prefilter conditions. The inline scan runs
+  // only when a legacy anchor matches; a module with empty anchors opts out of
+  // the prefilter and runs on every parsed file. Neither enabled: skip parsing.
+  const legacyEnabled = anchors.some(anchor => code.includes(anchor));
+  const selectedModules = modules.filter(module =>
+    module.anchors.length === 0 || module.anchors.some(anchor => code.includes(anchor)));
+  if (!legacyEnabled && selectedModules.length === 0) return results;
   const tree = parsePatchSource(code);
   const edit = (id, node, replacement) => {
     results[id].matches.push({ start: node.start, end: node.end, replacement });
@@ -278,7 +293,8 @@ export function scanAstPatches(code) {
       functions.set(node.id.name, node);
     }
   });
-  walk(tree, node => {
+  // Inline semantic branches run only for files the legacy anchors select.
+  if (legacyEnabled) walk(tree, node => {
     if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type) &&
         node.body.type === 'BlockStatement' && !node.async && !node.generator) {
       const id = 'auto-mode-inline-gate';
@@ -372,7 +388,6 @@ export function scanAstPatches(code) {
         !node.async && !node.generator && node.body.body.length === 1 &&
         node.body.body[0].type === 'ReturnStatement') {
       const value = node.body.body[0].argument;
-      if (literal(value, 'external')) edit('user-type-ant', value, '"ant"');
       const standalone = expr => expr?.type === 'BinaryExpression' && expr.operator === '===' &&
         member(expr.left, 'isStandaloneExecutable') && expr.left.object.name === 'Bun' && boolean(expr.right, true);
       const typeofBun = expr => expr?.type === 'BinaryExpression' && expr.operator === '<' &&
@@ -520,15 +535,25 @@ export function scanAstPatches(code) {
       }
     }
   });
-  if ([...wigglyLiterals].some(start => !wigglyHandled.has(start))) {
-    results['wiggly-dove'].present = true;
-    results['wiggly-dove'].matches = [];
+  // Stale reporting belongs to the inline track; it must not fire when only
+  // modules are enabled.
+  if (legacyEnabled) {
+    if ([...wigglyLiterals].some(start => !wigglyHandled.has(start))) {
+      results['wiggly-dove'].present = true;
+      results['wiggly-dove'].matches = [];
+    }
+    if (code.includes('[Tool result missing due to internal error]') && !pairingHandled) {
+      results['tool-result-pairing-recovery'].present = true;
+      results['tool-result-pairing-recovery'].matches = [];
+    }
+    if (results['auto-mode-inline-gate'].present) results['auto-mode-inline-gate'].matches = [];
   }
-  if (code.includes('[Tool result missing due to internal error]') && !pairingHandled) {
-    results['tool-result-pairing-recovery'].present = true;
-    results['tool-result-pairing-recovery'].matches = [];
+  // Migrated patches run on the same tree after the inline scan. selectedModules
+  // already matched this file's prefilter; runModules re-checks anchors so a
+  // direct caller gets the same gating.
+  if (selectedModules.length > 0) {
+    runModules({ code, tree, functions, results, modules: selectedModules });
   }
-  if (results['auto-mode-inline-gate'].present) results['auto-mode-inline-gate'].matches = [];
   return results;
 }
 
@@ -543,4 +568,27 @@ export function applyAstEdits(code, edits) {
   }
   parts.push(code.slice(cursor));
   return parts.join('');
+}
+
+// ─── Combination entry ────────────────────────────────────
+// The combination algorithm lives in ast/combine.mjs so it outlives the inline
+// scan; this file only wires it to the raw scanner, the applicator and the
+// default module table.
+const combination = createAstCombination({
+  ids: AST_PATCH_IDS,
+  scanRaw: scanRawPatches,
+  applyEdits: applyAstEdits,
+  parse: parsePatchSource,
+});
+
+// Explicit entry for callers that want the composed text plus per-id applied
+// counts; tests drive the combination contract through it.
+export function transformAstPatches(code, modules = MODULES) {
+  return combination.transform(code, modules);
+}
+
+// Runner-facing scan: raw results when no ids overlap, otherwise the folded
+// one-edit-per-file form described in ast/combine.mjs.
+export function scanAstPatches(code, modules = MODULES) {
+  return combination.scan(code, modules);
 }

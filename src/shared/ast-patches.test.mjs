@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
-import { AST_PATCH_IDS, scanAstPatches, applyAstEdits, parsePatchSource } from './ast-patches.mjs';
+import { AST_PATCH_IDS, scanAstPatches, applyAstEdits, parsePatchSource, transformAstPatches } from './ast-patches.mjs';
+import { defineModules, runModules, verifyModule } from './ast/engine.mjs';
 
 const source = `
 // function userType(){return"external"} name:"ultraplan"
@@ -180,9 +181,18 @@ assert.equal(driftScan.matches.length, 0);
 assert.equal(driftScan.present, true);
 assert.equal(scanAstPatches("function remoteLogOnly(){log('Remote settings: background refresh')}")['remote-settings-off'].present, false,
   'unrelated remote-settings chunks must not make a reapply look stale');
+
 assert.throws(() => applyAstEdits('abcd', [
   { start: 0, end: 3, replacement: '' }, { start: 1, end: 4, replacement: '' },
 ]), /Overlapping/);
+// Zero-width edits at distinct offsets keep their offsets regardless of order.
+assert.equal(applyAstEdits('abcd', [
+  { start: 3, end: 3, replacement: 'Y' }, { start: 1, end: 1, replacement: 'X' },
+]), 'aXbcYd');
+// An insert at a replacement's start boundary sorts before the replacement.
+assert.equal(applyAstEdits('abcd', [
+  { start: 1, end: 3, replacement: 'R' }, { start: 1, end: 1, replacement: 'I' },
+]), 'aIRd');
 
 // Object boundaries, exact keys, unknown writes and accessors must not be guessed.
 for (const candidate of [
@@ -239,6 +249,7 @@ try {
     for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
       copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
     }
+    cpSync(new URL('./ast', import.meta.url), join(dir, 'ast'), { recursive: true });
     const entry = join(dir, 'cli.original.cjs');
     if (graph) { mkdirSync(join(dir, 'bunfs')); writeFileSync(entry, '// entry'); }
     const target = graph ? join(dir, 'bunfs/commands.js') : entry;
@@ -338,100 +349,72 @@ try {
   assert.equal(secondScan.matches.length, 0);
   assert.equal(secondScan.patched, true);
   assert.equal(secondScan.present, false);
-
-  // Stale detection
-  const staleSource = `
-    const err = "[Tool result missing due to internal error]";
-    function driftedFunction(unrelated) { return unrelated; }
-  `;
-  const staleScan = scanAstPatches(staleSource)['tool-result-pairing-recovery'];
-  assert.equal(staleScan.matches.length, 0);
-  assert.equal(staleScan.present, true);
-  assert.equal(staleScan.patched, false);
 }
 
-// Non-target error generation function negative test:
-// A function generating non-missing errors (e.g. permission errors) in the same
-// file with sentinel must not be modified, and should be reported as stale.
-{
-  const nonTargetSource = `
-    const sentinel = "[Tool result missing due to internal error]";
-    function permissionErrors(history, ids) {
-      void history.length;
-      return ids.map(item => ({
-        type: "tool_result", tool_use_id: item,
-        content: "Permission denied", is_error: true
-      }));
-    }
-  `;
-  const nonTargetScan = scanAstPatches(nonTargetSource)['tool-result-pairing-recovery'];
-  assert.equal(nonTargetScan.matches.length, 0, 'negative case: non-target error function is not matched');
-  assert.equal(nonTargetScan.present, true, 'sentinel present in source triggers stale strategy');
-  assert.equal(nonTargetScan.patched, false);
+// Negative cases with the sentinel present: a drifted site and a non-target
+// error generator (e.g. permission errors) must stay untouched, and are
+// reported as stale rather than patched.
+for (const source of [
+  `const err = "[Tool result missing due to internal error]";
+   function driftedFunction(unrelated) { return unrelated; }`,
+  `const sentinel = "[Tool result missing due to internal error]";
+   function permissionErrors(history, ids) {
+     void history.length;
+     return ids.map(item => ({
+       type: "tool_result", tool_use_id: item,
+       content: "Permission denied", is_error: true
+     }));
+   }`,
+]) {
+  const scan = scanAstPatches(source)['tool-result-pairing-recovery'];
+  assert.equal(scan.matches.length, 0);
+  assert.equal(scan.present, true);
+  assert.equal(scan.patched, false);
 }
 
-// Variable collision avoidance tests:
-// 1. History parameter renamed to _m: should not emit `for(let _m of _m)` which causes ReferenceError.
+// Variable collision avoidance: the generated helper must not reuse the
+// history parameter or the map callback parameter as its own binding, which
+// would produce `for(let _m of _m)` (ReferenceError) or `(_p)=>{let _p;...}`
+// (SyntaxError).
 {
-  const shadowedHistorySource = `
-    function ensureToolResultPairing(_m, ids) {
+  const cases = [
+    ['history parameter', `function ensureToolResultPairing(_m, ids) {
       void _m.length;
       const missingErr = "[Tool result missing due to internal error]";
       return ids.map(item => ({
         type: "tool_result", tool_use_id: item,
         content: missingErr, is_error: true
       }));
-    }
-  `;
-  const scan = scanAstPatches(shadowedHistorySource)['tool-result-pairing-recovery'];
-  assert.equal(scan.matches.length, 1);
-  const patched = applyAstEdits(shadowedHistorySource, scan.matches);
-  parsePatchSource(patched);
-  // Ensure we didn't declare let _m of _m
-  assert.ok(!patched.includes('for(let _m of _m)'), 'fresh variable avoids history parameter name collision');
-
-  // Must execute without ReferenceError on missing fallback
-  const mockHistory = [];
-  const evalResult = runInNewContext(`${patched};ensureToolResultPairing(mockHistory, ["call_none"])`, { mockHistory });
-  assert.equal(evalResult.length, 1);
-  assert.equal(evalResult[0].tool_use_id, 'call_none');
-  assert.equal(evalResult[0].content, '[Tool result missing due to internal error]');
-  assert.equal(evalResult[0].is_error, true);
-}
-
-// 2. Callback parameter renamed to _p: should not emit `(_p)=>{let _p;...}` which causes SyntaxError.
-{
-  const shadowedCallbackSource = `
-    function ensureToolResultPairing(history, ids) {
+    }`, 'for(let _m of _m)'],
+    ['callback parameter', `function ensureToolResultPairing(history, ids) {
       void history.length;
       const missingErr = "[Tool result missing due to internal error]";
       return ids.map(_p => ({
         type: "tool_result", tool_use_id: _p,
         content: missingErr, is_error: true
       }));
-    }
-  `;
-  const scan = scanAstPatches(shadowedCallbackSource)['tool-result-pairing-recovery'];
-  assert.equal(scan.matches.length, 1);
-  const patched = applyAstEdits(shadowedCallbackSource, scan.matches);
-  parsePatchSource(patched);
-  assert.ok(!patched.includes('(_p)=>{let _p;'), 'fresh variable avoids callback parameter name collision');
-
-  // Must execute and recover correctly
-  const mockHistory = [
-    {
+    }`, '(_p)=>{let _p;'],
+  ];
+  for (const [label, source, forbidden] of cases) {
+    const scan = scanAstPatches(source)['tool-result-pairing-recovery'];
+    assert.equal(scan.matches.length, 1, label);
+    const patched = applyAstEdits(source, scan.matches);
+    parsePatchSource(patched);
+    assert.ok(!patched.includes(forbidden), `${label}: fresh variable avoids the collision`);
+    // Must execute: recover the authentic result and synthesize the missing one.
+    const mockHistory = [{
       type: 'user',
       message: {
         content: [{ type: 'tool_result', tool_use_id: 'call_rec', content: 'RECOVERED_OK', is_error: false }]
       }
-    }
-  ];
-  const evalResult = runInNewContext(`${patched};ensureToolResultPairing(mockHistory, ["call_rec", "call_miss"])`, { mockHistory });
-  assert.equal(evalResult.length, 2);
-  assert.equal(evalResult[0].content, 'RECOVERED_OK');
-  assert.equal(evalResult[0].is_error, false);
-  assert.equal(evalResult[1].content, '[Tool result missing due to internal error]');
-  assert.equal(evalResult[1].is_error, true);
+    }];
+    const evalResult = runInNewContext(`${patched};ensureToolResultPairing(mockHistory, ["call_rec", "call_miss"])`, { mockHistory });
+    assert.equal(evalResult.length, 2, label);
+    assert.equal(evalResult[0].content, 'RECOVERED_OK', label);
+    assert.equal(evalResult[0].is_error, false, label);
+    assert.equal(evalResult[1].content, '[Tool result missing due to internal error]', label);
+    assert.equal(evalResult[1].is_error, true, label);
+  }
 }
 
 // Nested functions and parameter shadowing tests:
@@ -473,171 +456,6 @@ try {
   assert.equal(evalResult.length, 2);
   assert.equal(evalResult[0].content, 'inner ok');
   assert.equal(evalResult[1].content, '[Tool result missing due to internal error]');
-}
-
-// End-to-end orphan detection pipeline test:
-// Tests a full pairing repair function that models the real upstream deduplication,
-// orphan check, and synthesis logic.
-// Validates:
-// 1. Before patch: synthesis injects missing errors for missing tool results.
-// 2. After patch: recovers authentic results from message history.
-// 3. True failure preservation: real errors retain is_error: true and original error content.
-// 4. Fallback: unseen tool_use correctly synthesizes missing error.
-// 5. Pairing constraints: every assistant tool_use has exactly one tool_result in the following user message.
-{
-  const fullPairingSource = `
-    const SENTINEL = "[Tool result missing due to internal error]";
-    function ensureToolResultPairing(messages) {
-      let repaired = [];
-      let modified = false;
-      let seen = new Set();
-      for (let i = 0; i < messages.length; i++) {
-        let msg = messages[i];
-        if (msg.type !== "assistant") {
-          repaired.push(msg);
-          continue;
-        }
-        let assistantIds = new Set();
-        let valid = msg.message.content.filter(b => {
-          if (b.type === "tool_use") {
-            if (seen.has(b.id)) { modified = true; return false; }
-            seen.add(b.id);
-            assistantIds.add(b.id);
-          }
-          return true;
-        });
-        repaired.push(valid.length !== msg.message.content.length ? { ...msg, message: { ...msg.message, content: valid } } : msg);
-        let nextMsg = messages[i + 1];
-        let userIds = new Set();
-        if (nextMsg?.type === "user" && Array.isArray(nextMsg.message.content)) {
-          for (let b of nextMsg.message.content) {
-            if (b?.type === "tool_result") userIds.add(b.tool_use_id);
-          }
-        }
-        let missing = [...assistantIds].filter(id => !userIds.has(id));
-        let unexpected = [...userIds].filter(id => !assistantIds.has(id));
-        if (missing.length === 0 && unexpected.length === 0) continue;
-        modified = true;
-        let synthetic = missing.map(id => ({
-          type: "tool_result",
-          tool_use_id: id,
-          content: SENTINEL,
-          is_error: true
-        }));
-        if (nextMsg?.type === "user") {
-          let content = Array.isArray(nextMsg.message.content) ? nextMsg.message.content : [{ type: "text", text: nextMsg.message.content }];
-          if (unexpected.length > 0) {
-            let unexpSet = new Set(unexpected);
-            content = content.filter(b => !(b?.type === "tool_result" && unexpSet.has(b.tool_use_id)));
-          }
-          i++;
-          repaired.push({ ...nextMsg, message: { ...nextMsg.message, content: [...synthetic, ...content] } });
-        } else if (synthetic.length > 0) {
-          repaired.push({ type: "user", message: { content: synthetic } });
-        }
-      }
-      return modified ? repaired : messages;
-    }
-  `;
-
-  // Realistic sanitized sequence:
-  // Turn 1:
-  // assistant calls fetch_spec.
-  // user returns fetch_spec result, AND pre-delivers concurrent results for run_batch (success)
-  // and lint_check (failure: exit code 1) from parallel execution.
-  // Turn 2:
-  // assistant plans next step and emits run_batch, lint_check, and a totally fresh build_final.
-  // user responds with plain text "continue", missing results in immediate next turn.
-  const sampleMessages = [
-    {
-      type: 'assistant',
-      message: {
-        content: [{ type: 'tool_use', id: 'call_fetch', name: 'fetch_spec', input: {} }]
-      }
-    },
-    {
-      type: 'user',
-      message: {
-        content: [
-          { type: 'tool_result', tool_use_id: 'call_fetch', content: 'SPEC CONTENT OK', is_error: false },
-          { type: 'tool_result', tool_use_id: 'call_batch', content: 'PASS: 42 batch tests executed', is_error: false },
-          { type: 'tool_result', tool_use_id: 'call_lint', content: 'exit code 1: trailing whitespace in parser.js', is_error: true }
-        ]
-      }
-    },
-    {
-      type: 'assistant',
-      message: {
-        content: [
-          { type: 'tool_use', id: 'call_batch', name: 'run_batch', input: {} },
-          { type: 'tool_use', id: 'call_lint', name: 'lint_check', input: {} },
-          { type: 'tool_use', id: 'call_build', name: 'build_final', input: {} }
-        ]
-      }
-    },
-    {
-      type: 'user',
-      message: {
-        content: [{ type: 'text', text: 'continue' }]
-      }
-    }
-  ];
-
-  // 1. Verify unpatched baseline: injects synthetic missing errors
-  const unpatchedResult = runInNewContext(`${fullPairingSource};ensureToolResultPairing(sampleMessages)`, {
-    sampleMessages: structuredClone(sampleMessages)
-  });
-  const unpatchedTurn2User = unpatchedResult[3];
-  const unpatchedBatchResult = unpatchedTurn2User.message.content.find(b => b.tool_use_id === 'call_batch');
-  const unpatchedLintResult = unpatchedTurn2User.message.content.find(b => b.tool_use_id === 'call_lint');
-  const unpatchedBuildResult = unpatchedTurn2User.message.content.find(b => b.tool_use_id === 'call_build');
-
-  assert.equal(unpatchedBatchResult.content, '[Tool result missing due to internal error]', 'unpatched injects missing error');
-  assert.equal(unpatchedBatchResult.is_error, true);
-  assert.equal(unpatchedLintResult.content, '[Tool result missing due to internal error]', 'unpatched overwrites real lint error');
-  assert.equal(unpatchedBuildResult.content, '[Tool result missing due to internal error]');
-
-  // 2. Scan and patch full pairing function
-  const scan = scanAstPatches(fullPairingSource)['tool-result-pairing-recovery'];
-  assert.equal(scan.matches.length, 1);
-  const patched = applyAstEdits(fullPairingSource, scan.matches);
-  parsePatchSource(patched);
-
-  // 3. Verify patched execution
-  const patchedResult = runInNewContext(`${patched};ensureToolResultPairing(sampleMessages)`, {
-    sampleMessages: structuredClone(sampleMessages)
-  });
-  const patchedTurn2User = patchedResult[3];
-  const patchedBatchResult = patchedTurn2User.message.content.find(b => b.tool_use_id === 'call_batch');
-  const patchedLintResult = patchedTurn2User.message.content.find(b => b.tool_use_id === 'call_lint');
-  const patchedBuildResult = patchedTurn2User.message.content.find(b => b.tool_use_id === 'call_build');
-
-  // Verify successful result recovery
-  assert.equal(patchedBatchResult.content, 'PASS: 42 batch tests executed', 'recovers authentic success result');
-  assert.equal(patchedBatchResult.is_error, false);
-
-  // Verify authentic failure state preservation
-  assert.equal(patchedLintResult.content, 'exit code 1: trailing whitespace in parser.js', 'preserves real error description');
-  assert.equal(patchedLintResult.is_error, true, 'strictly preserves authentic failure state (is_error: true)');
-
-  // Verify missing fallback
-  assert.equal(patchedBuildResult.content, '[Tool result missing due to internal error]', 'fallback to synthesized error when truly absent');
-  assert.equal(patchedBuildResult.is_error, true);
-
-  // 4. Verify Anthropic API pairing constraints
-  for (let i = 0; i < patchedResult.length; i++) {
-    const msg = patchedResult[i];
-    if (msg.type === 'assistant') {
-      const next = patchedResult[i + 1];
-      assert.ok(next && next.type === 'user', 'every assistant message must be followed by a user message');
-      const toolUses = msg.message.content.filter(b => b.type === 'tool_use');
-      const toolResults = next.message.content.filter(b => b.type === 'tool_result');
-      const resultIdSet = new Set(toolResults.map(r => r.tool_use_id));
-      for (const tu of toolUses) {
-        assert.ok(resultIdSet.has(tu.id), `every tool_use (${tu.id}) has a corresponding tool_result`);
-      }
-    }
-  }
 }
 
 // Same-spelled identifiers must resolve to their actual lexical bindings.
@@ -700,6 +518,597 @@ try {
     assert.equal(recovered[2].content, sentinel);
   }
   assert.equal(scanAstPatches(patched)['tool-result-pairing-recovery'].patched, true);
+}
+
+// Module engine protocol: startup validation, anchor gating, ownership and
+// stale semantics. Exercised directly because the integration fixtures only
+// reach the happy path.
+{
+  const probeModule = (overrides = {}) => ({ id: 'probe', anchors: ['probe-anchor'], scan() {}, ...overrides });
+  for (const [label, entries, pattern, ids = ['probe'], legacyAnchors = ['probe-anchor']] of [
+    ['unknown export', [probeModule({ extra: true })], /unsupported name 'extra'/],
+    ['missing fields', [{ id: 'probe', anchors: ['probe-anchor'] }], /must export id, anchors and scan/],
+    ['scan not a function', [probeModule({ scan: undefined })], /must export scan/],
+    ['empty id', [probeModule({ id: '' })], /non-empty string id/],
+    ['inherited fields', [Object.create(probeModule())], /must export id, anchors and scan/],
+    ['sparse anchors', [probeModule({ anchors: Array(3) })], /anchors array/],
+    ['unlisted id', [probeModule()], /not listed in AST_PATCH_IDS/, ['other-id']],
+    ['new anchor widens the prefilter', [probeModule({ anchors: ['other-anchor'] })],
+      /not in the legacy anchors list/, ['probe'], ['probe-anchor']],
+    ['duplicate id', [probeModule(), probeModule()], /duplicate AST patch id/],
+    ['verify not a function', [probeModule({ verify: true })], /must export verify as a function/],
+  ]) {
+    assert.throws(() => defineModules(entries, ids, legacyAnchors), pattern, label);
+  }
+  defineModules([probeModule()], ['probe'], ['probe-anchor']);
+  // Empty anchors are valid and mean "no prefilter".
+  defineModules([probeModule({ anchors: [] })], ['probe'], ['probe-anchor']);
+  // verify is optional, but once exported it is part of the module contract.
+  defineModules([probeModule({ verify: () => true })], ['probe'], ['probe-anchor']);
+  assert.equal(verifyModule({ id: 'probe', verify: () => true }, {}), true);
+  assert.equal(verifyModule({ id: 'probe', verify: () => 'truthy' }, {}), false,
+    'only a strict true proves completion');
+  assert.throws(() => verifyModule({ id: 'probe' }, {}), /exports no verify/);
+
+  const tree = parsePatchSource('function outer(){return 1}');
+  const dispatch = (code, scan, anchors = ['probe-anchor']) => {
+    const results = { probe: { matches: [], present: false, patched: false } };
+    const seen = [];
+    runModules({
+      code, tree, functions: new Map(), results,
+      modules: [{
+        id: 'probe', anchors,
+        scan(ctx) {
+          seen.push(ctx.nodes('FunctionDeclaration').length, Object.isFrozen(ctx.nodes('FunctionDeclaration')));
+          scan?.(ctx);
+        },
+      }],
+    });
+    return { result: results.probe, seen };
+  };
+
+  // Anchor absent: no dispatch.
+  assert.deepEqual(dispatch('nothing here'), { result: { matches: [], present: false, patched: false }, seen: [] });
+
+  // Empty anchors skip the prefilter: dispatch even without any anchor.
+  assert.deepEqual(dispatch('nothing here', undefined, []).seen, [1, true]);
+
+  // Anchor present: nodes come from one frozen index, in traversal order.
+  assert.deepEqual(dispatch('probe-anchor').seen, [1, true]);
+
+  // stale discards collected edits and ignores later edits.
+  const staled = dispatch('probe-anchor', ctx => {
+    ctx.edit(ctx.tree.body[0], 'first');
+    ctx.stale(ctx.tree.body[0], 'drifted');
+    ctx.edit(ctx.tree.body[0], 'second');
+  });
+  assert.deepEqual(staled.result.matches, []);
+  assert.equal(staled.result.stale.reason, 'drifted');
+  assert.equal(staled.result.present, true,
+    'stale must surface as present, or the runner skips the drift');
+
+  // A leftover inline branch for the same id fails loudly instead of double-writing.
+  const leftover = { matches: [], present: false, patched: true };
+  assert.throws(() => runModules({
+    code: 'probe-anchor', tree, functions: new Map(), results: { probe: leftover },
+    modules: [{ id: 'probe', anchors: ['probe-anchor'], scan() {} }],
+  }), /already written by the inline scan/);
+}
+
+// Dual-track entry behavior. Fixture modules are injected through the second
+// scanAstPatches argument, so they never enter the production MODULES table.
+{
+  const programEdit = replacement => ({
+    id: 'user-type-ant', anchors: [],
+    scan({ nodes, edit }) { for (const node of nodes('Program')) edit(node, replacement); },
+  });
+
+  // Empty source: no legacy anchor, yet the empty-anchor module runs. Every
+  // other id keeps its initial empty result.
+  const empty = scanAstPatches('', [programEdit('/*fixture*/')]);
+  assert.deepEqual(empty['user-type-ant'].matches, [{ start: 0, end: 0, replacement: '/*fixture*/' }]);
+  for (const id of AST_PATCH_IDS) {
+    if (id === 'user-type-ant') continue;
+    assert.deepEqual(empty[id], { matches: [], present: false, patched: false }, id);
+  }
+
+  // Auto-mode gate text without any legacy anchor: the module sees the parsed
+  // tree and functions, while the inline track stays disabled and must not
+  // report the gate as patched.
+  const gateOnly = 'function gated(){return globalThis.__clawgodPatches?.["auto-mode-inline-gate"]}';
+  const calls = [];
+  const isolated = scanAstPatches(gateOnly, [{
+    id: 'user-type-ant', anchors: [], scan(ctx) { calls.push(ctx); },
+  }]);
+  assert.equal(calls.length, 1, 'empty anchors dispatch on every parsed file');
+  assert.ok(calls[0].functions.size > 0, 'modules share the functions table');
+  assert.equal(calls[0].nodes('Program').length, 1);
+  assert.deepEqual(isolated['auto-mode-inline-gate'], { matches: [], present: false, patched: false },
+    'the inline track must not run without legacy anchors');
+
+  // Non-empty anchors still gate the module at entry level.
+  const gatedModule = {
+    id: 'user-type-ant', anchors: ['fixture-anchor'],
+    scan({ nodes, edit }) { for (const node of nodes('Program')) edit(node, 'gated'); },
+  };
+  assert.deepEqual(scanAstPatches('const value = 1;', [gatedModule])['user-type-ant'].matches, []);
+  assert.equal(scanAstPatches("const value = 'fixture-anchor';", [gatedModule])['user-type-ant'].matches.length, 1);
+
+  // A narrow raw-text anchor misses decoded literals with escapes. The
+  // migrated module keeps the full prefilter, so it stays on exactly the
+  // files the inline branch saw.
+  const escapedAnt = "var mode='remote-settings.json';function userType(){return\"\\x65xternal\"}";
+  assert.equal(scanAstPatches(escapedAnt)['user-type-ant'].matches.length, 1);
+  // Without any legacy anchor the file is still not parsed, as before.
+  assert.equal(scanAstPatches('function userType(){return"\\x65xternal"}')['user-type-ant'].matches.length, 0);
+}
+
+// Combination (unit C). Fixture modules borrow real AST_PATCH_IDS so the
+// temp-copy runner accepts them through defineModules; the production
+// MODULES table is never extended. Scans are written to settle themselves:
+// a fixture that keeps matching its own output fails the idempotency rescan.
+{
+  const isLiteralReturn = (fn, value) => {
+    const statement = fn.body?.body?.[0];
+    return statement?.type === 'ReturnStatement' && statement.argument?.type === 'Literal' &&
+      statement.argument.value === value;
+  };
+  // Whole-node replacement: adds a parameter to the zero-arg f().
+  const addParameter = {
+    id: 'ultraplan', anchors: [],
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name !== 'f' || fn.params.length || !isLiteralReturn(fn, 1)) continue;
+        edit(fn, 'function f(x){return 1}');
+      }
+    },
+    verify: ({ after, matches }) => matches.length === 1 && after.code.includes('function f(x){'),
+  };
+  // Child-node replacement: every `return 1` becomes `return 2`.
+  const returnTwo = {
+    id: 'voice-mode', anchors: [],
+    scan({ nodes, edit }) {
+      for (const statement of nodes('ReturnStatement')) {
+        const argument = statement.argument;
+        if (argument?.type === 'Literal' && argument.value === 1) edit(argument, '2');
+      }
+    },
+    verify: ({ after }) => !after.code.includes('return 1') && after.code.includes('return 2'),
+  };
+  // Same child edit, restricted to g(), so it does not overlap addParameter.
+  const returnTwoInG = {
+    ...returnTwo,
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name !== 'g') continue;
+        const argument = fn.body?.body?.[0]?.argument;
+        if (argument?.type === 'Literal' && argument.value === 1) edit(argument, '2');
+      }
+    },
+    verify: ({ after }) => after.code.includes('function g(){return 2}'),
+  };
+
+  // 1. Composition: the later id sees the earlier layer and settles on it.
+  const composed = transformAstPatches('function f(){return 1}', [addParameter, returnTwo]);
+  assert.equal(composed.conflict, null);
+  assert.equal(composed.code, 'function f(x){return 2}');
+  assert.equal(composed.results.ultraplan.applied, 1);
+  assert.equal(composed.results['voice-mode'].applied, 1);
+  const settled = transformAstPatches(composed.code, [addParameter, returnTwo]);
+  assert.equal(settled.conflict, null);
+  assert.equal(settled.code, composed.code, 'a settled composition must not change again');
+  assert.equal(settled.results.ultraplan.applied + settled.results['voice-mode'].applied, 0);
+
+  // 2. A rewrite that removes B's target must not pass as "nothing to do".
+  const eraseTarget = {
+    id: 'ultraplan', anchors: [],
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name === 'f' && !fn.params.length && isLiteralReturn(fn, 1)) edit(fn, 'function f(){}');
+      }
+    },
+    verify: ({ after }) => after.code.includes('function f(){}'),
+  };
+  const lost = transformAstPatches('function f(){return 1}', [eraseTarget, returnTwo]);
+  assert.deepEqual(lost.conflict, { ids: ['voice-mode'], reason: 'lost or unverified target' });
+  assert.equal(lost.code, 'function f(){return 1}', 'a refused combination returns the original text');
+  // A participant with no effective edit on its layer is not silently
+  // completed: it stays pending while later ids still run, and its verify
+  // decides the outcome.
+  const tolerantReturn = {
+    id: 'voice-mode', anchors: [],
+    scan: returnTwo.scan,
+    verify: ({ after }) => !after.code.includes('return 1'),
+  };
+  const laterInsert = {
+    id: 'geo-stego-date', anchors: [],
+    scan({ code, edit }) {
+      if (!code.includes('/*c*/')) edit({ start: 0, end: 0 }, '/*c*/');
+    },
+    verify: ({ after }) => after.code.includes('/*c*/'),
+  };
+  const continued = transformAstPatches('function f(){return 1}', [eraseTarget, tolerantReturn, laterInsert]);
+  assert.equal(continued.conflict, null);
+  assert.equal(continued.code, '/*c*/function f(){}');
+  assert.equal(continued.results['voice-mode'].applied, 0, 'a vanished mid-layer target stays unapplied');
+
+  // 3. Every layered participant must prove itself before anything applies.
+  const withoutVerify = { id: 'voice-mode', anchors: [], scan: returnTwo.scan };
+  const unproven = transformAstPatches('function f(){return 1}', [eraseTarget, withoutVerify]);
+  assert.deepEqual(unproven.conflict, { ids: ['voice-mode'], reason: 'module has no verify' });
+  assert.equal(unproven.code, 'function f(){return 1}');
+  assert.equal(unproven.results.ultraplan.applied, 0, 'no layer runs when a participant is refused');
+  const legacySource = "var rollout='tengu_wiggly_dove';" +
+    'function allowed(){if(!firstParty())return false;if(!lookup(rollout,false))return false;return routeAllowed();}';
+  const overwriteAllowed = {
+    id: 'ultraplan', anchors: [], verify: () => true,
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name === 'allowed') edit(fn, 'function allowed(){}');
+      }
+    },
+  };
+  const legacy = transformAstPatches(legacySource, [overwriteAllowed]);
+  assert.deepEqual(legacy.conflict, { ids: ['wiggly-dove'], reason: 'legacy patch cannot participate in combination' });
+
+  // 4. One id's sites form a single group: both apply on the same layer.
+  const grouped = transformAstPatches('function f(){return 1}function g(){return 1}', [addParameter, returnTwo]);
+  assert.equal(grouped.conflict, null);
+  assert.equal(grouped.code, 'function f(x){return 2}function g(){return 2}');
+  assert.equal(grouped.results.ultraplan.applied, 1);
+  assert.equal(grouped.results['voice-mode'].applied, 2, 'the whole group applies together');
+  // Self-overlap is that id's implementation error, never a conflict.
+  const selfOverlap = {
+    id: 'ultraplan', anchors: [],
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) { edit(fn, 'X'); edit(fn.body, 'Y'); }
+    },
+  };
+  assert.throws(() => transformAstPatches('function f(){return 1}', [selfOverlap]),
+    /AST patch 'ultraplan' produced overlapping edits/);
+  // Same-offset zero-width edits inside one group are rejected the same way.
+  const duplicatedInsert = {
+    id: 'ultraplan', anchors: [],
+    scan({ edit }) { edit({ start: 0, end: 0 }, 'A'); edit({ start: 0, end: 0 }, 'B'); },
+  };
+  assert.throws(() => transformAstPatches('var x=1;', [duplicatedInsert]),
+    /AST patch 'ultraplan' produced overlapping edits/);
+  // The runner-facing scan does not compose a single id's self-overlap: the
+  // raw matches pass through and the applicator rejects them later, exactly
+  // as the pre-migration path did.
+  assert.equal(scanAstPatches('function f(){return 1}', [selfOverlap]).ultraplan.matches.length, 2);
+  assert.deepEqual(scanAstPatches('var x=1;', [duplicatedInsert]).ultraplan.matches.map(m => m.replacement),
+    ['A', 'B']);
+  // A cross-id overlap forces combination, so every initial group is checked
+  // first: a self-overlapping module cannot be rescued by a later layer.
+  const mixedSelfOverlap = {
+    id: 'voice-mode', anchors: [], verify: () => true,
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name !== 'f') continue;
+        if (fn.params.length) edit(fn.body.body[0].argument, '2');
+        else { edit(fn.body, '{}'); edit(fn.body.body[0], 'return 0'); }
+      }
+    },
+  };
+  assert.throws(() => transformAstPatches('function f(){return 1}', [addParameter, mixedSelfOverlap]),
+    /AST patch 'voice-mode' produced overlapping edits/);
+  assert.throws(() => scanAstPatches('function f(){return 1}', [addParameter, mixedSelfOverlap]),
+    /AST patch 'voice-mode' produced overlapping edits/);
+  // The check repeats on every layer, not only on the initial scan.
+  const splitsOnlyLater = {
+    id: 'voice-mode', anchors: [], verify: () => true,
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name !== 'f') continue;
+        if (!fn.params.length) edit(fn.body.body[0].argument, '2');
+        else { edit(fn.body, '{}'); edit(fn.body.body[0], 'return 0'); }
+      }
+    },
+  };
+  const overlapsLater = {
+    id: 'ultraplan', anchors: [], verify: ({ after }) => after.code.includes('function f(x){'),
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name === 'f' && !fn.params.length) edit(fn, 'function f(x){return 1}');
+      }
+    },
+  };
+  assert.throws(() => transformAstPatches('function f(){return 1}', [overlapsLater, splitsOnlyLater]),
+    /AST patch 'voice-mode' produced overlapping edits/);
+
+  // 5. Two empty-anchor Program modules apply once each, in id order.
+  const prependInit = {
+    id: 'geo-stego-date', anchors: [],
+    scan({ code, nodes, edit }) {
+      if (code.includes('var a=1')) return;
+      for (const program of nodes('Program')) edit(program, `var a=1;${code.slice(program.start, program.end)}`);
+    },
+    verify: ({ after }) => after.code.includes('var a=1'),
+  };
+  const appendInit = {
+    id: 'remote-settings-off', anchors: [],
+    scan({ code, nodes, edit }) {
+      if (code.includes('var b=2')) return;
+      for (const program of nodes('Program')) edit(program, `${code.slice(program.start, program.end)};var b=2`);
+    },
+    verify: ({ after }) => after.code.includes('var b=2'),
+  };
+  const initialized = transformAstPatches('var x=1;', [prependInit, appendInit]);
+  assert.equal(initialized.conflict, null);
+  assert.equal(initialized.code, 'var a=1;var x=1;;var b=2');
+  assert.equal(initialized.results['geo-stego-date'].applied, 1);
+  assert.equal(initialized.results['remote-settings-off'].applied, 1);
+  // A module that keeps matching its own output fails the rescan.
+  const unguardedInit = {
+    id: 'remote-settings-off', anchors: [], verify: () => true,
+    scan({ code, nodes, edit }) {
+      for (const program of nodes('Program')) edit(program, `/*c*/${code.slice(program.start, program.end)}`);
+    },
+  };
+  const unstable = transformAstPatches('var x=1;', [prependInit, unguardedInit]);
+  assert.deepEqual(unstable.conflict, { ids: ['remote-settings-off'], reason: 'idempotency check failed' });
+  assert.equal(unstable.code, 'var x=1;');
+  // A participant whose matcher goes stale on the final text is not settled
+  // either: the next run would refuse the file instead of skipping it.
+  const staleAfterCombine = {
+    id: 'voice-mode', anchors: [], verify: () => true,
+    scan({ code, nodes, edit, stale }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (code.includes('function f(x)')) { stale(fn, 'drift'); return; }
+        if (!fn.params.length) edit(fn.body.body[0].argument, '2');
+      }
+    },
+  };
+  const staleRescan = transformAstPatches('function f(){return 1}', [addParameter, staleAfterCombine]);
+  assert.deepEqual(staleRescan.conflict, { ids: ['voice-mode'], reason: 'idempotency check failed' });
+  assert.equal(staleRescan.code, 'function f(){return 1}');
+  assert.throws(() => scanAstPatches('function f(){return 1}', [addParameter, staleAfterCombine]),
+    /AST combination conflict: idempotency check failed \(voice-mode\)/);
+
+  // 5b. Same-offset zero-width edits from two ids are ordered by layer.
+  const insertBefore = id => ({
+    id, anchors: [],
+    scan({ code, edit }) {
+      if (!code.includes(`/*${id}*/`)) edit({ start: 0, end: 0 }, `/*${id}*/`);
+    },
+    verify: ({ after }) => after.code.includes(`/*${id}*/`),
+  });
+  const ordered = transformAstPatches('var x=1;', [insertBefore('geo-stego-date'), insertBefore('remote-settings-off')]);
+  assert.equal(ordered.conflict, null);
+  assert.equal(ordered.code, '/*remote-settings-off*//*geo-stego-date*/var x=1;',
+    'a later id inserts at the same offset after the earlier layer');
+
+  // 6. An id with no initial edit never runs, even when a layer creates a
+  // match for it.
+  const awaken = {
+    id: 'geo-stego-date', anchors: [],
+    scan({ nodes, edit }) {
+      for (const statement of nodes('ReturnStatement')) {
+        if (statement.argument?.type === 'Literal' && statement.argument.value === 3) edit(statement.argument, '4');
+      }
+    },
+  };
+  const rewriteBody = {
+    id: 'ultraplan', anchors: [],
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name === 'f' && !fn.params.length && isLiteralReturn(fn, 1)) edit(fn, 'function f(){return 3}');
+      }
+    },
+    verify: ({ after }) => after.code.includes('return 3'),
+  };
+  const touchReturn = {
+    id: 'voice-mode', anchors: [],
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name === 'f' && isLiteralReturn(fn, 1)) edit(fn.body.body[0], 'return 1;void 0');
+      }
+    },
+    verify: ({ after }) => !after.code.includes('return 1'),
+  };
+  const awake = transformAstPatches('function f(){return 1}', [rewriteBody, touchReturn, awaken]);
+  assert.equal(awake.conflict, null, 'a non-participant match is ignored, not an error');
+  assert.equal(awake.code, 'function f(){return 3}');
+  assert.equal(awake.results['geo-stego-date'].applied, 0);
+
+  // 7. Without cross-id overlap the transform matches the historical
+  // collect-then-apply path byte for byte.
+  const splitSource = 'function f(){return 1}function g(){return 1}';
+  const historical = Object.values(scanAstPatches(splitSource, [addParameter, returnTwoInG]))
+    .flatMap(result => result.matches)
+    .filter(match => match.replacement !== splitSource.slice(match.start, match.end));
+  const fast = transformAstPatches(splitSource, [addParameter, returnTwoInG]);
+  assert.equal(fast.conflict, null);
+  assert.equal(fast.code, applyAstEdits(splitSource, historical));
+  assert.equal(fast.code, 'function f(x){return 1}function g(){return 2}');
+  assert.equal(fast.results.ultraplan.applied, 1);
+  assert.equal(fast.results['voice-mode'].applied, 1);
+
+  // 8. The runner-facing scan folds a composition into one whole-file edit on
+  // the first participant. Later participants keep their matches as no-ops so
+  // a `present` id never falls into the old runner's stale branch, and the
+  // historical flush still applies exactly one edit.
+  const runnerSource = 'function f(){return 1}';
+  const runnerScan = scanAstPatches(runnerSource, [addParameter, returnTwo]);
+  assert.deepEqual(runnerScan.ultraplan.matches,
+    [{ start: 0, end: runnerSource.length, replacement: 'function f(x){return 2}' }]);
+  assert.equal(runnerScan['voice-mode'].matches.length, 1);
+  const secondary = runnerScan['voice-mode'].matches[0];
+  assert.equal(secondary.replacement, runnerSource.slice(secondary.start, secondary.end),
+    'secondary participant edits collapse to no-ops');
+  assert.equal(applyAstEdits(runnerSource, Object.values(runnerScan).flatMap(r =>
+    r.matches.filter(m => m.replacement !== runnerSource.slice(m.start, m.end)))),
+    'function f(x){return 2}');
+}
+
+// Combination through the real runner: each temp copy appends fixture modules
+// to its own MODULES table, so the production table stays untouched.
+{
+  const root = mkdtempSync(join(tmpdir(), 'clawgod-combination-test-'));
+  const successFixture = `
+export const modules = [
+  {
+    id: 'ultraplan', anchors: [],
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name !== 'f' || fn.params.length) continue;
+        const statement = fn.body.body[0];
+        if (statement?.type !== 'ReturnStatement' || statement.argument?.type !== 'Literal' ||
+            statement.argument.value !== 1) continue;
+        edit(fn, 'function f(x){return 1}');
+      }
+    },
+    verify: ({ after, matches }) => matches.length === 1 && after.code.includes('function f(x){'),
+  },
+  {
+    id: 'voice-mode', anchors: [],
+    // present:true rides along with a real match, so the folded no-op must
+    // keep the old runner out of its stale branch (a match-less present id
+    // would fail the run even though the composition verified).
+    scan({ nodes, edit, result }) {
+      for (const statement of nodes('ReturnStatement')) {
+        const argument = statement.argument;
+        if (argument?.type === 'Literal' && argument.value === 1) {
+          result.present = true;
+          edit(argument, '2');
+        }
+      }
+    },
+    verify: ({ after }) => after.code.includes('return 2') && !after.code.includes('return 1'),
+  },
+];
+`;
+  const failureFixture = `
+export const modules = [
+  {
+    id: 'ultraplan', anchors: [],
+    scan({ nodes, edit }) {
+      for (const fn of nodes('FunctionDeclaration')) {
+        if (fn.id?.name === 'f' && !fn.params.length) edit(fn, 'function f(){}');
+      }
+    },
+    verify: ({ after }) => after.code.includes('function f(){}'),
+  },
+  {
+    id: 'voice-mode', anchors: [],
+    scan({ nodes, edit }) {
+      for (const statement of nodes('ReturnStatement')) {
+        const argument = statement.argument;
+        if (argument?.type === 'Literal' && argument.value === 1) edit(argument, '2');
+      }
+    },
+    verify: ({ after }) => after.code.includes('return 2'),
+  },
+];
+`;
+  const prepare = (label, fixture) => {
+    const dir = join(root, label);
+    mkdirSync(dir);
+    for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
+      copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
+    }
+    cpSync(new URL('./ast', import.meta.url), join(dir, 'ast'), { recursive: true });
+    writeFileSync(join(dir, 'ast/combination-fixture.mjs'), fixture);
+    const source = readFileSync(join(dir, 'ast-patches.mjs'), 'utf8');
+    assert.ok(source.includes('defineModules([userTypeAnt]'), 'fixture wiring depends on the default MODULES line');
+    writeFileSync(join(dir, 'ast-patches.mjs'),
+      `import * as combinationFixture from './ast/combination-fixture.mjs';\n` +
+      source.replace('defineModules([userTypeAnt]', 'defineModules([userTypeAnt, ...combinationFixture.modules]'));
+    return dir;
+  };
+  try {
+    for (const graph of [false, true]) {
+      const dir = prepare(graph ? 'apply-graph' : 'apply-legacy', successFixture);
+      const entry = join(dir, 'cli.original.cjs');
+      if (graph) { mkdirSync(join(dir, 'bunfs')); writeFileSync(entry, '// entry'); }
+      const target = graph ? join(dir, 'bunfs/commands.js') : entry;
+      const run = (...args) => spawnSync(process.execPath, [join(dir, 'patch.mjs'), ...args], { encoding: 'utf8' });
+      const source = 'function f(){return 1}var unrelated=1;';
+      const patched = 'function f(x){return 2}var unrelated=1;';
+      writeFileSync(target, source);
+
+      const dry = run('--dry-run');
+      assert.equal(dry.status, 0, dry.stderr + dry.stdout);
+      // A cross-id overlap folds into one whole-file replacement credited to
+      // the first participant. The second participant's matches survive as
+      // no-ops, so it reports "no change needed" instead of going stale, and
+      // the file still receives both edits.
+      assert.match(dry.stdout, /Ultraplan enable \(1 replacement in 1 file\)/);
+      assert.match(dry.stdout, /Voice Mode enable \(bypass GrowthBook kill\) \(no change needed\)/);
+      assert.equal(readFileSync(target, 'utf8'), source, 'dry-run must not write');
+
+      const verified = run('--verify');
+      assert.equal(verified.status, 0, verified.stderr + verified.stdout);
+      assert.match(verified.stdout, /Ultraplan enable — 1 match\(es\), not yet applied/);
+      assert.match(verified.stdout,
+        /Voice Mode enable \(bypass GrowthBook kill\) — 1 match\(es\), not yet applied/);
+      assert.equal(readFileSync(target, 'utf8'), source, 'verify must not write');
+
+      assert.equal(run('--capture-clean-source').status, 0);
+      const first = run();
+      assert.equal(first.status, 0, first.stderr + first.stdout);
+      assert.equal(readFileSync(target, 'utf8'), patched);
+      const second = run();
+      assert.equal(second.status, 0, second.stderr + second.stdout);
+      // A normal run starts from the clean source backup, so a settled file
+      // reproduces the same composition and the same status lines.
+      assert.equal(second.stdout.match(/Result:.*/)[0], first.stdout.match(/Result:.*/)[0]);
+      assert.equal(readFileSync(target, 'utf8'), patched, 'repeated application is stable');
+      assert.equal(run('--revert').status, 0);
+      assert.equal(readFileSync(target, 'utf8'), source);
+    }
+
+    // Multi-file graph run: a folded file and a single-participant file are
+    // patched in the same run, and --revert restores both.
+    {
+      const dir = prepare('apply-graph-multi', successFixture);
+      mkdirSync(join(dir, 'bunfs'));
+      writeFileSync(join(dir, 'cli.original.cjs'), '// entry');
+      const folded = join(dir, 'bunfs/commands.js');
+      const single = join(dir, 'bunfs/other.js');
+      const foldedSource = 'function f(){return 1}';
+      const singleSource = 'function g(){return 1}';
+      writeFileSync(folded, foldedSource);
+      writeFileSync(single, singleSource);
+      const run = (...args) => spawnSync(process.execPath, [join(dir, 'patch.mjs'), ...args], { encoding: 'utf8' });
+      assert.equal(run('--capture-clean-source').status, 0);
+      const applied = run();
+      assert.equal(applied.status, 0, applied.stderr + applied.stdout);
+      assert.equal(readFileSync(folded, 'utf8'), 'function f(x){return 2}',
+        'the folded file gets the composed text');
+      assert.equal(readFileSync(single, 'utf8'), 'function g(){return 2}',
+        'a single-participant file keeps the per-id edit');
+      assert.equal(run('--revert').status, 0);
+      assert.equal(readFileSync(folded, 'utf8'), foldedSource);
+      assert.equal(readFileSync(single, 'utf8'), singleSource);
+    }
+
+    // A refused combination aborts every write mode, --tolerate-stale included,
+    // and no other file in the run is written either.
+    for (const graph of [false, true]) {
+      const dir = prepare(graph ? 'refuse-graph' : 'refuse-legacy', failureFixture);
+      const entry = join(dir, 'cli.original.cjs');
+      if (graph) { mkdirSync(join(dir, 'bunfs')); writeFileSync(entry, '// entry'); }
+      const target = graph ? join(dir, 'bunfs/commands.js') : entry;
+      const run = (...args) => spawnSync(process.execPath, [join(dir, 'patch.mjs'), ...args], { encoding: 'utf8' });
+      const source = 'function f(){return 1}';
+      writeFileSync(target, source);
+      const clean = graph ? join(dir, 'bunfs/clean.js') : null;
+      const cleanSource = 'function g(){return 1}';
+      if (clean) writeFileSync(clean, cleanSource);
+      for (const args of [[], ['--dry-run'], ['--verify'], ['--tolerate-stale']]) {
+        const failure = run(...args);
+        assert.equal(failure.status, 1, failure.stderr + failure.stdout);
+        assert.match(failure.stderr, /AST scan failed: AST combination conflict: lost or unverified target \(voice-mode\)/);
+        assert.equal(readFileSync(target, 'utf8'), source, 'a refused combination writes nothing');
+        if (clean) assert.equal(readFileSync(clean, 'utf8'), cleanSource,
+          'a refused combination leaves unrelated files untouched');
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 console.log('[ast-patches.test] semantic ranges, gates, drift, backups and failure safety passed');

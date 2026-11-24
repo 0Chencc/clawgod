@@ -3,16 +3,14 @@
 // (globalThis.__clawgodPatches?.["classifier-timeout"]) and the
 // CLAWGOD_CLASSIFIER_TIMEOUT_MS read live in the injected patch code; the
 // helper only parses/validates the raw value and returns null on failure.
-// This test pins both the parser and the exact gate composition the patch
-// emits.
 //
-// Coverage (per PR review): legal values, illegal values (Infinity, overflow,
-// non-numeric, blank, unset), and the classifier-tuning-gate-off case.
+// Coverage: legal values, illegal values (Infinity, overflow, non-numeric,
+// blank, unset).
 // Run: node src/shared/patch.test.mjs  (wired into CI build-sources)
 
 import { classifierTimeoutFloor as floor } from './runtime-helpers.cjs';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -33,29 +31,6 @@ assert.equal(floor(''), null);
 assert.equal(floor('   '), null);
 assert.equal(floor(undefined), null);
 
-// Gate composition as the patch emits it: gate ? floor(env) : null, then
-// _ct===null ? formula : Math.max(formula, _ct). Null (gate off or parse
-// failure) keeps the original formula; a real number — a legitimate "0"
-// included — is applied as a floor. No 0 sentinel.
-const patchRes = (env, gateOn, formula) => {
-  const _ct = gateOn ? floor(env) : null;
-  return _ct === null ? formula : Math.max(formula, _ct);
-};
-// gate on, legal → floor applied (defeats the formula/cap when larger)
-assert.equal(patchRes('200000', true, 100), 200000);
-// gate on, floor below the formula → formula kept
-assert.equal(patchRes('5000', true, 80000), 80000);
-// gate on, legal "0" → neutral floor, formula kept (0 is not a failure)
-assert.equal(patchRes('0', true, 80000), 80000);
-assert.equal(patchRes('0', true, 0), 0);
-// gate off → env ignored even when legal
-assert.equal(patchRes('200000', false, 100), 100);
-// gate on, parse failure (null) → original formula kept
-assert.equal(patchRes('Infinity', true, 80000), 80000);
-assert.equal(patchRes('1e309', true, 80000), 80000);
-assert.equal(patchRes('', true, 80000), 80000);
-assert.equal(patchRes(undefined, true, 80000), 80000);
-
 console.log('[patch.test] classifierTimeoutFloor semantics ok');
 
 // Exercise the real patcher against legacy bundles and the 2.1.268 chunk
@@ -71,6 +46,7 @@ try {
   for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
     copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
   }
+  cpSync(new URL('./ast', import.meta.url), join(testDir, 'ast'), { recursive: true });
   for (const graph of [false, true]) {
     if (graph) mkdirSync(join(testDir, 'bunfs'));
     for (const fixture of ultraplanFixtures) {
@@ -181,6 +157,42 @@ try {
       }
     }
   }
+
+  // classifier-timeout: exercise the emitted gate composition itself, not a
+  // hand copy of it. Gate off or an unparseable floor keeps the original
+  // formula; a legitimate "0" is a real floor, not a sentinel.
+  for (const graph of [false, true]) {
+    rmSync(join(testDir, 'bunfs'), { recursive: true, force: true });
+    if (graph) mkdirSync(join(testDir, 'bunfs'));
+    const target = join(testDir, graph ? 'bunfs/classifier.js' : 'cli.original.cjs');
+    if (graph) writeFileSync(join(testDir, 'cli.original.cjs'), '// entry');
+    const classifierSource =
+      'function stage1(e){let n=Math.max(0,Math.ceil((e-50000)/50000));return Math.min(120000,60000+n*1e4)}';
+    writeFileSync(target, classifierSource);
+    const output = execFileSync(process.execPath, [join(testDir, 'patch.mjs')], { encoding: 'utf8' });
+    assert.match(output,
+      /Auto-mode classifier timeout override \(CLAWGOD_CLASSIFIER_TIMEOUT_MS\) \(1 replacement in 1 file\)/);
+    const patched = readFileSync(target, 'utf8');
+    assert.ok(patched.includes('classifierTimeoutFloor'), 'the emitted gate reads the shared helper');
+    const stage1 = (gate, envValue) => {
+      const env = envValue === undefined ? {} : { CLAWGOD_CLASSIFIER_TIMEOUT_MS: envValue };
+      const context = {
+        process: { env },
+        __clawgodHelpers: { classifierTimeoutFloor: floor },
+        ...(gate === undefined ? {} : { __clawgodPatches: { 'classifier-timeout': gate } }),
+      };
+      return runInNewContext(`${patched};stage1(1)`, context);
+    };
+    // e=1 lands on the formula base; gate on (default) with a legal floor.
+    assert.equal(stage1(undefined, '200000'), 200000);
+    assert.equal(stage1(true, '200000'), 200000);
+    // Gate off ignores the env even when legal.
+    assert.equal(stage1(false, '200000'), 60000);
+    // Unparseable or missing floors keep the original formula.
+    for (const bad of ['Infinity', '1e309', 'abc', '', undefined]) assert.equal(stage1(true, bad), 60000);
+    // "0" is a legitimate floor, not a failure sentinel.
+    assert.equal(stage1(true, '0'), 60000);
+  }
 } finally {
   rmSync(testDir, { recursive: true, force: true });
 }
@@ -208,6 +220,7 @@ try {
   for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
     copyFileSync(new URL(`./${name}`, import.meta.url), join(privacyDir, name));
   }
+  cpSync(new URL('./ast', import.meta.url), join(privacyDir, 'ast'), { recursive: true });
   let lastPatched;
   for (const graph of [false, true]) {
     if (graph) mkdirSync(join(privacyDir, 'bunfs'));
@@ -307,6 +320,7 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
     for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs', 'feature-gates.cjs', 'runtime-helpers.cjs']) {
       copyFileSync(new URL(`./${name}`, import.meta.url), join(testDir, name));
     }
+    cpSync(new URL('./ast', import.meta.url), join(testDir, 'ast'), { recursive: true });
     const source = `
       const kks = "[Tool result missing due to internal error]";
       function permissionErrors(history, ids) {
@@ -362,6 +376,7 @@ console.log('[patch.test] wiggly-dove collection, request capture, toggles, idem
       for (const name of ['patch.mjs', 'ast-patches.mjs', 'acorn.mjs']) {
         copyFileSync(new URL(`./${name}`, import.meta.url), join(dir, name));
       }
+      cpSync(new URL('./ast', import.meta.url), join(dir, 'ast'), { recursive: true });
       const entry = join(dir, 'cli.original.cjs');
       if (graph) { mkdirSync(join(dir, 'bunfs')); writeFileSync(entry, '// entry'); }
       const target = graph ? join(dir, 'bunfs/pairing.js') : entry;

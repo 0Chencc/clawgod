@@ -42,8 +42,12 @@ preserved when the feature is disabled.
 with its MIT license in `shared/acorn.LICENSE`. Its SHA-256 is
 `953573b8fdab71599749ea5f2b33d3e760c2116178f9423ee7458dbe39d59453`.
 Both installers embed the parser, matcher, and license, so patching and
-`--no-upgrade` require no npm dependency installation. Include these payloads
-when copying the patcher, and preserve them in installation rollback snapshots.
+`--no-upgrade` require no npm dependency installation. The matcher imports its
+patch modules from `shared/ast/`; build.js embeds every runtime `.mjs` there
+through the `{{CLAWGOD:ast/}}` placeholder, and the installers write them to
+`ast/` next to `ast-patches.mjs`. Include these payloads and the `ast/`
+directory when copying the patcher, and preserve them in installation rollback
+snapshots.
 
 ## Testing
 
